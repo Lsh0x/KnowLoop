@@ -1,6 +1,7 @@
 //! API request handlers
 
 use crate::api::{
+    workspace_handlers::{MilestonePlanSummary, MilestoneStepSummary, MilestoneTaskSummary},
     PaginatedResponse, PaginationParams, PriorityFilter, SearchFilter, StatusFilter, TagsFilter,
 };
 use crate::chat::ChatManager;
@@ -1546,7 +1547,9 @@ pub async fn unlink_plan_from_milestone(
 #[derive(Serialize)]
 pub struct MilestoneDetailsResponse {
     pub milestone: MilestoneNode,
+    pub plans: Vec<MilestonePlanSummary>,
     pub tasks: Vec<TaskNode>,
+    pub progress: MilestoneProgressResponse,
 }
 
 /// Get milestone details
@@ -1554,25 +1557,113 @@ pub async fn get_milestone(
     State(state): State<OrchestratorState>,
     Path(milestone_id): Path<Uuid>,
 ) -> Result<Json<MilestoneDetailsResponse>, AppError> {
-    let details = state
-        .orchestrator
-        .neo4j()
+    let neo4j = state.orchestrator.neo4j();
+
+    // 1. Get milestone + flat tasks (for backward compat tasks field)
+    let (milestone, flat_tasks) = neo4j
         .get_milestone_details(milestone_id)
         .await?
         .ok_or(AppError::NotFound("Milestone not found".into()))?;
 
+    // 2. Get tasks with plan info
+    let tasks_with_plan = neo4j.get_milestone_tasks_with_plans(milestone_id).await?;
+
+    // 3. Get progress stats
+    let (total, completed, in_progress, pending) =
+        neo4j.get_milestone_progress(milestone_id).await?;
+
+    let percentage = if total > 0 {
+        (completed as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // 4. Get all steps in one batch query
+    let mut steps_map = neo4j.get_milestone_steps_batch(milestone_id).await?;
+
+    // 5. Group tasks by plan and build hierarchical response
+    let mut plan_order: Vec<Uuid> = Vec::new();
+    let mut plan_map: std::collections::HashMap<
+        Uuid,
+        (String, Option<String>, Vec<MilestoneTaskSummary>),
+    > = std::collections::HashMap::new();
+
+    for twp in tasks_with_plan {
+        let steps = steps_map
+            .remove(&twp.task.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| MilestoneStepSummary {
+                id: s.id.to_string(),
+                order: s.order,
+                description: s.description,
+                status: serde_json::to_value(&s.status)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                verification: s.verification,
+            })
+            .collect();
+
+        let task_summary = MilestoneTaskSummary {
+            id: twp.task.id.to_string(),
+            title: twp.task.title,
+            description: twp.task.description,
+            status: serde_json::to_value(&twp.task.status)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
+            priority: twp.task.priority,
+            tags: twp.task.tags,
+            created_at: twp.task.created_at.to_rfc3339(),
+            completed_at: twp.task.completed_at.map(|dt| dt.to_rfc3339()),
+            steps,
+        };
+
+        let entry = plan_map.entry(twp.plan_id).or_insert_with(|| {
+            plan_order.push(twp.plan_id);
+            (twp.plan_title.clone(), twp.plan_status.clone(), vec![])
+        });
+        entry.2.push(task_summary);
+    }
+
+    let plans: Vec<MilestonePlanSummary> = plan_order
+        .into_iter()
+        .filter_map(|pid| {
+            let (title, status, tasks) = plan_map.remove(&pid)?;
+            Some(MilestonePlanSummary {
+                id: pid.to_string(),
+                title,
+                status,
+                tasks,
+            })
+        })
+        .collect();
+
     Ok(Json(MilestoneDetailsResponse {
-        milestone: details.0,
-        tasks: details.1,
+        milestone,
+        plans,
+        tasks: flat_tasks,
+        progress: MilestoneProgressResponse {
+            total,
+            completed,
+            in_progress,
+            pending,
+            percentage,
+        },
     }))
 }
 
 /// Milestone progress response
 #[derive(Serialize)]
 pub struct MilestoneProgressResponse {
-    pub completed: u32,
     pub total: u32,
-    pub percentage: f32,
+    pub completed: u32,
+    pub in_progress: u32,
+    pub pending: u32,
+    pub percentage: f64,
 }
 
 /// Get milestone progress
@@ -1580,21 +1671,23 @@ pub async fn get_milestone_progress(
     State(state): State<OrchestratorState>,
     Path(milestone_id): Path<Uuid>,
 ) -> Result<Json<MilestoneProgressResponse>, AppError> {
-    let (completed, total) = state
+    let (total, completed, in_progress, pending) = state
         .orchestrator
         .neo4j()
         .get_milestone_progress(milestone_id)
         .await?;
 
     let percentage = if total > 0 {
-        (completed as f32 / total as f32) * 100.0
+        (completed as f64 / total as f64) * 100.0
     } else {
         0.0
     };
 
     Ok(Json(MilestoneProgressResponse {
-        completed,
         total,
+        completed,
+        in_progress,
+        pending,
         percentage,
     }))
 }
@@ -1789,9 +1882,9 @@ pub async fn get_project_roadmap(
     let mut milestones = Vec::new();
     for m in milestone_nodes {
         let tasks = neo4j.get_milestone_tasks(m.id).await?;
-        let (completed, total) = neo4j.get_milestone_progress(m.id).await?;
+        let (total, completed, in_progress, pending) = neo4j.get_milestone_progress(m.id).await?;
         let percentage = if total > 0 {
-            (completed as f32 / total as f32) * 100.0
+            (completed as f64 / total as f64) * 100.0
         } else {
             0.0
         };
@@ -1799,8 +1892,10 @@ pub async fn get_project_roadmap(
             milestone: m,
             tasks,
             progress: MilestoneProgressResponse {
-                completed,
                 total,
+                completed,
+                in_progress,
+                pending,
                 percentage,
             },
         });
@@ -2043,6 +2138,253 @@ mod tests {
             .filter(|s| !s.is_empty())
             .map(uuid::Uuid::parse_str);
         assert!(parsed.is_none());
+    }
+
+    // ================================================================
+    // GET /api/milestones/{id} — enriched milestone detail
+    // ================================================================
+
+    use crate::api::routes::create_router;
+    use crate::neo4j::models::MilestoneStatus;
+    use crate::orchestrator::{FileWatcher, Orchestrator};
+    use crate::test_helpers::{
+        mock_app_state, test_bearer_token, test_milestone, test_plan, test_project, test_step,
+        test_task_titled,
+    };
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode as HttpStatus};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    /// Create an authenticated GET request
+    fn auth_get(uri: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header("authorization", test_bearer_token())
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// Build a test router pre-seeded with a project milestone + plan + tasks + steps
+    async fn test_app_with_project_milestone() -> (axum::Router, uuid::Uuid, uuid::Uuid, uuid::Uuid)
+    {
+        let app_state = mock_app_state();
+
+        // Create a project
+        let project = test_project();
+        app_state.neo4j.create_project(&project).await.unwrap();
+
+        // Create a project milestone
+        let milestone = test_milestone(project.id, "Q1 Release");
+        app_state.neo4j.create_milestone(&milestone).await.unwrap();
+
+        // Create a plan linked to project
+        let plan = test_plan();
+        app_state.neo4j.create_plan(&plan).await.unwrap();
+
+        // Create two tasks and link them to the milestone
+        let task1 = test_task_titled("Backend API");
+        let task2 = test_task_titled("Frontend UI");
+        app_state.neo4j.create_task(plan.id, &task1).await.unwrap();
+        app_state.neo4j.create_task(plan.id, &task2).await.unwrap();
+        app_state
+            .neo4j
+            .add_task_to_milestone(milestone.id, task1.id)
+            .await
+            .unwrap();
+        app_state
+            .neo4j
+            .add_task_to_milestone(milestone.id, task2.id)
+            .await
+            .unwrap();
+
+        // Add steps to task1
+        let step1 = test_step(0, "Create endpoint");
+        let step2 = test_step(1, "Add tests");
+        app_state.neo4j.create_step(task1.id, &step1).await.unwrap();
+        app_state.neo4j.create_step(task1.id, &step2).await.unwrap();
+
+        let orchestrator = Arc::new(Orchestrator::new(app_state).await.unwrap());
+        let watcher = Arc::new(tokio::sync::RwLock::new(FileWatcher::new(
+            orchestrator.clone(),
+        )));
+        let state = Arc::new(ServerState {
+            orchestrator,
+            watcher,
+            chat_manager: None,
+            event_bus: Arc::new(crate::events::HybridEmitter::new(Arc::new(
+                crate::events::EventBus::default(),
+            ))),
+            nats_emitter: None,
+            auth_config: Some(crate::test_helpers::test_auth_config()),
+            serve_frontend: false,
+            frontend_path: "./dist".to_string(),
+            setup_completed: true,
+            server_port: 6600,
+            public_url: None,
+            ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+        });
+        (create_router(state), milestone.id, task1.id, task2.id)
+    }
+
+    #[tokio::test]
+    async fn test_get_milestone_returns_enriched_response() {
+        let (app, milestone_id, task1_id, task2_id) = test_app_with_project_milestone().await;
+        let uri = format!("/api/milestones/{}", milestone_id);
+        let resp = app.oneshot(auth_get(&uri)).await.unwrap();
+
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Milestone field
+        assert_eq!(json["milestone"]["id"], milestone_id.to_string());
+        assert_eq!(json["milestone"]["title"], "Q1 Release");
+
+        // Plans array — tasks are grouped under their plan
+        let plans = json["plans"].as_array().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0]["id"].is_string());
+        assert!(plans[0]["title"].is_string());
+
+        // Each plan has its tasks
+        let plan_tasks = plans[0]["tasks"].as_array().unwrap();
+        assert_eq!(plan_tasks.len(), 2);
+        let task_ids: Vec<String> = plan_tasks
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(task_ids.contains(&task1_id.to_string()));
+        assert!(task_ids.contains(&task2_id.to_string()));
+
+        // Steps are included in task1
+        let t1 = plan_tasks
+            .iter()
+            .find(|t| t["id"].as_str().unwrap() == task1_id.to_string())
+            .unwrap();
+        let steps = t1["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2);
+        assert!(steps[0]["description"].is_string());
+
+        // Flat tasks array for backward compat
+        let flat_tasks = json["tasks"].as_array().unwrap();
+        assert_eq!(flat_tasks.len(), 2);
+
+        // Progress
+        assert_eq!(json["progress"]["total"], 2);
+        assert_eq!(json["progress"]["completed"], 0);
+        assert_eq!(json["progress"]["in_progress"], 0);
+        assert_eq!(json["progress"]["pending"], 2);
+        assert_eq!(json["progress"]["percentage"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_milestone_not_found() {
+        let (app, _, _, _) = test_app_with_project_milestone().await;
+        let uri = format!("/api/milestones/{}", uuid::Uuid::new_v4());
+        let resp = app.oneshot(auth_get(&uri)).await.unwrap();
+
+        assert_eq!(resp.status(), HttpStatus::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_milestone_invalid_uuid() {
+        let (app, _, _, _) = test_app_with_project_milestone().await;
+        let resp = app
+            .oneshot(auth_get("/api/milestones/not-a-uuid"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_milestone_progress_endpoint() {
+        let (app, milestone_id, _, _) = test_app_with_project_milestone().await;
+        let uri = format!("/api/milestones/{}/progress", milestone_id);
+        let resp = app.oneshot(auth_get(&uri)).await.unwrap();
+
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["total"], 2);
+        assert_eq!(json["completed"], 0);
+        assert_eq!(json["in_progress"], 0);
+        assert_eq!(json["pending"], 2);
+        assert_eq!(json["percentage"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_milestone_progress_empty_milestone() {
+        let (app, _, _, _) = test_app_with_project_milestone().await;
+        // Non-existent milestone returns 0/0 progress (not an error)
+        let uri = format!("/api/milestones/{}/progress", uuid::Uuid::new_v4());
+        let resp = app.oneshot(auth_get(&uri)).await.unwrap();
+
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["total"], 0);
+        assert_eq!(json["percentage"], 0.0);
+    }
+
+    #[test]
+    fn test_milestone_details_response_serialization() {
+        let milestone = MilestoneNode {
+            id: uuid::Uuid::new_v4(),
+            project_id: uuid::Uuid::new_v4(),
+            title: "Test".to_string(),
+            description: Some("Description".to_string()),
+            status: MilestoneStatus::Open,
+            target_date: None,
+            closed_at: None,
+            created_at: chrono::Utc::now(),
+        };
+        let response = MilestoneDetailsResponse {
+            milestone,
+            plans: vec![],
+            tasks: vec![],
+            progress: MilestoneProgressResponse {
+                total: 5,
+                completed: 3,
+                in_progress: 1,
+                pending: 1,
+                percentage: 60.0,
+            },
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["progress"]["total"], 5);
+        assert_eq!(json["progress"]["completed"], 3);
+        assert_eq!(json["progress"]["in_progress"], 1);
+        assert_eq!(json["progress"]["pending"], 1);
+        assert_eq!(json["progress"]["percentage"], 60.0);
+        assert!(json["plans"].is_array());
+        assert!(json["tasks"].is_array());
+    }
+
+    #[test]
+    fn test_milestone_progress_response_fields() {
+        let response = MilestoneProgressResponse {
+            total: 10,
+            completed: 4,
+            in_progress: 3,
+            pending: 3,
+            percentage: 40.0,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["total"], 10);
+        assert_eq!(json["completed"], 4);
+        assert_eq!(json["in_progress"], 3);
+        assert_eq!(json["pending"], 3);
+        assert_eq!(json["percentage"], 40.0);
     }
 
     // ================================================================
