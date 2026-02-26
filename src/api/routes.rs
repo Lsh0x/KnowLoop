@@ -322,12 +322,40 @@ fn protected_routes() -> Router<OrchestratorState> {
             post(handlers::add_decision),
         )
         .route(
+            "/api/decisions/affecting",
+            get(handlers::get_decisions_affecting),
+        )
+        .route(
+            "/api/decisions/timeline",
+            get(handlers::get_decision_timeline),
+        )
+        .route(
             "/api/decisions/{decision_id}",
             get(handlers::get_decision)
                 .patch(handlers::update_decision)
                 .delete(handlers::delete_decision),
         )
         .route("/api/decisions/search", get(handlers::search_decisions))
+        .route(
+            "/api/decisions/search-semantic",
+            get(handlers::search_decisions_semantic),
+        )
+        // Decision Affects
+        .route(
+            "/api/decisions/{decision_id}/affects",
+            post(handlers::add_decision_affects)
+                .get(handlers::list_decision_affects)
+                .delete(handlers::remove_decision_affects_query),
+        )
+        .route(
+            "/api/decisions/{decision_id}/affects/{entity_type}/{entity_id}",
+            delete(handlers::remove_decision_affects),
+        )
+        // Decision Supersedes
+        .route(
+            "/api/decisions/{new_id}/supersedes/{old_id}",
+            post(handlers::supersede_decision),
+        )
         // Sync
         .route("/api/sync", post(handlers::sync_directory))
         // Releases
@@ -381,6 +409,26 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/plans/{plan_id}/commits",
             get(handlers::get_plan_commits).post(handlers::link_commit_to_plan),
+        )
+        // TOUCHES — Commit ↔ File queries
+        .route(
+            "/api/commits/{commit_sha}/files",
+            get(handlers::get_commit_files),
+        )
+        .route("/api/files/history", get(handlers::get_file_history))
+        // CO_CHANGED — File coupling queries
+        .route(
+            "/api/projects/{project_id}/co-changes",
+            get(handlers::get_co_change_graph),
+        )
+        .route(
+            "/api/files/co-changers",
+            get(handlers::get_file_co_changers),
+        )
+        // Backfill TOUCHES from git history
+        .route(
+            "/api/projects/{project_slug}/backfill-touches",
+            post(handlers::backfill_commit_touches),
         )
         // Webhooks (protected — /api prefix)
         .route("/api/wake", post(handlers::wake))
@@ -461,6 +509,19 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/code/node-importance",
             get(code_handlers::get_node_importance),
+        )
+        // Churn hotspots, knowledge gaps, risk assessment (T5.5, T5.6, T5.7)
+        .route(
+            "/api/code/hotspots",
+            get(code_handlers::get_change_hotspots),
+        )
+        .route(
+            "/api/code/knowledge-gaps",
+            get(code_handlers::get_knowledge_gaps),
+        )
+        .route(
+            "/api/code/risk-assessment",
+            get(code_handlers::get_risk_assessment),
         )
         // ================================================================
         // Implementation Planner
@@ -549,6 +610,16 @@ fn protected_routes() -> Router<OrchestratorState> {
             "/api/notes/propagated",
             get(note_handlers::get_propagated_notes),
         )
+        // Unified context knowledge (notes + decisions + commits)
+        .route(
+            "/api/notes/context-knowledge",
+            get(note_handlers::get_context_knowledge),
+        )
+        // Enriched propagated knowledge (notes + decisions + relation stats)
+        .route(
+            "/api/notes/propagated-knowledge",
+            get(note_handlers::get_propagated_knowledge),
+        )
         // Entity notes (direct only)
         .route(
             "/api/entities/{entity_type}/{entity_id}/notes",
@@ -579,6 +650,17 @@ fn protected_routes() -> Router<OrchestratorState> {
             get(note_handlers::get_backfill_synapses_status),
         )
         // ================================================================
+        // Admin — Decision Embedding Backfill
+        // ================================================================
+        .route(
+            "/api/admin/backfill-decision-embeddings",
+            post(handlers::backfill_decision_embeddings),
+        )
+        .route(
+            "/api/admin/backfill-discussed",
+            post(handlers::backfill_discussed),
+        )
+        // ================================================================
         // Meilisearch Maintenance
         // ================================================================
         .route(
@@ -599,6 +681,17 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/admin/cleanup-sync-data",
             post(handlers::cleanup_sync_data),
+        )
+        // ================================================================
+        // Admin — Knowledge Fabric
+        // ================================================================
+        .route(
+            "/api/admin/update-fabric-scores",
+            post(handlers::update_fabric_scores),
+        )
+        .route(
+            "/api/admin/bootstrap-knowledge-fabric",
+            post(handlers::bootstrap_knowledge_fabric),
         )
         // ================================================================
         // Workspaces
@@ -720,6 +813,11 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/chat/sessions/{id}/messages",
             get(chat_handlers::list_messages),
+        )
+        // DISCUSSED relations (ChatSession → Entity)
+        .route(
+            "/api/chat/sessions/{id}/discussed",
+            post(chat_handlers::add_discussed).get(chat_handlers::get_session_entities),
         )
         // Chat permission config (runtime GET/PUT)
         .route(

@@ -90,6 +90,13 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "update_decision" => Some(("decision", "update")),
         "delete_decision" => Some(("decision", "delete")),
         "search_decisions" => Some(("decision", "search")),
+        "search_decisions_semantic" => Some(("decision", "search_semantic")),
+        "add_decision_affects" => Some(("decision", "add_affects")),
+        "remove_decision_affects" => Some(("decision", "remove_affects")),
+        "list_decision_affects" => Some(("decision", "list_affects")),
+        "get_decisions_affecting" => Some(("decision", "get_affecting")),
+        "supersede_decision" => Some(("decision", "supersede")),
+        "get_decision_timeline" => Some(("decision", "get_timeline")),
 
         // Constraint
         "list_constraints" => Some(("constraint", "list")),
@@ -143,6 +150,7 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "get_notes_needing_review" => Some(("note", "get_needing_review")),
         "list_project_notes" => Some(("note", "list_project")),
         "get_propagated_notes" => Some(("note", "get_propagated")),
+        "get_propagated_knowledge" => Some(("note", "get_propagated_knowledge")),
         "get_entity_notes" => Some(("note", "get_entity")),
 
         // Workspace
@@ -236,6 +244,7 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "reinforce_neurons" => Some(("admin", "reinforce_neurons")),
         "decay_synapses" => Some(("admin", "decay_synapses")),
         "backfill_synapses" => Some(("admin", "backfill_synapses")),
+        "backfill_decision_embeddings" => Some(("admin", "backfill_decision_embeddings")),
 
         _ => None,
     }
@@ -364,23 +373,31 @@ fn step_tool() -> ToolDefinition {
 fn decision_tool() -> ToolDefinition {
     ToolDefinition {
         name: "decision".to_string(),
-        description: "Manage architectural decisions. Actions: add, get, update, delete, search"
+        description: "Manage architectural decisions. Actions: add, get, update, delete, search, search_semantic, add_affects, remove_affects, list_affects, get_affecting, supersede, get_timeline"
             .to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["add", "get", "update", "delete", "search"],
+                    "enum": ["add", "get", "update", "delete", "search", "search_semantic", "add_affects", "remove_affects", "list_affects", "get_affecting", "supersede", "get_timeline"],
                     "description": "Operation to perform"
                 },
-                "decision_id": {"type": "string", "description": "Decision UUID (get/update/delete)"},
-                "task_id": {"type": "string", "description": "Task UUID (add)"},
+                "decision_id": {"type": "string", "description": "Decision UUID (get/update/delete/add_affects/remove_affects/list_affects)"},
+                "task_id": {"type": "string", "description": "Task UUID (add/get_timeline)"},
                 "description": {"type": "string", "description": "Decision description (add/update)"},
                 "rationale": {"type": "string", "description": "Rationale (add/update)"},
                 "alternatives": {"type": "array", "items": {"type": "string"}, "description": "Alternatives considered (add)"},
                 "chosen_option": {"type": "string", "description": "Chosen option (add/update)"},
-                "query": {"type": "string", "description": "Search query (search)"}
+                "status": {"type": "string", "description": "New status (update): proposed, accepted, deprecated, superseded"},
+                "query": {"type": "string", "description": "Search query (search/search_semantic)"},
+                "project_id": {"type": "string", "description": "Project UUID filter (search_semantic — post-query filtering)"},
+                "entity_type": {"type": "string", "description": "Entity type (add_affects/remove_affects/get_affecting)"},
+                "entity_id": {"type": "string", "description": "Entity identifier (add_affects/remove_affects)"},
+                "impact_description": {"type": "string", "description": "Description of how the decision impacts the entity (add_affects)"},
+                "superseded_by_id": {"type": "string", "description": "Decision UUID being superseded (supersede)"},
+                "from": {"type": "string", "description": "Start date ISO filter (get_timeline)"},
+                "to": {"type": "string", "description": "End date ISO filter (get_timeline)"}
             })),
             required: Some(vec!["action".to_string()]),
         },
@@ -467,23 +484,25 @@ fn milestone_tool() -> ToolDefinition {
 fn commit_tool() -> ToolDefinition {
     ToolDefinition {
         name: "commit".to_string(),
-        description: "Register and link git commits. Actions: create, link_to_task, link_to_plan, get_task_commits, get_plan_commits".to_string(),
+        description: "Register and link git commits. Actions: create, link_to_task, link_to_plan, get_task_commits, get_plan_commits, get_commit_files, get_file_history".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["create", "link_to_task", "link_to_plan", "get_task_commits", "get_plan_commits"],
+                    "enum": ["create", "link_to_task", "link_to_plan", "get_task_commits", "get_plan_commits", "get_commit_files", "get_file_history"],
                     "description": "Operation to perform"
                 },
-                "sha": {"type": "string", "description": "Commit SHA (create/link_to_task/link_to_plan)"},
+                "sha": {"type": "string", "description": "Commit SHA (create/link_to_task/link_to_plan/get_commit_files)"},
                 "message": {"type": "string", "description": "Commit message (create)"},
                 "author": {"type": "string", "description": "Author name (create)"},
                 "files_changed": {"type": "array", "items": {"type": "string"}, "description": "Files changed (create)"},
                 "project_id": {"type": "string", "description": "Project UUID for incremental sync (create)"},
                 "task_id": {"type": "string", "description": "Task UUID (link_to_task/get_task_commits)"},
                 "plan_id": {"type": "string", "description": "Plan UUID (link_to_plan/get_plan_commits)"},
-                "commit_sha": {"type": "string", "description": "Alias for sha (link_to_task/link_to_plan)"}
+                "commit_sha": {"type": "string", "description": "Alias for sha (link_to_task/link_to_plan)"},
+                "file_path": {"type": "string", "description": "File path (get_file_history)"},
+                "limit": {"type": "integer", "description": "Max results (get_file_history)"}
             })),
             required: Some(vec!["action".to_string()]),
         },
@@ -493,13 +512,13 @@ fn commit_tool() -> ToolDefinition {
 fn note_tool() -> ToolDefinition {
     ToolDefinition {
         name: "note".to_string(),
-        description: "Manage knowledge notes. Actions: list, create, get, update, delete, search, search_semantic, confirm, invalidate, supersede, link_to_entity, unlink_from_entity, get_context, get_needing_review, list_project, get_propagated, get_entity".to_string(),
+        description: "Manage knowledge notes. Actions: list, create, get, update, delete, search, search_semantic, confirm, invalidate, supersede, link_to_entity, unlink_from_entity, get_context, get_needing_review, list_project, get_propagated, get_entity, get_context_knowledge, get_propagated_knowledge".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["list", "create", "get", "update", "delete", "search", "search_semantic", "confirm", "invalidate", "supersede", "link_to_entity", "unlink_from_entity", "get_context", "get_needing_review", "list_project", "get_propagated", "get_entity"],
+                    "enum": ["list", "create", "get", "update", "delete", "search", "search_semantic", "confirm", "invalidate", "supersede", "link_to_entity", "unlink_from_entity", "get_context", "get_needing_review", "list_project", "get_propagated", "get_entity", "get_context_knowledge", "get_propagated_knowledge"],
                     "description": "Operation to perform"
                 },
                 "note_id": {"type": "string", "description": "Note UUID"},
@@ -639,13 +658,13 @@ fn component_tool() -> ToolDefinition {
 fn chat_tool() -> ToolDefinition {
     ToolDefinition {
         name: "chat".to_string(),
-        description: "Manage chat sessions. Actions: list_sessions, get_session, delete_session, send_message, list_messages".to_string(),
+        description: "Manage chat sessions. Actions: list_sessions, get_session, delete_session, send_message, list_messages, add_discussed, get_session_entities".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["list_sessions", "get_session", "delete_session", "send_message", "list_messages"],
+                    "enum": ["list_sessions", "get_session", "delete_session", "send_message", "list_messages", "add_discussed", "get_session_entities"],
                     "description": "Operation to perform"
                 },
                 "session_id": {"type": "string", "description": "Session UUID"},
@@ -656,6 +675,8 @@ fn chat_tool() -> ToolDefinition {
                 "permission_mode": {"type": "string", "description": "Permission mode (send_message)"},
                 "workspace_slug": {"type": "string", "description": "Workspace slug (send_message)"},
                 "add_dirs": {"type": "array", "items": {"type": "string"}, "description": "Additional directories (send_message)"},
+                "entities": {"type": "array", "items": {"type": "object"}, "description": "Entities to mark as discussed (add_discussed): [{entity_type, entity_id}]"},
+                "project_id": {"type": "string", "description": "Project UUID (get_session_entities — scoping filter)"},
                 "limit": {"type": "integer", "description": "Max items"},
                 "offset": {"type": "integer", "description": "Skip items"}
             })),
@@ -699,13 +720,13 @@ fn feature_graph_tool() -> ToolDefinition {
 fn code_tool() -> ToolDefinition {
     ToolDefinition {
         name: "code".to_string(),
-        description: "Explore and analyze code. Actions: search, search_project, search_workspace, get_file_symbols, find_references, get_file_dependencies, get_call_graph, analyze_impact, get_architecture, find_similar, find_trait_implementations, find_type_traits, get_impl_blocks, get_communities, get_health, get_node_importance, plan_implementation".to_string(),
+        description: "Explore and analyze code. Actions: search, search_project, search_workspace, get_file_symbols, find_references, get_file_dependencies, get_call_graph, analyze_impact, get_architecture, find_similar, find_trait_implementations, find_type_traits, get_impl_blocks, get_communities, get_health, get_node_importance, plan_implementation, get_co_change_graph, get_file_co_changers".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["search", "search_project", "search_workspace", "get_file_symbols", "find_references", "get_file_dependencies", "get_call_graph", "analyze_impact", "get_architecture", "find_similar", "find_trait_implementations", "find_type_traits", "get_impl_blocks", "get_communities", "get_health", "get_node_importance", "plan_implementation"],
+                    "enum": ["search", "search_project", "search_workspace", "get_file_symbols", "find_references", "get_file_dependencies", "get_call_graph", "analyze_impact", "get_architecture", "find_similar", "find_trait_implementations", "find_type_traits", "get_impl_blocks", "get_communities", "get_health", "get_node_importance", "plan_implementation", "get_co_change_graph", "get_file_co_changers"],
                     "description": "Operation to perform"
                 },
                 "query": {"type": "string", "description": "Search query (search/search_project/search_workspace)"},
@@ -737,23 +758,24 @@ fn code_tool() -> ToolDefinition {
 fn admin_tool() -> ToolDefinition {
     ToolDefinition {
         name: "admin".to_string(),
-        description: "Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses".to_string(),
+        description: "Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["sync_directory", "start_watch", "stop_watch", "watch_status", "meilisearch_stats", "delete_meilisearch_orphans", "cleanup_cross_project_calls", "cleanup_sync_data", "update_staleness_scores", "update_energy_scores", "search_neurons", "reinforce_neurons", "decay_synapses", "backfill_synapses"],
+                    "enum": ["sync_directory", "start_watch", "stop_watch", "watch_status", "meilisearch_stats", "delete_meilisearch_orphans", "cleanup_cross_project_calls", "cleanup_sync_data", "update_staleness_scores", "update_energy_scores", "search_neurons", "reinforce_neurons", "decay_synapses", "backfill_synapses", "backfill_decision_embeddings", "backfill_touches", "backfill_discussed", "update_fabric_scores", "bootstrap_knowledge_fabric"],
                     "description": "Operation to perform"
                 },
                 "path": {"type": "string", "description": "Directory path (sync_directory/start_watch)"},
-                "project_id": {"type": "string", "description": "Project UUID (sync_directory/start_watch/update_staleness_scores/update_energy_scores)"},
+                "project_id": {"type": "string", "description": "Project UUID (sync_directory/start_watch/update_staleness_scores/update_energy_scores/update_fabric_scores/bootstrap_knowledge_fabric)"},
                 "query": {"type": "string", "description": "Search query (search_neurons)"},
-                "source_note_id": {"type": "string", "description": "Source note UUID (reinforce_neurons)"},
-                "target_note_id": {"type": "string", "description": "Target note UUID (reinforce_neurons)"},
-                "strength_delta": {"type": "number", "description": "Strength change (reinforce_neurons)"},
+                "note_ids": {"type": "array", "items": {"type": "string"}, "description": "Note UUIDs to co-activate (reinforce_neurons, min 2)"},
+                "energy_boost": {"type": "number", "description": "Energy boost amount 0-1 (reinforce_neurons, default 0.2)"},
+                "synapse_boost": {"type": "number", "description": "Synapse weight boost 0-1 (reinforce_neurons, default 0.05)"},
                 "min_strength": {"type": "number", "description": "Min strength filter (search_neurons)"},
-                "decay_factor": {"type": "number", "description": "Decay factor (decay_synapses)"},
+                "decay_amount": {"type": "number", "description": "Amount to subtract from each synapse weight (decay_synapses, default 0.01)"},
+                "prune_threshold": {"type": "number", "description": "Prune synapses below this weight (decay_synapses, default 0.1)"},
                 "limit": {"type": "integer", "description": "Max items (search_neurons)"}
             })),
             required: Some(vec!["action".to_string()]),
@@ -910,6 +932,7 @@ mod tests {
             "update_decision",
             "delete_decision",
             "search_decisions",
+            "search_decisions_semantic",
             "search_workspace_code",
             "sync_directory",
             "start_watch",

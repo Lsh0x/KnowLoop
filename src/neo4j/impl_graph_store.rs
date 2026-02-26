@@ -980,13 +980,108 @@ impl GraphStore for Neo4jClient {
         description: Option<String>,
         rationale: Option<String>,
         chosen_option: Option<String>,
+        status: Option<DecisionStatus>,
     ) -> anyhow::Result<()> {
-        self.update_decision(decision_id, description, rationale, chosen_option)
+        self.update_decision(decision_id, description, rationale, chosen_option, status)
             .await
     }
 
     async fn delete_decision(&self, decision_id: Uuid) -> anyhow::Result<()> {
         self.delete_decision(decision_id).await
+    }
+
+    async fn get_decisions_for_entity(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<DecisionNode>> {
+        self.get_decisions_for_entity(entity_type, entity_id, limit)
+            .await
+    }
+
+    async fn set_decision_embedding(
+        &self,
+        decision_id: Uuid,
+        embedding: &[f32],
+        model: &str,
+    ) -> anyhow::Result<()> {
+        self.set_decision_embedding(decision_id, embedding, model)
+            .await
+    }
+
+    async fn get_decision_embedding(&self, decision_id: Uuid) -> anyhow::Result<Option<Vec<f32>>> {
+        self.get_decision_embedding(decision_id).await
+    }
+
+    async fn get_decisions_without_embedding(&self) -> anyhow::Result<Vec<(Uuid, String, String)>> {
+        self.get_decisions_without_embedding().await
+    }
+
+    async fn search_decisions_by_vector(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Vec<(DecisionNode, f64)>> {
+        self.search_decisions_by_vector(query_embedding, limit, project_id)
+            .await
+    }
+
+    async fn get_decisions_affecting(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        status_filter: Option<&str>,
+    ) -> anyhow::Result<Vec<DecisionNode>> {
+        self.get_decisions_affecting(entity_type, entity_id, status_filter)
+            .await
+    }
+
+    async fn add_decision_affects(
+        &self,
+        decision_id: Uuid,
+        entity_type: &str,
+        entity_id: &str,
+        impact_description: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.add_decision_affects(decision_id, entity_type, entity_id, impact_description)
+            .await
+    }
+
+    async fn remove_decision_affects(
+        &self,
+        decision_id: Uuid,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> anyhow::Result<()> {
+        self.remove_decision_affects(decision_id, entity_type, entity_id)
+            .await
+    }
+
+    async fn list_decision_affects(
+        &self,
+        decision_id: Uuid,
+    ) -> anyhow::Result<Vec<AffectsRelation>> {
+        self.list_decision_affects(decision_id).await
+    }
+
+    async fn supersede_decision(
+        &self,
+        new_decision_id: Uuid,
+        old_decision_id: Uuid,
+    ) -> anyhow::Result<()> {
+        self.supersede_decision(new_decision_id, old_decision_id)
+            .await
+    }
+
+    async fn get_decision_timeline(
+        &self,
+        task_id: Option<Uuid>,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> anyhow::Result<Vec<DecisionTimelineEntry>> {
+        self.get_decision_timeline(task_id, from, to).await
     }
 
     // ========================================================================
@@ -1058,6 +1153,67 @@ impl GraphStore for Neo4jClient {
 
     async fn delete_commit(&self, hash: &str) -> anyhow::Result<()> {
         self.delete_commit(hash).await
+    }
+
+    // ========================================================================
+    // TOUCHES operations (Commit → File)
+    // ========================================================================
+
+    async fn create_commit_touches(
+        &self,
+        commit_hash: &str,
+        files: &[FileChangedInfo],
+    ) -> anyhow::Result<()> {
+        self.create_commit_touches(commit_hash, files).await
+    }
+
+    async fn get_commit_files(&self, commit_hash: &str) -> anyhow::Result<Vec<CommitFileInfo>> {
+        self.get_commit_files(commit_hash).await
+    }
+
+    async fn get_file_history(
+        &self,
+        file_path: &str,
+        limit: Option<i64>,
+    ) -> anyhow::Result<Vec<FileHistoryEntry>> {
+        self.get_file_history(file_path, limit).await
+    }
+
+    // ========================================================================
+    // CO_CHANGED operations (File ↔ File)
+    // ========================================================================
+
+    async fn compute_co_changed(
+        &self,
+        project_id: Uuid,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        min_count: i64,
+        max_relations: i64,
+    ) -> anyhow::Result<i64> {
+        self.compute_co_changed(project_id, since, min_count, max_relations)
+            .await
+    }
+
+    async fn update_project_co_change_timestamp(&self, id: Uuid) -> anyhow::Result<()> {
+        self.update_project_co_change_timestamp(id).await
+    }
+
+    async fn get_co_change_graph(
+        &self,
+        project_id: Uuid,
+        min_count: i64,
+        limit: i64,
+    ) -> anyhow::Result<Vec<CoChangePair>> {
+        self.get_co_change_graph(project_id, min_count, limit).await
+    }
+
+    async fn get_file_co_changers(
+        &self,
+        file_path: &str,
+        min_count: i64,
+        limit: i64,
+    ) -> anyhow::Result<Vec<CoChanger>> {
+        self.get_file_co_changers(file_path, min_count, limit).await
     }
 
     // ========================================================================
@@ -1410,8 +1566,9 @@ impl GraphStore for Neo4jClient {
         entity_id: &str,
         max_depth: u32,
         min_score: f64,
+        relation_types: Option<&[String]>,
     ) -> anyhow::Result<Vec<PropagatedNote>> {
-        self.get_propagated_notes(entity_type, entity_id, max_depth, min_score)
+        self.get_propagated_notes(entity_type, entity_id, max_depth, min_score, relation_types)
             .await
     }
 
@@ -1582,6 +1739,30 @@ impl GraphStore for Neo4jClient {
         self.list_notes_needing_synapses(limit, offset).await
     }
 
+    async fn create_cross_entity_synapses(
+        &self,
+        source_id: Uuid,
+        neighbors: &[(Uuid, f64)],
+    ) -> anyhow::Result<usize> {
+        self.create_cross_entity_synapses(source_id, neighbors)
+            .await
+    }
+
+    async fn get_cross_entity_synapses(
+        &self,
+        node_id: Uuid,
+    ) -> anyhow::Result<Vec<(Uuid, f64, String)>> {
+        self.get_cross_entity_synapses(node_id).await
+    }
+
+    async fn list_decisions_needing_synapses(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<DecisionNode>, usize)> {
+        self.list_decisions_needing_synapses(limit, offset).await
+    }
+
     // ========================================================================
     // Chat session operations
     // ========================================================================
@@ -1691,6 +1872,30 @@ impl GraphStore for Neo4jClient {
 
     async fn delete_chat_events(&self, session_id: Uuid) -> anyhow::Result<()> {
         self.delete_chat_events(session_id).await
+    }
+
+    // ========================================================================
+    // Chat DISCUSSED relations
+    // ========================================================================
+
+    async fn add_discussed(
+        &self,
+        session_id: Uuid,
+        entities: &[(String, String)],
+    ) -> anyhow::Result<usize> {
+        self.add_discussed(session_id, entities).await
+    }
+
+    async fn get_session_entities(
+        &self,
+        session_id: Uuid,
+        project_id: Option<Uuid>,
+    ) -> anyhow::Result<Vec<DiscussedEntity>> {
+        self.get_session_entities(session_id, project_id).await
+    }
+
+    async fn backfill_discussed(&self) -> anyhow::Result<(usize, usize, usize)> {
+        self.backfill_discussed().await
     }
 
     // ========================================================================
@@ -1867,6 +2072,92 @@ impl GraphStore for Neo4jClient {
         updates: &[crate::graph::models::FunctionAnalyticsUpdate],
     ) -> anyhow::Result<()> {
         self.batch_update_function_analytics(updates).await
+    }
+
+    async fn batch_update_fabric_file_analytics(
+        &self,
+        updates: &[crate::graph::models::FabricFileAnalyticsUpdate],
+    ) -> anyhow::Result<()> {
+        self.batch_update_fabric_file_analytics(updates).await
+    }
+
+    async fn get_project_synapse_edges(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<(String, String, f64)>> {
+        self.get_project_synapse_edges(project_id).await
+    }
+
+    async fn get_neural_metrics(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::models::NeuralMetrics> {
+        self.get_neural_metrics(project_id).await
+    }
+
+    // T5.5 — Churn score
+    async fn compute_churn_scores(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileChurnScore>> {
+        self.compute_churn_scores(project_id).await
+    }
+
+    async fn batch_update_churn_scores(
+        &self,
+        updates: &[crate::neo4j::models::FileChurnScore],
+    ) -> anyhow::Result<()> {
+        self.batch_update_churn_scores(updates).await
+    }
+
+    async fn get_top_hotspots(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileChurnScore>> {
+        self.get_top_hotspots(project_id, limit).await
+    }
+
+    // T5.6 — Knowledge density
+    async fn compute_knowledge_density(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileKnowledgeDensity>> {
+        self.compute_knowledge_density(project_id).await
+    }
+
+    async fn batch_update_knowledge_density(
+        &self,
+        updates: &[crate::neo4j::models::FileKnowledgeDensity],
+    ) -> anyhow::Result<()> {
+        self.batch_update_knowledge_density(updates).await
+    }
+
+    async fn get_top_knowledge_gaps(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileKnowledgeDensity>> {
+        self.get_top_knowledge_gaps(project_id, limit).await
+    }
+
+    // T5.7 — Risk score composite
+    async fn compute_risk_scores(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileRiskScore>> {
+        self.compute_risk_scores(project_id).await
+    }
+
+    async fn batch_update_risk_scores(
+        &self,
+        updates: &[crate::neo4j::models::FileRiskScore],
+    ) -> anyhow::Result<()> {
+        self.batch_update_risk_scores(updates).await
+    }
+
+    async fn get_risk_summary(&self, project_id: Uuid) -> anyhow::Result<serde_json::Value> {
+        self.get_risk_summary(project_id).await
     }
 
     async fn health_check(&self) -> anyhow::Result<bool> {

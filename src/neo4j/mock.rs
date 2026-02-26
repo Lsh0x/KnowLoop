@@ -2245,6 +2245,10 @@ impl GraphStore for MockGraphStore {
                         community_label: None,
                         in_degree,
                         out_degree,
+                        fabric_pagerank: None,
+                        fabric_betweenness: None,
+                        fabric_community_id: None,
+                        fabric_community_label: None,
                     }))
                 } else {
                     // Node exists but no GDS metrics
@@ -2258,6 +2262,10 @@ impl GraphStore for MockGraphStore {
                         community_label: None,
                         in_degree,
                         out_degree,
+                        fabric_pagerank: None,
+                        fabric_betweenness: None,
+                        fabric_community_id: None,
+                        fabric_community_label: None,
                     }))
                 }
             }
@@ -2287,6 +2295,10 @@ impl GraphStore for MockGraphStore {
                         community_label: Some(analytics.community_label.clone()),
                         in_degree,
                         out_degree,
+                        fabric_pagerank: None,
+                        fabric_betweenness: None,
+                        fabric_community_id: None,
+                        fabric_community_label: None,
                     }))
                 } else {
                     Ok(Some(NodeGdsMetrics {
@@ -2299,6 +2311,10 @@ impl GraphStore for MockGraphStore {
                         community_label: None,
                         in_degree,
                         out_degree,
+                        fabric_pagerank: None,
+                        fabric_betweenness: None,
+                        fabric_community_id: None,
+                        fabric_community_label: None,
                     }))
                 }
             }
@@ -3258,6 +3274,7 @@ impl GraphStore for MockGraphStore {
         description: Option<String>,
         rationale: Option<String>,
         chosen_option: Option<String>,
+        status: Option<DecisionStatus>,
     ) -> Result<()> {
         if let Some(d) = self.decisions.write().await.get_mut(&decision_id) {
             if let Some(desc) = description {
@@ -3268,6 +3285,9 @@ impl GraphStore for MockGraphStore {
             }
             if let Some(co) = chosen_option {
                 d.chosen_option = Some(co);
+            }
+            if let Some(st) = status {
+                d.status = st;
             }
         }
         Ok(())
@@ -3280,6 +3300,104 @@ impl GraphStore for MockGraphStore {
             ids.retain(|id| *id != decision_id);
         }
         Ok(())
+    }
+
+    async fn get_decisions_for_entity(
+        &self,
+        _entity_type: &str,
+        _entity_id: &str,
+        _limit: u32,
+    ) -> Result<Vec<DecisionNode>> {
+        // Mock: return empty — decision entity traversal requires graph
+        Ok(vec![])
+    }
+
+    async fn set_decision_embedding(
+        &self,
+        decision_id: Uuid,
+        _embedding: &[f32],
+        model: &str,
+    ) -> Result<()> {
+        if let Some(d) = self.decisions.write().await.get_mut(&decision_id) {
+            d.embedding_model = Some(model.to_string());
+        }
+        Ok(())
+    }
+
+    async fn get_decision_embedding(&self, decision_id: Uuid) -> Result<Option<Vec<f32>>> {
+        let decisions = self.decisions.read().await;
+        Ok(decisions
+            .get(&decision_id)
+            .and_then(|d| d.embedding.as_ref())
+            .map(|emb| emb.iter().map(|&x| x as f32).collect()))
+    }
+
+    async fn get_decisions_without_embedding(&self) -> Result<Vec<(Uuid, String, String)>> {
+        let decisions = self.decisions.read().await;
+        Ok(decisions
+            .values()
+            .filter(|d| d.embedding.is_none())
+            .map(|d| (d.id, d.description.clone(), d.rationale.clone()))
+            .collect())
+    }
+
+    async fn search_decisions_by_vector(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+        _project_id: Option<&str>,
+    ) -> Result<Vec<(DecisionNode, f64)>> {
+        // Mock: return empty — vector search requires real Neo4j index
+        Ok(vec![])
+    }
+
+    async fn get_decisions_affecting(
+        &self,
+        _entity_type: &str,
+        _entity_id: &str,
+        _status_filter: Option<&str>,
+    ) -> Result<Vec<DecisionNode>> {
+        Ok(vec![])
+    }
+
+    async fn add_decision_affects(
+        &self,
+        _decision_id: Uuid,
+        _entity_type: &str,
+        _entity_id: &str,
+        _impact_description: Option<&str>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remove_decision_affects(
+        &self,
+        _decision_id: Uuid,
+        _entity_type: &str,
+        _entity_id: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_decision_affects(&self, _decision_id: Uuid) -> Result<Vec<AffectsRelation>> {
+        Ok(vec![])
+    }
+
+    async fn supersede_decision(
+        &self,
+        _new_decision_id: Uuid,
+        _old_decision_id: Uuid,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_decision_timeline(
+        &self,
+        _task_id: Option<Uuid>,
+        _from: Option<&str>,
+        _to: Option<&str>,
+    ) -> Result<Vec<DecisionTimelineEntry>> {
+        Ok(vec![])
     }
 
     // ========================================================================
@@ -3481,6 +3599,70 @@ impl GraphStore for MockGraphStore {
             hashes.retain(|h| h != hash);
         }
         Ok(())
+    }
+
+    // ========================================================================
+    // TOUCHES operations (Commit → File) — mock stubs
+    // ========================================================================
+
+    async fn create_commit_touches(
+        &self,
+        _commit_hash: &str,
+        _files: &[FileChangedInfo],
+    ) -> Result<()> {
+        // Mock: no-op (TOUCHES relations not tracked in mock)
+        Ok(())
+    }
+
+    async fn get_commit_files(&self, _commit_hash: &str) -> Result<Vec<CommitFileInfo>> {
+        Ok(vec![])
+    }
+
+    async fn get_file_history(
+        &self,
+        _file_path: &str,
+        _limit: Option<i64>,
+    ) -> Result<Vec<FileHistoryEntry>> {
+        Ok(vec![])
+    }
+
+    // ========================================================================
+    // CO_CHANGED operations (File ↔ File) — mock stubs
+    // ========================================================================
+
+    async fn compute_co_changed(
+        &self,
+        _project_id: Uuid,
+        _since: Option<chrono::DateTime<chrono::Utc>>,
+        _min_count: i64,
+        _max_relations: i64,
+    ) -> Result<i64> {
+        Ok(0)
+    }
+
+    async fn update_project_co_change_timestamp(&self, id: Uuid) -> Result<()> {
+        if let Some(p) = self.projects.write().await.get_mut(&id) {
+            p.last_co_change_computed_at = Some(Utc::now());
+        }
+        Ok(())
+    }
+
+    async fn get_co_change_graph(
+        &self,
+        _project_id: Uuid,
+        _min_count: i64,
+        _limit: i64,
+    ) -> Result<Vec<CoChangePair>> {
+        Ok(vec![])
+    }
+
+    async fn get_file_co_changers(
+        &self,
+        _file_path: &str,
+        _min_count: i64,
+        _limit: i64,
+    ) -> Result<Vec<CoChanger>> {
+        Ok(vec![])
     }
 
     // ========================================================================
@@ -4350,6 +4532,7 @@ impl GraphStore for MockGraphStore {
         _entity_id: &str,
         _max_depth: u32,
         _min_score: f64,
+        _relation_types: Option<&[String]>,
     ) -> Result<Vec<PropagatedNote>> {
         // Simplified: propagation requires graph traversal; return empty
         Ok(vec![])
@@ -4375,6 +4558,8 @@ impl GraphStore for MockGraphStore {
                     distance: 1,
                     note: n,
                     path_pagerank: None,
+                    relation_path: vec![crate::notes::RelationHop::structural("BELONGS_TO")],
+                    path_rel_weight: Some(1.0),
                 })
                 .collect())
         } else {
@@ -4869,6 +5054,57 @@ impl GraphStore for MockGraphStore {
         Ok((batch, total))
     }
 
+    async fn create_cross_entity_synapses(
+        &self,
+        source_id: Uuid,
+        neighbors: &[(Uuid, f64)],
+    ) -> Result<usize> {
+        // Reuse existing synapse storage (Note synapses) — in mock, we don't distinguish
+        let mut synapses = self.note_synapses.write().await;
+        let mut created = 0usize;
+        for (target_id, weight) in neighbors {
+            // Forward
+            let entry = synapses.entry(source_id).or_default();
+            entry.push((*target_id, *weight));
+            // Backward
+            let entry = synapses.entry(*target_id).or_default();
+            entry.push((source_id, *weight));
+            created += 2;
+        }
+        Ok(created)
+    }
+
+    async fn get_cross_entity_synapses(&self, node_id: Uuid) -> Result<Vec<(Uuid, f64, String)>> {
+        let synapses = self.note_synapses.read().await;
+        let notes = self.notes.read().await;
+        if let Some(neighbors) = synapses.get(&node_id) {
+            let mut result: Vec<(Uuid, f64, String)> = neighbors
+                .iter()
+                .map(|(id, weight)| {
+                    let entity_type = if notes.contains_key(id) {
+                        "Note".to_string()
+                    } else {
+                        "Decision".to_string()
+                    };
+                    (*id, *weight, entity_type)
+                })
+                .collect();
+            result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            Ok(result)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    async fn list_decisions_needing_synapses(
+        &self,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<(Vec<DecisionNode>, usize)> {
+        // Mock: return empty — decisions needing synapses not tracked in mock
+        Ok((vec![], 0))
+    }
+
     // ========================================================================
     // Chat session operations
     // ========================================================================
@@ -5075,6 +5311,31 @@ impl GraphStore for MockGraphStore {
     async fn delete_chat_events(&self, session_id: Uuid) -> Result<()> {
         self.chat_events.write().await.remove(&session_id);
         Ok(())
+    }
+
+    // ========================================================================
+    // Chat DISCUSSED relations
+    // ========================================================================
+
+    async fn add_discussed(
+        &self,
+        _session_id: Uuid,
+        entities: &[(String, String)],
+    ) -> Result<usize> {
+        // Mock: just return the number of entities as if all were created
+        Ok(entities.len())
+    }
+
+    async fn get_session_entities(
+        &self,
+        _session_id: Uuid,
+        _project_id: Option<Uuid>,
+    ) -> Result<Vec<DiscussedEntity>> {
+        Ok(Vec::new())
+    }
+
+    async fn backfill_discussed(&self) -> Result<(usize, usize, usize)> {
+        Ok((0, 0, 0))
     }
 
     // ========================================================================
@@ -6103,6 +6364,99 @@ impl GraphStore for MockGraphStore {
             fa.insert(update.id.clone(), update.clone());
         }
         Ok(())
+    }
+
+    async fn batch_update_fabric_file_analytics(
+        &self,
+        _updates: &[crate::graph::models::FabricFileAnalyticsUpdate],
+    ) -> anyhow::Result<()> {
+        // Mock: fabric analytics are not stored separately in tests
+        Ok(())
+    }
+
+    async fn get_project_synapse_edges(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<Vec<(String, String, f64)>> {
+        // Mock: no SYNAPSE edges in tests by default
+        Ok(vec![])
+    }
+
+    async fn get_neural_metrics(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::models::NeuralMetrics> {
+        Ok(crate::neo4j::models::NeuralMetrics {
+            active_synapses: 0,
+            avg_energy: 0.0,
+            weak_synapses_ratio: 0.0,
+            dead_notes_count: 0,
+        })
+    }
+
+    // T5.5 — Churn score
+    async fn compute_churn_scores(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileChurnScore>> {
+        Ok(vec![])
+    }
+
+    async fn batch_update_churn_scores(
+        &self,
+        _updates: &[crate::neo4j::models::FileChurnScore],
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn get_top_hotspots(
+        &self,
+        _project_id: Uuid,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileChurnScore>> {
+        Ok(vec![])
+    }
+
+    // T5.6 — Knowledge density
+    async fn compute_knowledge_density(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileKnowledgeDensity>> {
+        Ok(vec![])
+    }
+
+    async fn batch_update_knowledge_density(
+        &self,
+        _updates: &[crate::neo4j::models::FileKnowledgeDensity],
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn get_top_knowledge_gaps(
+        &self,
+        _project_id: Uuid,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileKnowledgeDensity>> {
+        Ok(vec![])
+    }
+
+    // T5.7 — Risk score composite
+    async fn compute_risk_scores(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::neo4j::models::FileRiskScore>> {
+        Ok(vec![])
+    }
+
+    async fn batch_update_risk_scores(
+        &self,
+        _updates: &[crate::neo4j::models::FileRiskScore],
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn get_risk_summary(&self, _project_id: Uuid) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!(null))
     }
 
     async fn health_check(&self) -> anyhow::Result<bool> {

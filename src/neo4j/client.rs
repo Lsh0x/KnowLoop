@@ -254,6 +254,8 @@ impl Neo4jClient {
             "CREATE INDEX chat_session_project IF NOT EXISTS FOR (s:ChatSession) ON (s.project_slug)",
             "CREATE INDEX chat_session_workspace IF NOT EXISTS FOR (s:ChatSession) ON (s.workspace_slug)",
             "CREATE INDEX chat_session_cli IF NOT EXISTS FOR (s:ChatSession) ON (s.cli_session_id)",
+            // ChatSession composite index for DISCUSSED relation queries
+            "CREATE INDEX chat_session_project_id IF NOT EXISTS FOR (s:ChatSession) ON (s.project_slug, s.id)",
             // FeatureGraph indexes
             "CREATE INDEX feature_graph_project IF NOT EXISTS FOR (fg:FeatureGraph) ON (fg.project_id)",
             // User indexes — queried by email, external_id, auth_provider
@@ -267,6 +269,15 @@ impl Neo4jClient {
             // Release indexes
             "CREATE INDEX release_project IF NOT EXISTS FOR (r:Release) ON (r.project_id)",
             "CREATE INDEX release_version IF NOT EXISTS FOR (r:Release) ON (r.version)",
+            // Knowledge Fabric — TOUCHES relationship indexes (Commit→File)
+            "CREATE INDEX touches_file_path IF NOT EXISTS FOR ()-[r:TOUCHES]-() ON (r.file_path)",
+            // Knowledge Fabric — CO_CHANGED relationship indexes (File↔File)
+            "CREATE INDEX co_changed_count IF NOT EXISTS FOR ()-[r:CO_CHANGED]-() ON (r.count)",
+            "CREATE INDEX co_changed_project IF NOT EXISTS FOR ()-[r:CO_CHANGED]-() ON (r.project_id)",
+            // Decision AFFECTS relationship index
+            "CREATE INDEX affects_rel_idx IF NOT EXISTS FOR ()-[r:AFFECTS]->() ON (r.created_at)",
+            // Decision SUPERSEDES relationship index
+            "CREATE INDEX supersedes_rel_idx IF NOT EXISTS FOR ()-[r:SUPERSEDES]->() ON (r.created_at)",
         ];
 
         // Vector indexes (require Neo4j 5.13+ — gracefully skip if not supported)
@@ -292,6 +303,13 @@ impl Neo4jClient {
                    `vector.dimensions`: 768,
                    `vector.similarity_function`: 'cosine'
                }}"#,
+            // HNSW vector index for cosine similarity search on Decision embeddings
+            r#"CREATE VECTOR INDEX decision_embedding IF NOT EXISTS
+               FOR (d:Decision) ON (d.embedding)
+               OPTIONS {indexConfig: {
+                   `vector.dimensions`: 768,
+                   `vector.similarity_function`: 'cosine'
+               }}"#,
         ];
 
         for constraint in constraints {
@@ -303,6 +321,17 @@ impl Neo4jClient {
         for index in indexes {
             if let Err(e) = self.graph.run(query(index)).await {
                 tracing::warn!("Index may already exist: {}", e);
+            }
+        }
+
+        // Data migrations — idempotent, run on every startup
+        let migrations = vec![
+            // T3.2: Set default status on existing Decision nodes without one
+            r#"MATCH (d:Decision) WHERE d.status IS NULL SET d.status = 'accepted'"#,
+        ];
+        for migration in migrations {
+            if let Err(e) = self.graph.run(query(migration)).await {
+                tracing::warn!("Migration failed (non-fatal): {}", e);
             }
         }
 

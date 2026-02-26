@@ -133,6 +133,13 @@ impl ToolHandler {
             ("decision", "update") => "update_decision",
             ("decision", "delete") => "delete_decision",
             ("decision", "search") => "search_decisions",
+            ("decision", "search_semantic") => "search_decisions_semantic",
+            ("decision", "add_affects") => "add_decision_affects",
+            ("decision", "remove_affects") => "remove_decision_affects",
+            ("decision", "list_affects") => "list_decision_affects",
+            ("decision", "get_affecting") => "get_decisions_affecting",
+            ("decision", "supersede") => "supersede_decision",
+            ("decision", "get_timeline") => "get_decision_timeline",
 
             // Constraint
             ("constraint", "list") => "list_constraints",
@@ -168,6 +175,8 @@ impl ToolHandler {
             ("commit", "link_to_plan") => "link_commit_to_plan",
             ("commit", "get_task_commits") => "get_task_commits",
             ("commit", "get_plan_commits") => "get_plan_commits",
+            ("commit", "get_commit_files") => "get_commit_files",
+            ("commit", "get_file_history") => "get_file_history",
 
             // Note
             ("note", "list") => "list_notes",
@@ -186,6 +195,8 @@ impl ToolHandler {
             ("note", "get_needing_review") => "get_notes_needing_review",
             ("note", "list_project") => "list_project_notes",
             ("note", "get_propagated") => "get_propagated_notes",
+            ("note", "get_propagated_knowledge") => "get_propagated_knowledge",
+            ("note", "get_context_knowledge") => "get_context_knowledge",
             ("note", "get_entity") => "get_entity_notes",
 
             // Workspace
@@ -236,6 +247,8 @@ impl ToolHandler {
             ("chat", "delete_session") => "delete_chat_session",
             ("chat", "send_message") => "chat_send_message",
             ("chat", "list_messages") => "list_chat_messages",
+            ("chat", "add_discussed") => "add_discussed",
+            ("chat", "get_session_entities") => "get_session_entities",
 
             // Feature Graph
             ("feature_graph", "create") => "create_feature_graph",
@@ -263,6 +276,8 @@ impl ToolHandler {
             ("code", "get_health") => "get_code_health",
             ("code", "get_node_importance") => "get_node_importance",
             ("code", "plan_implementation") => "plan_implementation",
+            ("code", "get_co_change_graph") => "get_co_change_graph",
+            ("code", "get_file_co_changers") => "get_file_co_changers",
 
             // Admin
             ("admin", "sync_directory") => "sync_directory",
@@ -279,6 +294,11 @@ impl ToolHandler {
             ("admin", "reinforce_neurons") => "reinforce_neurons",
             ("admin", "decay_synapses") => "decay_synapses",
             ("admin", "backfill_synapses") => "backfill_synapses",
+            ("admin", "backfill_decision_embeddings") => "backfill_decision_embeddings",
+            ("admin", "backfill_touches") => "backfill_touches",
+            ("admin", "backfill_discussed") => "backfill_discussed",
+            ("admin", "update_fabric_scores") => "update_fabric_scores",
+            ("admin", "bootstrap_knowledge_fabric") => "bootstrap_knowledge_fabric",
 
             _ => {
                 return Err(anyhow!(
@@ -867,6 +887,9 @@ impl ToolHandler {
                 if let Some(v) = args.get("chosen_option") {
                     body.insert("chosen_option".to_string(), v.clone());
                 }
+                if let Some(v) = args.get("status") {
+                    body.insert("status".to_string(), v.clone());
+                }
                 let result = http
                     .patch(
                         &format!("/api/decisions/{}", decision_id),
@@ -902,6 +925,125 @@ impl ToolHandler {
                     query.push(("project_slug".to_string(), s));
                 }
                 let result = http.get_with_query("/api/decisions/search", &query).await?;
+                Ok(Some(result))
+            }
+
+            "search_decisions_semantic" => {
+                let query_str = extract_string(args, "query")?;
+                let mut query = vec![("query".to_string(), query_str)];
+                if let Some(l) = args.get("limit").and_then(|v| v.as_u64()) {
+                    query.push(("limit".to_string(), l.to_string()));
+                }
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    query.push(("project_id".to_string(), pid.to_string()));
+                }
+                let result = http
+                    .get_with_query("/api/decisions/search-semantic", &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "add_decision_affects" => {
+                let decision_id = extract_id(args, "decision_id")?;
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "entity_type".to_string(),
+                    Value::String(extract_string(args, "entity_type")?),
+                );
+                body.insert(
+                    "entity_id".to_string(),
+                    Value::String(extract_string(args, "entity_id")?),
+                );
+                if let Some(v) = args.get("impact_description") {
+                    body.insert("impact_description".to_string(), v.clone());
+                }
+                let result = http
+                    .post(
+                        &format!("/api/decisions/{}/affects", decision_id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"status": "ok"})
+                } else {
+                    result
+                }))
+            }
+
+            "remove_decision_affects" => {
+                let decision_id = extract_id(args, "decision_id")?;
+                let entity_type = extract_string(args, "entity_type")?;
+                let entity_id = extract_string(args, "entity_id")?;
+                // Use query-param variant to safely handle entity_ids with slashes (file paths)
+                let encoded_type = urlencoding::encode(&entity_type);
+                let encoded_id = urlencoding::encode(&entity_id);
+                let result = http
+                    .delete(&format!(
+                        "/api/decisions/{}/affects?entity_type={}&entity_id={}",
+                        decision_id, encoded_type, encoded_id
+                    ))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"status": "ok"})
+                } else {
+                    result
+                }))
+            }
+
+            "list_decision_affects" => {
+                let decision_id = extract_id(args, "decision_id")?;
+                let result = http
+                    .get(&format!("/api/decisions/{}/affects", decision_id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "get_decisions_affecting" => {
+                let entity_type = extract_string(args, "entity_type")?;
+                let entity_id = extract_string(args, "entity_id")?;
+                let mut query = vec![
+                    ("entity_type".to_string(), entity_type),
+                    ("entity_id".to_string(), entity_id),
+                ];
+                if let Some(s) = extract_optional_string(args, "status") {
+                    query.push(("status".to_string(), s));
+                }
+                let result = http
+                    .get_with_query("/api/decisions/affecting", &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "supersede_decision" => {
+                let new_id = extract_id(args, "decision_id")?;
+                let old_id = extract_id(args, "superseded_by_id")?;
+                let result = http
+                    .post(
+                        &format!("/api/decisions/{}/supersedes/{}", new_id, old_id),
+                        &json!({}),
+                    )
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"status": "ok"})
+                } else {
+                    result
+                }))
+            }
+
+            "get_decision_timeline" => {
+                let mut query = Vec::new();
+                if let Some(tid) = extract_optional_string(args, "task_id") {
+                    query.push(("task_id".to_string(), tid));
+                }
+                if let Some(f) = extract_optional_string(args, "from") {
+                    query.push(("from".to_string(), f));
+                }
+                if let Some(t) = extract_optional_string(args, "to") {
+                    query.push(("to".to_string(), t));
+                }
+                let result = http
+                    .get_with_query("/api/decisions/timeline", &query)
+                    .await?;
                 Ok(Some(result))
             }
 
@@ -1227,6 +1369,31 @@ impl ToolHandler {
                 Ok(Some(result))
             }
 
+            "get_commit_files" => {
+                let sha = args
+                    .get("sha")
+                    .or_else(|| args.get("commit_sha"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("sha is required"))?;
+                let result = http.get(&format!("/api/commits/{}/files", sha)).await?;
+                Ok(Some(result))
+            }
+
+            "get_file_history" => {
+                let file_path = args
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("file_path is required"))?;
+                let mut query_params = vec![("path".to_string(), file_path.to_string())];
+                if let Some(limit) = args.get("limit").and_then(|v| v.as_i64()) {
+                    query_params.push(("limit".to_string(), limit.to_string()));
+                }
+                let result = http
+                    .get_with_query("/api/files/history", &query_params)
+                    .await?;
+                Ok(Some(result))
+            }
+
             // ── P7: Notes & Knowledge (23 tools) ──────────────────────────
 
             // --- CRUD (5) ---
@@ -1489,7 +1656,52 @@ impl ToolHandler {
                 if let Some(v) = args.get("min_score").and_then(|v| v.as_f64()) {
                     query.push(("min_score".to_string(), v.to_string()));
                 }
+                // Forward relation_types as comma-separated string
+                if let Some(v) = args.get("relation_types").and_then(|v| v.as_str()) {
+                    query.push(("relation_types".to_string(), v.to_string()));
+                }
                 let result = http.get_with_query("/api/notes/propagated", &query).await?;
+                Ok(Some(result))
+            }
+
+            "get_context_knowledge" => {
+                let entity_type = extract_string(args, "entity_type")?;
+                let entity_id = extract_string(args, "entity_id")?;
+                let mut query = vec![
+                    ("entity_type".to_string(), entity_type),
+                    ("entity_id".to_string(), entity_id),
+                ];
+                if let Some(v) = args.get("max_depth").and_then(|v| v.as_i64()) {
+                    query.push(("max_depth".to_string(), v.to_string()));
+                }
+                if let Some(v) = args.get("min_score").and_then(|v| v.as_f64()) {
+                    query.push(("min_score".to_string(), v.to_string()));
+                }
+                let result = http
+                    .get_with_query("/api/notes/context-knowledge", &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "get_propagated_knowledge" => {
+                let entity_type = extract_string(args, "entity_type")?;
+                let entity_id = extract_string(args, "entity_id")?;
+                let mut query = vec![
+                    ("entity_type".to_string(), entity_type),
+                    ("entity_id".to_string(), entity_id),
+                ];
+                if let Some(v) = args.get("max_depth").and_then(|v| v.as_i64()) {
+                    query.push(("max_depth".to_string(), v.to_string()));
+                }
+                if let Some(v) = args.get("min_score").and_then(|v| v.as_f64()) {
+                    query.push(("min_score".to_string(), v.to_string()));
+                }
+                if let Some(v) = args.get("relation_types").and_then(|v| v.as_str()) {
+                    query.push(("relation_types".to_string(), v.to_string()));
+                }
+                let result = http
+                    .get_with_query("/api/notes/propagated-knowledge", &query)
+                    .await?;
                 Ok(Some(result))
             }
 
@@ -1568,6 +1780,57 @@ impl ToolHandler {
                 }
                 let result = http
                     .post("/api/admin/backfill-synapses", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "backfill_decision_embeddings" => {
+                let result = http
+                    .post("/api/admin/backfill-decision-embeddings", &json!({}))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "backfill_touches" => {
+                let project_slug = extract_string(args, "project_slug")
+                    .or_else(|_| extract_string(args, "slug"))?;
+                let result = http
+                    .post(
+                        &format!("/api/projects/{}/backfill-touches", project_slug),
+                        &json!({}),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "backfill_discussed" => {
+                let result = http
+                    .post("/api/admin/backfill-discussed", &json!({}))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "update_fabric_scores" => {
+                let mut body = serde_json::Map::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                let result = http
+                    .post("/api/admin/update-fabric-scores", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "bootstrap_knowledge_fabric" => {
+                let mut body = serde_json::Map::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                let result = http
+                    .post(
+                        "/api/admin/bootstrap-knowledge-fabric",
+                        &Value::Object(body),
+                    )
                     .await?;
                 Ok(Some(result))
             }
@@ -2331,6 +2594,28 @@ impl ToolHandler {
                 Ok(Some(result))
             }
 
+            "add_discussed" => {
+                let id = extract_id(args, "session_id")?;
+                let entities = args.get("entities").cloned().unwrap_or_else(|| json!([]));
+                let body = json!({ "entities": entities });
+                let result = http
+                    .post(&format!("/api/chat/sessions/{}/discussed", id), &body)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "get_session_entities" => {
+                let id = extract_id(args, "session_id")?;
+                let mut query = Vec::new();
+                if let Some(v) = args.get("project_id").and_then(|v| v.as_str()) {
+                    query.push(("project_id".to_string(), v.to_string()));
+                }
+                let result = http
+                    .get_with_query(&format!("/api/chat/sessions/{}/discussed", id), &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
             // --- Feature Graphs (6) ---
             "create_feature_graph" => {
                 let mut body = serde_json::Map::new();
@@ -2443,6 +2728,49 @@ impl ToolHandler {
                 }
                 let result = http
                     .post("/api/code/plan-implementation", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "get_co_change_graph" => {
+                let project_slug = extract_string(args, "project_slug")?;
+                // Resolve project UUID from slug
+                let project_info = http.get(&format!("/api/projects/{}", project_slug)).await?;
+                let project_id = project_info
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Project not found: {}", project_slug))?;
+                let mut query_params = Vec::new();
+                if let Some(v) = args.get("min_count").and_then(|v| v.as_i64()) {
+                    query_params.push(("min_count".to_string(), v.to_string()));
+                }
+                if let Some(v) = args.get("limit").and_then(|v| v.as_i64()) {
+                    query_params.push(("limit".to_string(), v.to_string()));
+                }
+                let result = if query_params.is_empty() {
+                    http.get(&format!("/api/projects/{}/co-changes", project_id))
+                        .await?
+                } else {
+                    http.get_with_query(
+                        &format!("/api/projects/{}/co-changes", project_id),
+                        &query_params,
+                    )
+                    .await?
+                };
+                Ok(Some(result))
+            }
+
+            "get_file_co_changers" => {
+                let file_path = extract_string(args, "file_path")?;
+                let mut query_params = vec![("path".to_string(), file_path)];
+                if let Some(v) = args.get("min_count").and_then(|v| v.as_i64()) {
+                    query_params.push(("min_count".to_string(), v.to_string()));
+                }
+                if let Some(v) = args.get("limit").and_then(|v| v.as_i64()) {
+                    query_params.push(("limit".to_string(), v.to_string()));
+                }
+                let result = http
+                    .get_with_query("/api/files/co-changers", &query_params)
                     .await?;
                 Ok(Some(result))
             }
@@ -2606,6 +2934,8 @@ mod tests {
             ("search_semantic", "search_notes_semantic"),
             ("link_to_entity", "link_note_to_entity"),
             ("get_context", "get_context_notes"),
+            ("get_context_knowledge", "get_context_knowledge"),
+            ("get_propagated_knowledge", "get_propagated_knowledge"),
             ("confirm", "confirm_note"),
             ("invalidate", "invalidate_note"),
             ("supersede", "supersede_note"),

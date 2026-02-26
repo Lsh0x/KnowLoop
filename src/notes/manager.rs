@@ -700,16 +700,20 @@ impl NoteManager {
         }
     }
 
-    /// Get propagated notes for an entity (via graph traversal)
+    /// Get propagated notes for an entity (via graph traversal).
+    ///
+    /// `relation_types` controls which graph relations to traverse.
+    /// `None` → default (CONTAINS|IMPORTS|CALLS).
     pub async fn get_propagated_notes(
         &self,
         entity_type: &EntityType,
         entity_id: &str,
         max_depth: u32,
         min_score: f64,
+        relation_types: Option<&[String]>,
     ) -> Result<Vec<PropagatedNote>> {
         self.neo4j
-            .get_propagated_notes(entity_type, entity_id, max_depth, min_score)
+            .get_propagated_notes(entity_type, entity_id, max_depth, min_score, relation_types)
             .await
     }
 
@@ -727,10 +731,10 @@ impl NoteManager {
             .get_notes_for_entity(entity_type, entity_id)
             .await?;
 
-        // Get propagated notes from graph traversal
+        // Get propagated notes from graph traversal (default relations)
         let mut propagated_notes = self
             .neo4j
-            .get_propagated_notes(entity_type, entity_id, max_depth, min_score)
+            .get_propagated_notes(entity_type, entity_id, max_depth, min_score, None)
             .await?;
 
         // If entity is a Project, also get workspace-level notes
@@ -764,6 +768,147 @@ impl NoteManager {
         Ok(NoteContextResponse {
             direct_notes,
             propagated_notes,
+            total_count,
+        })
+    }
+
+    /// Get unified context knowledge for an entity.
+    ///
+    /// Combines:
+    /// 1. Direct + propagated notes (same as `get_context_notes`)
+    /// 2. Decisions related to the entity (via AFFECTS or task linkage)
+    /// 3. Recent commits touching the entity (via TOUCHES, for File entities)
+    pub async fn get_context_knowledge(
+        &self,
+        entity_type: &EntityType,
+        entity_id: &str,
+        max_depth: u32,
+        min_score: f64,
+    ) -> Result<crate::notes::ContextKnowledge> {
+        // 1. Notes (reuse existing get_context_notes)
+        let notes = self
+            .get_context_notes(entity_type, entity_id, max_depth, min_score)
+            .await?;
+
+        // 2. Decisions related to this entity
+        let entity_label = match entity_type {
+            EntityType::File => "File",
+            EntityType::Function => "Function",
+            EntityType::Struct => "Struct",
+            EntityType::Trait => "Trait",
+            _ => "File", // fallback
+        };
+        let decisions = self
+            .neo4j
+            .get_decisions_for_entity(entity_label, entity_id, 10)
+            .await
+            .unwrap_or_default();
+
+        // 3. Recent commits (only for File entities, via TOUCHES)
+        let recent_commits = if *entity_type == EntityType::File {
+            self.neo4j
+                .get_file_history(entity_id, Some(10))
+                .await
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let total_count = notes.direct_notes.len()
+            + notes.propagated_notes.len()
+            + decisions.len()
+            + recent_commits.len();
+
+        Ok(crate::notes::ContextKnowledge {
+            direct_notes: notes.direct_notes,
+            propagated_notes: notes.propagated_notes,
+            decisions,
+            recent_commits,
+            total_count,
+        })
+    }
+
+    /// Get enriched propagated knowledge for an entity.
+    ///
+    /// Unlike `get_context_notes` (direct + propagated notes only), this returns:
+    /// - Propagated notes with full score breakdown (distance, relation_weight, pagerank)
+    /// - Decisions propagated via task/plan linkage
+    /// - Per-relation-type statistics
+    ///
+    /// Accepts `relation_types` to control which relation types to traverse.
+    pub async fn get_propagated_knowledge(
+        &self,
+        entity_type: &EntityType,
+        entity_id: &str,
+        max_depth: u32,
+        min_score: f64,
+        relation_types: Option<&[String]>,
+    ) -> Result<crate::notes::PropagatedKnowledge> {
+        // Cap max_depth at 3 to prevent unbounded traversal
+        let capped_depth = max_depth.min(3);
+
+        // 1. Get propagated notes with full scoring
+        let propagated_notes = self
+            .get_propagated_notes(
+                entity_type,
+                entity_id,
+                capped_depth,
+                min_score,
+                relation_types,
+            )
+            .await?;
+
+        // 2. Get decisions related to this entity
+        let entity_label = match entity_type {
+            EntityType::File => "File",
+            EntityType::Function => "Function",
+            EntityType::Struct => "Struct",
+            EntityType::Trait => "Trait",
+            _ => "File", // fallback
+        };
+        let decisions = self
+            .neo4j
+            .get_decisions_for_entity(entity_label, entity_id, 10)
+            .await
+            .unwrap_or_default();
+
+        // 3. Compute relation statistics from propagated notes
+        let mut rel_map: std::collections::HashMap<String, (usize, f64)> =
+            std::collections::HashMap::new();
+        let mut total_relations_traversed: usize = 0;
+
+        for note in &propagated_notes {
+            for hop in &note.relation_path {
+                total_relations_traversed += 1;
+                let entry = rel_map.entry(hop.rel_type.clone()).or_insert((0, 0.0));
+                entry.0 += 1;
+                entry.1 += note.relevance_score;
+            }
+        }
+
+        let mut relation_stats: Vec<crate::notes::RelationStats> = rel_map
+            .into_iter()
+            .map(
+                |(relation_type, (count, total_score))| crate::notes::RelationStats {
+                    relation_type,
+                    count,
+                    avg_score: if count > 0 {
+                        total_score / count as f64
+                    } else {
+                        0.0
+                    },
+                },
+            )
+            .collect();
+        relation_stats.sort_by(|a, b| b.count.cmp(&a.count));
+
+        let total_count = propagated_notes.len() + decisions.len();
+
+        Ok(crate::notes::PropagatedKnowledge {
+            notes: propagated_notes,
+            decisions,
+            total_relations_traversed,
+            relation_stats,
             total_count,
         })
     }
@@ -1190,17 +1335,207 @@ impl NoteManager {
 
         let skipped = total.saturating_sub(processed + errors);
         tracing::info!(
-            "Synapse backfill complete: {processed} processed, {synapses_created} synapses, {errors} errors, {skipped} skipped"
+            "Synapse backfill (notes): {processed} processed, {synapses_created} synapses, {errors} errors, {skipped} skipped"
+        );
+
+        // ================================================================
+        // Phase 3: Cross-entity synapses (Decision ↔ Note, Decision ↔ Decision)
+        // ================================================================
+        let (decision_created, decision_processed, decision_errors) = self
+            .backfill_decision_synapses(batch_size, min_similarity, max_neighbors, cancel)
+            .await?;
+
+        let total_all = total + decision_processed;
+        let synapses_all = synapses_created + decision_created;
+        let errors_all = errors + decision_errors;
+        let skipped_all = total_all.saturating_sub(processed + decision_processed + errors_all);
+
+        tracing::info!(
+            "Synapse backfill complete: {total_all} total ({processed} notes + {decision_processed} decisions), {synapses_all} synapses, {errors_all} errors"
         );
 
         Ok(SynapseBackfillProgress {
-            total,
-            processed,
-            synapses_created,
-            errors,
-            skipped,
+            total: total_all,
+            processed: processed + decision_processed,
+            synapses_created: synapses_all,
+            errors: errors_all,
+            skipped: skipped_all,
             energy_initialized: energy_init,
         })
+    }
+
+    /// Backfill cross-entity SYNAPSE relationships for Decision nodes.
+    ///
+    /// For each Decision with an embedding but no SYNAPSE, finds nearest neighbor
+    /// Notes (via note vector index) and creates cross-entity SYNAPSE edges.
+    ///
+    /// Returns (synapses_created, decisions_processed, errors).
+    async fn backfill_decision_synapses(
+        &self,
+        batch_size: usize,
+        min_similarity: f64,
+        max_neighbors: usize,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<(usize, usize, usize)> {
+        let (_, total) = self.neo4j.list_decisions_needing_synapses(0, 0).await?;
+        if total == 0 {
+            tracing::info!("Synapse backfill (decisions): all decisions already have synapses");
+            return Ok((0, 0, 0));
+        }
+
+        tracing::info!("Synapse backfill (decisions): {total} decisions need synapses");
+        let mut processed = 0usize;
+        let mut synapses_created = 0usize;
+        let mut errors = 0usize;
+        let mut skip_offset = 0usize;
+
+        loop {
+            if let Some(flag) = cancel {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    tracing::info!("Synapse backfill (decisions) cancelled at {processed}/{total}");
+                    break;
+                }
+            }
+
+            let (batch, remaining) = self
+                .neo4j
+                .list_decisions_needing_synapses(batch_size, skip_offset)
+                .await?;
+            if batch.is_empty() || remaining == 0 {
+                break;
+            }
+
+            let mut batch_connected = 0usize;
+
+            for decision in &batch {
+                if let Some(flag) = cancel {
+                    if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                }
+
+                // Get the stored embedding for this decision
+                let embedding = match self.neo4j.get_decision_embedding(decision.id).await {
+                    Ok(Some(emb)) => emb,
+                    Ok(None) => {
+                        tracing::warn!(
+                            decision_id = %decision.id,
+                            "Synapse backfill: decision listed as needing synapses but has no embedding"
+                        );
+                        errors += 1;
+                        skip_offset += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            decision_id = %decision.id,
+                            error = %e,
+                            "Synapse backfill: failed to get decision embedding"
+                        );
+                        errors += 1;
+                        skip_offset += 1;
+                        continue;
+                    }
+                };
+
+                // Search for similar Notes using the note vector index
+                let note_neighbors = match self
+                    .neo4j
+                    .vector_search_notes(&embedding, max_neighbors, None, None)
+                    .await
+                {
+                    Ok(results) => results,
+                    Err(e) => {
+                        tracing::warn!(
+                            decision_id = %decision.id,
+                            error = %e,
+                            "Synapse backfill: note vector search failed for decision"
+                        );
+                        errors += 1;
+                        skip_offset += 1;
+                        continue;
+                    }
+                };
+
+                // Filter: apply min_similarity threshold, map to (id, score)
+                let mut synapse_targets: Vec<(uuid::Uuid, f64)> = note_neighbors
+                    .into_iter()
+                    .filter(|(_, score)| *score >= min_similarity)
+                    .map(|(n, score)| (n.id, score))
+                    .collect();
+
+                // Also search for similar Decisions via the decision vector index
+                match self
+                    .neo4j
+                    .search_decisions_by_vector(&embedding, max_neighbors, None)
+                    .await
+                {
+                    Ok(decision_results) => {
+                        for (d, score) in decision_results {
+                            // Exclude self
+                            if d.id != decision.id && score >= min_similarity {
+                                synapse_targets.push((d.id, score));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            decision_id = %decision.id,
+                            error = %e,
+                            "Synapse backfill: decision vector search failed (non-fatal)"
+                        );
+                        // Non-fatal: we still have note neighbors
+                    }
+                }
+
+                if synapse_targets.is_empty() {
+                    tracing::debug!(
+                        decision_id = %decision.id,
+                        "Synapse backfill: no eligible neighbors for decision above threshold {min_similarity}"
+                    );
+                    skip_offset += 1;
+                    processed += 1;
+                    continue;
+                }
+
+                // Create cross-entity synapses (works for Decision↔Note and Decision↔Decision)
+                match self
+                    .neo4j
+                    .create_cross_entity_synapses(decision.id, &synapse_targets)
+                    .await
+                {
+                    Ok(created) => {
+                        synapses_created += created;
+                        batch_connected += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            decision_id = %decision.id,
+                            error = %e,
+                            "Synapse backfill: failed to create cross-entity synapses"
+                        );
+                        errors += 1;
+                        skip_offset += 1;
+                        continue;
+                    }
+                }
+
+                processed += 1;
+            }
+
+            tracing::info!(
+                "Synapse backfill (decisions): {processed}/{total} processed, {synapses_created} cross-entity synapses ({errors} errors)"
+            );
+
+            if batch_connected == 0 {
+                tracing::info!(
+                    "Synapse backfill (decisions): no more connectable decisions, stopping"
+                );
+                break;
+            }
+        }
+
+        Ok((synapses_created, processed, errors))
     }
 }
 

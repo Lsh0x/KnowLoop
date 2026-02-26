@@ -4,7 +4,9 @@
 //! This trait mirrors all public async methods of `Neo4jClient`,
 //! enabling testing with mock implementations and future backend swaps.
 
-use crate::graph::models::{FileAnalyticsUpdate, FunctionAnalyticsUpdate};
+use crate::graph::models::{
+    FabricFileAnalyticsUpdate, FileAnalyticsUpdate, FunctionAnalyticsUpdate,
+};
 use crate::neo4j::models::*;
 use crate::notes::{
     EntityType, Note, NoteAnchor, NoteFilters, NoteImportance, NoteStatus, PropagatedNote,
@@ -755,10 +757,81 @@ pub trait GraphStore: Send + Sync {
         description: Option<String>,
         rationale: Option<String>,
         chosen_option: Option<String>,
+        status: Option<DecisionStatus>,
     ) -> Result<()>;
 
     /// Delete a decision
     async fn delete_decision(&self, decision_id: Uuid) -> Result<()>;
+
+    /// Get decisions related to an entity (via AFFECTS or task linkage)
+    async fn get_decisions_for_entity(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        limit: u32,
+    ) -> Result<Vec<DecisionNode>>;
+
+    /// Store a vector embedding on a Decision node
+    async fn set_decision_embedding(
+        &self,
+        decision_id: Uuid,
+        embedding: &[f32],
+        model: &str,
+    ) -> Result<()>;
+
+    /// Retrieve the stored vector embedding for a Decision node
+    async fn get_decision_embedding(&self, decision_id: Uuid) -> Result<Option<Vec<f32>>>;
+
+    /// Get all Decision IDs that have no embedding yet (for backfill)
+    async fn get_decisions_without_embedding(&self) -> Result<Vec<(Uuid, String, String)>>;
+
+    /// Semantic search over Decision embeddings using Neo4j vector index.
+    /// When `project_id` is provided, filters results to that project (post-query).
+    async fn search_decisions_by_vector(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        project_id: Option<&str>,
+    ) -> Result<Vec<(DecisionNode, f64)>>;
+
+    /// Get decisions that AFFECT a given entity (reverse AFFECTS lookup)
+    async fn get_decisions_affecting(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        status_filter: Option<&str>,
+    ) -> Result<Vec<DecisionNode>>;
+
+    /// Create an AFFECTS relation from a Decision to any entity in the graph
+    async fn add_decision_affects(
+        &self,
+        decision_id: Uuid,
+        entity_type: &str,
+        entity_id: &str,
+        impact_description: Option<&str>,
+    ) -> Result<()>;
+
+    /// Remove an AFFECTS relation from a Decision to an entity
+    async fn remove_decision_affects(
+        &self,
+        decision_id: Uuid,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<()>;
+
+    /// List all entities affected by a Decision
+    async fn list_decision_affects(&self, decision_id: Uuid) -> Result<Vec<AffectsRelation>>;
+
+    /// Mark a decision as superseded by a newer decision
+    async fn supersede_decision(&self, new_decision_id: Uuid, old_decision_id: Uuid) -> Result<()>;
+
+    /// Get a timeline of decisions, optionally filtered by task and date range
+    async fn get_decision_timeline(
+        &self,
+        task_id: Option<Uuid>,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<Vec<DecisionTimelineEntry>>;
 
     // ========================================================================
     // Dependency analysis
@@ -823,6 +896,61 @@ pub trait GraphStore: Send + Sync {
 
     /// Delete a commit
     async fn delete_commit(&self, hash: &str) -> Result<()>;
+
+    // ========================================================================
+    // TOUCHES operations (Commit → File)
+    // ========================================================================
+
+    /// Create TOUCHES relations between a Commit and its changed Files (batch UNWIND).
+    /// Files that don't exist as nodes are silently skipped.
+    async fn create_commit_touches(
+        &self,
+        commit_hash: &str,
+        files: &[FileChangedInfo],
+    ) -> Result<()>;
+
+    /// Get all files touched by a commit
+    async fn get_commit_files(&self, commit_hash: &str) -> Result<Vec<CommitFileInfo>>;
+
+    /// Get the commit history for a specific file
+    async fn get_file_history(
+        &self,
+        file_path: &str,
+        limit: Option<i64>,
+    ) -> Result<Vec<FileHistoryEntry>>;
+
+    // ========================================================================
+    // CO_CHANGED operations (File ↔ File)
+    // ========================================================================
+
+    /// Compute CO_CHANGED relations from TOUCHES history (incremental).
+    /// Returns the number of relations created/updated.
+    async fn compute_co_changed(
+        &self,
+        project_id: Uuid,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        min_count: i64,
+        max_relations: i64,
+    ) -> Result<i64>;
+
+    /// Update project last_co_change_computed_at timestamp
+    async fn update_project_co_change_timestamp(&self, id: Uuid) -> Result<()>;
+
+    /// Get the co-change graph for a project
+    async fn get_co_change_graph(
+        &self,
+        project_id: Uuid,
+        min_count: i64,
+        limit: i64,
+    ) -> Result<Vec<CoChangePair>>;
+
+    /// Get files that co-change with a given file
+    async fn get_file_co_changers(
+        &self,
+        file_path: &str,
+        min_count: i64,
+        limit: i64,
+    ) -> Result<Vec<CoChanger>>;
 
     // ========================================================================
     // Release operations
@@ -1071,13 +1199,19 @@ pub trait GraphStore: Send + Sync {
         entity_id: &str,
     ) -> Result<Vec<Note>>;
 
-    /// Get propagated notes for an entity (traversing the graph)
+    /// Get propagated notes for an entity (traversing the graph).
+    ///
+    /// `relation_types` controls which graph relations to traverse.
+    /// - `None` → default (CONTAINS|IMPORTS|CALLS) — backward compatible
+    /// - `Some(&["CO_CHANGED", "IMPLEMENTS_TRAIT", ...])` → custom traversal
+    /// Only whitelisted relation types are accepted (see `ALLOWED_PROPAGATION_RELATIONS`).
     async fn get_propagated_notes(
         &self,
         entity_type: &EntityType,
         entity_id: &str,
         max_depth: u32,
         min_score: f64,
+        relation_types: Option<&[String]>,
     ) -> Result<Vec<PropagatedNote>>;
 
     /// Get workspace-level notes for a project (propagated from parent workspace)
@@ -1276,6 +1410,30 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<(Vec<crate::notes::Note>, usize)>;
 
     // ========================================================================
+    // Cross-entity SYNAPSE operations (Decision ↔ Note)
+    // ========================================================================
+
+    /// Create bidirectional SYNAPSE relationships between any two nodes (Note or Decision).
+    /// Enables cross-entity neural linking for the Knowledge Fabric.
+    async fn create_cross_entity_synapses(
+        &self,
+        source_id: Uuid,
+        neighbors: &[(Uuid, f64)],
+    ) -> Result<usize>;
+
+    /// Get all SYNAPSE neighbors for any node (Note or Decision).
+    /// Returns (neighbor_id, weight, entity_type) where entity_type is "Note" or "Decision".
+    async fn get_cross_entity_synapses(&self, node_id: Uuid) -> Result<Vec<(Uuid, f64, String)>>;
+
+    /// List Decision nodes that have embeddings but no SYNAPSE relationships.
+    /// Used for cross-entity synapse backfill.
+    async fn list_decisions_needing_synapses(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<DecisionNode>, usize)>;
+
+    // ========================================================================
     // Chat session operations
     // ========================================================================
 
@@ -1356,6 +1514,26 @@ pub trait GraphStore: Send + Sync {
 
     /// Delete all chat events for a session
     async fn delete_chat_events(&self, session_id: Uuid) -> Result<()>;
+
+    // ========================================================================
+    // Chat DISCUSSED relations (ChatSession → Entity)
+    // ========================================================================
+
+    /// Add DISCUSSED relations between a chat session and entities (MERGE-based, idempotent).
+    /// Each entity is `(entity_type, entity_id)`.
+    async fn add_discussed(&self, session_id: Uuid, entities: &[(String, String)])
+        -> Result<usize>;
+
+    /// Get all entities discussed in a chat session, optionally scoped by project_id.
+    async fn get_session_entities(
+        &self,
+        session_id: Uuid,
+        project_id: Option<Uuid>,
+    ) -> Result<Vec<DiscussedEntity>>;
+
+    /// Backfill DISCUSSED relations on all existing sessions.
+    /// Returns `(sessions_processed, entities_found, relations_created)`.
+    async fn backfill_discussed(&self) -> Result<(usize, usize, usize)>;
 
     // ========================================================================
     // User / Auth operations
@@ -1510,6 +1688,78 @@ pub trait GraphStore: Send + Sync {
         &self,
         updates: &[FunctionAnalyticsUpdate],
     ) -> Result<()>;
+
+    /// Batch-update **fabric** analytics scores on File nodes.
+    /// Writes to `fabric_pagerank`, `fabric_betweenness`, `fabric_community_id`, etc.
+    /// These are separate from the code-only scores written by `batch_update_file_analytics`.
+    async fn batch_update_fabric_file_analytics(
+        &self,
+        updates: &[FabricFileAnalyticsUpdate],
+    ) -> Result<()>;
+
+    // ========================================================================
+    // SYNAPSE (neural connections bridged to file-level)
+    // ========================================================================
+
+    /// Get SYNAPSE edges bridged from Note-level to File-level.
+    /// Returns (source_file_path, target_file_path, avg_weight) tuples.
+    async fn get_project_synapse_edges(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(String, String, f64)>>;
+
+    /// Get neural network metrics for a project's SYNAPSE layer.
+    async fn get_neural_metrics(
+        &self,
+        project_id: Uuid,
+    ) -> Result<crate::neo4j::models::NeuralMetrics>;
+
+    // ========================================================================
+    // T5.5 — Churn score (commit frequency per file)
+    // ========================================================================
+
+    /// Compute churn metrics per file via TOUCHES relations.
+    async fn compute_churn_scores(&self, project_id: Uuid) -> Result<Vec<FileChurnScore>>;
+
+    /// Batch-write churn scores to File nodes.
+    async fn batch_update_churn_scores(&self, updates: &[FileChurnScore]) -> Result<()>;
+
+    /// Get top N files by churn_score (pre-computed on File nodes).
+    async fn get_top_hotspots(&self, project_id: Uuid, limit: usize)
+        -> Result<Vec<FileChurnScore>>;
+
+    // ========================================================================
+    // T5.6 — Knowledge density score
+    // ========================================================================
+
+    /// Compute knowledge density per file based on linked notes and decisions.
+    async fn compute_knowledge_density(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<FileKnowledgeDensity>>;
+
+    /// Batch-write knowledge density scores to File nodes.
+    async fn batch_update_knowledge_density(&self, updates: &[FileKnowledgeDensity]) -> Result<()>;
+
+    /// Get top N files with lowest knowledge_density (knowledge gaps).
+    async fn get_top_knowledge_gaps(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<FileKnowledgeDensity>>;
+
+    // ========================================================================
+    // T5.7 — Risk score composite
+    // ========================================================================
+
+    /// Compute composite risk scores for all files in a project.
+    async fn compute_risk_scores(&self, project_id: Uuid) -> Result<Vec<FileRiskScore>>;
+
+    /// Batch-write composite risk scores to File nodes.
+    async fn batch_update_risk_scores(&self, updates: &[FileRiskScore]) -> Result<()>;
+
+    /// Get risk assessment summary stats for a project.
+    async fn get_risk_summary(&self, project_id: Uuid) -> Result<serde_json::Value>;
 
     // ========================================================================
     // Health check

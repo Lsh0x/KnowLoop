@@ -94,8 +94,23 @@ pub struct AutoReinforcementConfig {
     /// Energy boost per note linked to files in a commit.
     pub commit_energy_boost: f64,
 
+    /// Synapse weight boost between notes co-activated by the same commit.
+    /// When a commit touches N files, all notes linked to those files are
+    /// co-activated → reinforce_synapses between them with this boost.
+    pub commit_synapse_boost: f64,
+
     /// Energy boost per note included in a chat system prompt context.
     pub context_energy_boost: f64,
+
+    /// Energy boost per note linked to entities discussed in chat messages.
+    /// When a chat message mentions `src/main.rs`, notes linked to that file
+    /// get their energy boosted by this amount.
+    pub chat_energy_boost: f64,
+
+    /// Synapse weight boost between notes co-activated by the same chat message.
+    /// When a chat message mentions 3 entities, notes of those entities are
+    /// co-activated → reinforce_synapses between them with this boost.
+    pub chat_synapse_boost: f64,
 }
 
 impl Default for AutoReinforcementConfig {
@@ -105,7 +120,10 @@ impl Default for AutoReinforcementConfig {
             search_energy_boost: 0.1,
             search_synapse_boost: 0.03,
             commit_energy_boost: 0.15,
+            commit_synapse_boost: 0.03,
             context_energy_boost: 0.05,
+            chat_energy_boost: 0.05,
+            chat_synapse_boost: 0.02,
         }
     }
 }

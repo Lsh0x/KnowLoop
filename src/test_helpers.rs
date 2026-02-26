@@ -193,6 +193,7 @@ pub fn test_project() -> ProjectNode {
         created_at: chrono::Utc::now(),
         last_synced: None,
         analytics_computed_at: None,
+        last_co_change_computed_at: None,
     }
 }
 
@@ -207,6 +208,7 @@ pub fn test_project_named(name: &str) -> ProjectNode {
         created_at: chrono::Utc::now(),
         last_synced: None,
         analytics_computed_at: None,
+        last_co_change_computed_at: None,
     }
 }
 
@@ -275,6 +277,9 @@ pub fn test_decision(description: &str, rationale: &str) -> DecisionNode {
         chosen_option: None,
         decided_by: "test-agent".to_string(),
         decided_at: chrono::Utc::now(),
+        status: DecisionStatus::Accepted,
+        embedding: None,
+        embedding_model: None,
     }
 }
 

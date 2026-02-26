@@ -10,7 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::handlers::{AppError, OrchestratorState};
-use crate::neo4j::models::ConnectedFileNode;
+use crate::neo4j::models::{ConnectedFileNode, DecisionNode};
 
 // ============================================================================
 // Code Search (Meilisearch)
@@ -447,6 +447,9 @@ pub struct ImpactAnalysis {
     /// Human-readable explanation of the risk score computation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk_formula: Option<String>,
+    /// Architectural decisions that AFFECT the target or its impacted files
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub affecting_decisions: Vec<DecisionNode>,
 }
 
 /// Analyze impact of changing a file or function
@@ -638,6 +641,39 @@ pub async fn analyze_impact(
             .join(", ")
     );
 
+    // Fetch architectural decisions that AFFECT the target and its direct dependencies.
+    // Uses the reverse AFFECTS lookup: (Decision)-[:AFFECTS]->(File/Function).
+    // Best-effort: returns empty vec if no AFFECTS relations exist yet.
+    let affecting_decisions = {
+        let entity_type_label = match target_type {
+            "function" => "Function",
+            _ => "File",
+        };
+        // Get decisions affecting the target itself
+        let mut decisions = state
+            .orchestrator
+            .neo4j()
+            .get_decisions_affecting(entity_type_label, &target, None)
+            .await
+            .unwrap_or_default();
+
+        // Also check decisions affecting directly affected files (deduplicated)
+        for affected_file in directly_affected.iter().take(5) {
+            let file_decisions = state
+                .orchestrator
+                .neo4j()
+                .get_decisions_affecting("File", affected_file, None)
+                .await
+                .unwrap_or_default();
+            for d in file_decisions {
+                if !decisions.iter().any(|existing| existing.id == d.id) {
+                    decisions.push(d);
+                }
+            }
+        }
+        decisions
+    };
+
     Ok(Json(ImpactAnalysis {
         target,
         directly_affected,
@@ -649,6 +685,7 @@ pub async fn analyze_impact(
         affected_communities,
         betweenness_score,
         risk_formula,
+        affecting_decisions,
     }))
 }
 
@@ -1387,6 +1424,45 @@ pub async fn get_code_health(
         })
     });
 
+    // Best-effort: fetch hotspots, knowledge gaps, and risk summary.
+    // Returns empty arrays / null if properties have not been computed yet.
+    let hotspots = state
+        .orchestrator
+        .neo4j()
+        .get_top_hotspots(project.id, 5)
+        .await
+        .unwrap_or_default();
+
+    let knowledge_gaps = state
+        .orchestrator
+        .neo4j()
+        .get_top_knowledge_gaps(project.id, 5)
+        .await
+        .unwrap_or_default();
+
+    let risk_assessment = state
+        .orchestrator
+        .neo4j()
+        .get_risk_summary(project.id)
+        .await
+        .unwrap_or(serde_json::json!(null));
+
+    // Neural metrics (SYNAPSE layer health)
+    let neural_metrics = match state
+        .orchestrator
+        .neo4j()
+        .get_neural_metrics(project.id)
+        .await
+    {
+        Ok(nm) => serde_json::json!({
+            "active_synapses": nm.active_synapses,
+            "avg_energy": nm.avg_energy,
+            "weak_synapses_ratio": nm.weak_synapses_ratio,
+            "dead_notes_count": nm.dead_notes_count,
+        }),
+        Err(_) => serde_json::json!(null),
+    };
+
     Ok(Json(serde_json::json!({
         "god_functions": god_functions_json,
         "god_function_count": god_functions_json.len(),
@@ -1396,6 +1472,10 @@ pub async fn get_code_health(
         "coupling_metrics": coupling_json,
         "circular_dependencies": circular_deps,
         "circular_dependency_count": circular_deps.len(),
+        "hotspots": hotspots,
+        "knowledge_gaps": knowledge_gaps,
+        "risk_assessment": risk_assessment,
+        "neural_metrics": neural_metrics,
     })))
 }
 
@@ -1497,6 +1577,12 @@ pub async fn get_node_importance(
             "in_degree": metrics.in_degree,
             "out_degree": metrics.out_degree,
         },
+        "fabric_metrics": {
+            "fabric_pagerank": metrics.fabric_pagerank,
+            "fabric_betweenness": metrics.fabric_betweenness,
+            "fabric_community_id": metrics.fabric_community_id,
+            "fabric_community_label": metrics.fabric_community_label,
+        },
         "percentiles": {
             "pagerank_p80": percentiles.pagerank_p80,
             "pagerank_p95": percentiles.pagerank_p95,
@@ -1560,6 +1646,153 @@ pub async fn plan_implementation(
     Ok(Json(
         serde_json::to_value(&plan).map_err(anyhow::Error::from)?,
     ))
+}
+
+// ============================================================================
+// T5.5 — Change Hotspots (Churn Score)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct HotspotsQuery {
+    pub project_slug: String,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/code/hotspots — Get files sorted by churn score (most frequently changed first)
+pub async fn get_change_hotspots(
+    State(state): State<OrchestratorState>,
+    Query(params): Query<HotspotsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&params.project_slug)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Project '{}' not found", params.project_slug))
+        })?;
+
+    let limit = params.limit.unwrap_or(20);
+    let scores = state
+        .orchestrator
+        .neo4j()
+        .compute_churn_scores(project.id)
+        .await?;
+
+    let limited: Vec<&crate::neo4j::models::FileChurnScore> = scores.iter().take(limit).collect();
+
+    Ok(Json(serde_json::json!({
+        "hotspots": limited,
+        "total_files": scores.len(),
+        "limit": limit,
+    })))
+}
+
+// ============================================================================
+// T5.6 — Knowledge Gaps (Knowledge Density)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct KnowledgeGapsQuery {
+    pub project_slug: String,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/code/knowledge-gaps — Get files sorted by knowledge density ASC (least documented first)
+pub async fn get_knowledge_gaps(
+    State(state): State<OrchestratorState>,
+    Query(params): Query<KnowledgeGapsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&params.project_slug)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Project '{}' not found", params.project_slug))
+        })?;
+
+    let limit = params.limit.unwrap_or(20);
+    let mut scores = state
+        .orchestrator
+        .neo4j()
+        .compute_knowledge_density(project.id)
+        .await?;
+
+    // Sort by knowledge_density ASC (least documented first)
+    scores.sort_by(|a, b| {
+        a.knowledge_density
+            .partial_cmp(&b.knowledge_density)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let limited: Vec<&crate::neo4j::models::FileKnowledgeDensity> =
+        scores.iter().take(limit).collect();
+
+    Ok(Json(serde_json::json!({
+        "knowledge_gaps": limited,
+        "total_files": scores.len(),
+        "limit": limit,
+    })))
+}
+
+// ============================================================================
+// T5.7 — Risk Assessment (Composite Risk Score)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct RiskAssessmentQuery {
+    pub project_slug: String,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/code/risk-assessment — Get files sorted by composite risk score DESC
+pub async fn get_risk_assessment(
+    State(state): State<OrchestratorState>,
+    Query(params): Query<RiskAssessmentQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&params.project_slug)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Project '{}' not found", params.project_slug))
+        })?;
+
+    let limit = params.limit.unwrap_or(20);
+    let scores = state
+        .orchestrator
+        .neo4j()
+        .compute_risk_scores(project.id)
+        .await?;
+
+    let limited: Vec<&crate::neo4j::models::FileRiskScore> = scores.iter().take(limit).collect();
+
+    // Compute summary stats
+    let total = scores.len();
+    let critical = scores.iter().filter(|s| s.risk_level == "critical").count();
+    let high = scores.iter().filter(|s| s.risk_level == "high").count();
+    let medium = scores.iter().filter(|s| s.risk_level == "medium").count();
+    let low = scores.iter().filter(|s| s.risk_level == "low").count();
+    let avg_risk = if total > 0 {
+        scores.iter().map(|s| s.risk_score).sum::<f64>() / total as f64
+    } else {
+        0.0
+    };
+
+    Ok(Json(serde_json::json!({
+        "risk_files": limited,
+        "total_files": total,
+        "limit": limit,
+        "summary": {
+            "avg_risk_score": avg_risk,
+            "critical_count": critical,
+            "high_count": high,
+            "medium_count": medium,
+            "low_count": low,
+        }
+    })))
 }
 
 #[cfg(test)]
@@ -1879,6 +2112,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_synced: None,
             analytics_computed_at: None,
+            last_co_change_computed_at: None,
         };
         app_state.neo4j.create_project(&project).await.unwrap();
         app_state
@@ -2024,6 +2258,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_synced: None,
             analytics_computed_at: None,
+            last_co_change_computed_at: None,
         };
         graph.create_project(&project).await.unwrap();
 
@@ -2204,6 +2439,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_synced: Some(chrono::Utc::now()),
             analytics_computed_at: None,
+            last_co_change_computed_at: None,
         };
         graph.create_project(&project).await.unwrap();
 
@@ -2401,6 +2637,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_synced: Some(chrono::Utc::now()),
             analytics_computed_at: None,
+            last_co_change_computed_at: None,
         };
         graph.create_project(&project).await.unwrap();
 
@@ -2538,6 +2775,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_synced: Some(chrono::Utc::now()),
             analytics_computed_at: None,
+            last_co_change_computed_at: None,
         };
         graph.create_project(&project).await.unwrap();
 
@@ -3467,5 +3705,325 @@ mod tests {
         assert!(results[0]["path"].is_string());
         assert!(results[0]["similarity"].is_number());
         assert!(results[0]["snippet"].is_string());
+    }
+
+    // ================================================================
+    // Knowledge Fabric — Structural Analytics & Risk Tests
+    // ================================================================
+
+    /// Parse response body as JSON
+    async fn body_json(resp: axum::http::Response<Body>) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    // ----------------------------------------------------------------
+    // GET /api/code/communities
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_communities_valid_project() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/communities?project_slug=analytics-proj",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // May be empty or have communities depending on mock
+        assert!(json["communities"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_get_communities_project_not_found() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get("/api/code/communities?project_slug=nonexistent"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_communities_with_min_size() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/communities?project_slug=analytics-proj&min_size=5",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // GET /api/code/health
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_code_health_valid_project() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get("/api/code/health?project_slug=analytics-proj"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["god_functions"].is_array());
+        assert!(json["orphan_files"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_get_code_health_project_not_found() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get("/api/code/health?project_slug=nonexistent"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_code_health_custom_threshold() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/health?project_slug=analytics-proj&god_function_threshold=5",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // GET /api/code/node-importance
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_node_importance_not_in_mock() {
+        // Mock get_node_gds_metrics returns None for all nodes,
+        // so this should return 404
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/node-importance?project_slug=analytics-proj&node_path=src/main.rs",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_node_importance_nonexistent_node() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/node-importance?project_slug=analytics-proj&node_path=nonexistent.rs",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_node_importance_project_not_found() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/node-importance?project_slug=nonexistent&node_path=src/main.rs",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ----------------------------------------------------------------
+    // GET /api/code/hotspots — Change hotspots (churn)
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_change_hotspots_valid() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get("/api/code/hotspots?project_slug=analytics-proj"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["hotspots"].is_array());
+        assert!(json["total_files"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_get_change_hotspots_project_not_found() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get("/api/code/hotspots?project_slug=nonexistent"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_change_hotspots_with_limit() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/hotspots?project_slug=analytics-proj&limit=5",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // GET /api/code/knowledge-gaps — Knowledge density
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_knowledge_gaps_valid() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/knowledge-gaps?project_slug=analytics-proj",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["knowledge_gaps"].is_array());
+        assert!(json["total_files"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_get_knowledge_gaps_project_not_found() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/knowledge-gaps?project_slug=nonexistent",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_knowledge_gaps_with_limit() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/knowledge-gaps?project_slug=analytics-proj&limit=10",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // GET /api/code/risk-assessment — Composite risk score
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_risk_assessment_valid() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/risk-assessment?project_slug=analytics-proj",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["risk_files"].is_array());
+        assert!(json["total_files"].is_number());
+        assert!(json["summary"]["avg_risk_score"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_get_risk_assessment_project_not_found() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/risk-assessment?project_slug=nonexistent",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_risk_assessment_with_limit() {
+        let (app, _pid) = test_app_with_analytics().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/code/risk-assessment?project_slug=analytics-proj&limit=10",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // Deserialization tests for query structs
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_communities_query_deserialize() {
+        let json = r#"{"project_slug":"my-proj","min_size":3}"#;
+        let q: CommunitiesQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.project_slug, "my-proj");
+        assert_eq!(q.min_size, Some(3));
+    }
+
+    #[test]
+    fn test_communities_query_defaults() {
+        let json = r#"{"project_slug":"my-proj"}"#;
+        let q: CommunitiesQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.min_size, None);
+    }
+
+    #[test]
+    fn test_code_health_query_deserialize() {
+        let json = r#"{"project_slug":"my-proj","god_function_threshold":5}"#;
+        let q: CodeHealthQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.project_slug, "my-proj");
+        assert_eq!(q.god_function_threshold, Some(5));
+    }
+
+    #[test]
+    fn test_hotspots_query_deserialize() {
+        let json = r#"{"project_slug":"my-proj","limit":10}"#;
+        let q: HotspotsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.project_slug, "my-proj");
+        assert_eq!(q.limit, Some(10));
+    }
+
+    #[test]
+    fn test_knowledge_gaps_query_deserialize() {
+        let json = r#"{"project_slug":"my-proj","limit":15}"#;
+        let q: KnowledgeGapsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.project_slug, "my-proj");
+        assert_eq!(q.limit, Some(15));
+    }
+
+    #[test]
+    fn test_risk_assessment_query_deserialize() {
+        let json = r#"{"project_slug":"my-proj","limit":20}"#;
+        let q: RiskAssessmentQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.project_slug, "my-proj");
+        assert_eq!(q.limit, Some(20));
+    }
+
+    #[test]
+    fn test_node_importance_query_deserialize() {
+        let json = r#"{"project_slug":"my-proj","node_path":"src/main.rs","node_type":"file"}"#;
+        let q: NodeImportanceQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.project_slug, "my-proj");
+        assert_eq!(q.node_path, "src/main.rs");
+        assert_eq!(q.node_type, Some("file".to_string()));
     }
 }

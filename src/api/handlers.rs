@@ -7,8 +7,9 @@ use crate::api::{
 use crate::chat::ChatManager;
 use crate::events::{EventEmitter, HybridEmitter, NatsEmitter};
 use crate::neo4j::models::{
-    CommitNode, ConstraintNode, DecisionNode, MilestoneNode, MilestoneStatus, PlanNode, PlanStatus,
-    ReleaseNode, ReleaseStatus, StepNode, TaskNode, TaskWithPlan,
+    AffectsRelation, CommitNode, ConstraintNode, DecisionNode, DecisionStatus,
+    DecisionTimelineEntry, MilestoneNode, MilestoneStatus, PlanNode, PlanStatus, ReleaseNode,
+    ReleaseStatus, StepNode, TaskNode, TaskWithPlan,
 };
 use crate::orchestrator::{FileWatcher, Orchestrator};
 use crate::plan::models::*;
@@ -643,6 +644,7 @@ pub struct UpdateDecisionRequest {
     pub description: Option<String>,
     pub rationale: Option<String>,
     pub chosen_option: Option<String>,
+    pub status: Option<DecisionStatus>,
 }
 
 /// Update a decision
@@ -658,6 +660,7 @@ pub async fn update_decision(
             req.description,
             req.rationale,
             req.chosen_option,
+            req.status,
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -694,6 +697,177 @@ pub async fn search_decisions(
         )
         .await?;
     Ok(Json(decisions))
+}
+
+/// Semantic search for decisions using vector embeddings
+#[derive(Deserialize)]
+pub struct SearchDecisionsSemanticQuery {
+    pub query: String,
+    pub limit: Option<usize>,
+    pub project_id: Option<String>,
+}
+
+pub async fn search_decisions_semantic(
+    State(state): State<OrchestratorState>,
+    axum::extract::Query(params): axum::extract::Query<SearchDecisionsSemanticQuery>,
+) -> Result<Json<Vec<DecisionSearchHit>>, AppError> {
+    let results = state
+        .orchestrator
+        .plan_manager()
+        .search_decisions_semantic(
+            &params.query,
+            params.limit.unwrap_or(10),
+            params.project_id.as_deref(),
+        )
+        .await?;
+    Ok(Json(results))
+}
+
+// ============================================================================
+// Decision Affects
+// ============================================================================
+
+/// Query params for getting decisions that affect an entity
+#[derive(Deserialize)]
+pub struct DecisionsAffectingQuery {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub status: Option<String>,
+}
+
+/// Get decisions that affect a given entity (reverse AFFECTS lookup)
+pub async fn get_decisions_affecting(
+    State(state): State<OrchestratorState>,
+    Query(params): Query<DecisionsAffectingQuery>,
+) -> Result<Json<Vec<DecisionNode>>, AppError> {
+    let results = state
+        .orchestrator
+        .neo4j()
+        .get_decisions_affecting(
+            &params.entity_type,
+            &params.entity_id,
+            params.status.as_deref(),
+        )
+        .await?;
+    Ok(Json(results))
+}
+
+/// Request to add an AFFECTS relation from a decision to an entity
+#[derive(Deserialize)]
+pub struct AddAffectsRequest {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub impact_description: Option<String>,
+}
+
+/// Add an AFFECTS relation from a decision to an entity
+pub async fn add_decision_affects(
+    State(state): State<OrchestratorState>,
+    Path(decision_id): Path<Uuid>,
+    Json(req): Json<AddAffectsRequest>,
+) -> Result<StatusCode, AppError> {
+    state
+        .orchestrator
+        .neo4j()
+        .add_decision_affects(
+            decision_id,
+            &req.entity_type,
+            &req.entity_id,
+            req.impact_description.as_deref(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Remove an AFFECTS relation from a decision to an entity.
+///
+/// Supports two URL formats:
+/// - `DELETE /api/decisions/{id}/affects/{entity_type}/{entity_id}` (simple entity_ids)
+/// - `DELETE /api/decisions/{id}/affects?entity_type=File&entity_id=/path/to/file.rs` (paths with slashes)
+pub async fn remove_decision_affects(
+    State(state): State<OrchestratorState>,
+    Path((decision_id, entity_type, entity_id)): Path<(Uuid, String, String)>,
+) -> Result<StatusCode, AppError> {
+    state
+        .orchestrator
+        .neo4j()
+        .remove_decision_affects(decision_id, &entity_type, &entity_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Query params for the query-param variant of remove_decision_affects.
+#[derive(Deserialize)]
+pub struct RemoveAffectsQuery {
+    pub entity_type: String,
+    pub entity_id: String,
+}
+
+/// DELETE /api/decisions/{id}/affects?entity_type=...&entity_id=...
+///
+/// Alternative to the path-based route, for entity_ids that contain slashes (e.g. file paths).
+pub async fn remove_decision_affects_query(
+    State(state): State<OrchestratorState>,
+    Path(decision_id): Path<Uuid>,
+    Query(query): Query<RemoveAffectsQuery>,
+) -> Result<StatusCode, AppError> {
+    state
+        .orchestrator
+        .neo4j()
+        .remove_decision_affects(decision_id, &query.entity_type, &query.entity_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// List all entities affected by a decision
+pub async fn list_decision_affects(
+    State(state): State<OrchestratorState>,
+    Path(decision_id): Path<Uuid>,
+) -> Result<Json<Vec<AffectsRelation>>, AppError> {
+    let affects = state
+        .orchestrator
+        .neo4j()
+        .list_decision_affects(decision_id)
+        .await?;
+    Ok(Json(affects))
+}
+
+/// Mark a decision as superseded by a newer decision
+pub async fn supersede_decision(
+    State(state): State<OrchestratorState>,
+    Path((new_id, old_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    state
+        .orchestrator
+        .neo4j()
+        .supersede_decision(new_id, old_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ============================================================================
+// Decision Timeline
+// ============================================================================
+
+/// Query parameters for the decision timeline endpoint
+#[derive(Deserialize)]
+pub struct DecisionTimelineQuery {
+    pub task_id: Option<Uuid>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+/// Get a timeline of decisions with supersession chains
+pub async fn get_decision_timeline(
+    State(state): State<OrchestratorState>,
+    Query(params): Query<DecisionTimelineQuery>,
+) -> Result<Json<Vec<DecisionTimelineEntry>>, AppError> {
+    let entries = state
+        .orchestrator
+        .neo4j()
+        .get_decision_timeline(params.task_id, params.from.as_deref(), params.to.as_deref())
+        .await?;
+    Ok(Json(entries))
 }
 
 // ============================================================================
@@ -1174,8 +1348,13 @@ pub struct CreateCommitRequest {
     pub message: String,
     pub author: String,
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
-    /// Files changed in this commit (enables incremental sync)
-    pub files_changed: Option<Vec<String>>,
+    /// Files changed in this commit (enables incremental sync + TOUCHES relations).
+    /// Accepts either simple strings `["a.rs"]` or objects `[{"path": "a.rs", "additions": 10}]`.
+    #[serde(
+        default,
+        deserialize_with = "crate::neo4j::models::deserialize_files_changed"
+    )]
+    pub files_changed: Option<Vec<crate::neo4j::models::FileChangedInfo>>,
     /// Project UUID (enables incremental sync + analytics)
     pub project_id: Option<String>,
 }
@@ -1215,25 +1394,66 @@ pub async fn create_commit(
 
     let sync_triggered = !files_changed.is_empty() && project_id.is_some();
 
-    if sync_triggered {
-        let pid = project_id.unwrap();
-        let orchestrator = state.orchestrator.clone();
-        let files_for_boost = files_changed.clone();
-
-        // Resolve project slug for MeiliSearch indexing
-        let project_slug = orchestrator
+    // Resolve project to get root_path (for path resolution) and slug (for MeiliSearch).
+    // File nodes in Neo4j use absolute paths, so TOUCHES relations require absolute paths.
+    let project_info = if let Some(pid) = project_id {
+        state
+            .orchestrator
             .neo4j()
             .get_project(pid)
             .await
             .ok()
             .flatten()
-            .map(|p| p.slug);
+    } else {
+        None
+    };
+    let project_root = project_info
+        .as_ref()
+        .map(|p| std::path::PathBuf::from(crate::expand_tilde(&p.root_path)));
+    let project_slug = project_info.as_ref().map(|p| p.slug.clone());
+
+    // Resolve relative paths to absolute using project root_path
+    let files_changed: Vec<crate::neo4j::models::FileChangedInfo> = files_changed
+        .into_iter()
+        .map(|mut f| {
+            if let Some(ref root) = project_root {
+                let p = std::path::Path::new(&f.path);
+                if p.is_relative() {
+                    f.path = root.join(p).to_string_lossy().to_string();
+                }
+            }
+            f
+        })
+        .collect();
+
+    // Side-effect: Create TOUCHES relations (Commit→File) — synchronous for consistency
+    if !files_changed.is_empty() {
+        let commit_hash = commit.hash.clone();
+        if let Err(e) = state
+            .orchestrator
+            .neo4j()
+            .create_commit_touches(&commit_hash, &files_changed)
+            .await
+        {
+            tracing::warn!(
+                commit = %commit_hash, error = %e,
+                "Failed to create TOUCHES relations"
+            );
+        }
+    }
+
+    if sync_triggered {
+        let pid = project_id.unwrap();
+        let orchestrator = state.orchestrator.clone();
+        // Extract file paths for sync and boost operations
+        let file_paths: Vec<String> = files_changed.iter().map(|f| f.path.clone()).collect();
+        let paths_for_boost = file_paths.clone();
 
         // Side-effect 1 & 2: Incremental sync + analytics debounce
         let orch2 = orchestrator.clone();
         tokio::spawn(async move {
-            for file_path in &files_changed {
-                let path = std::path::Path::new(file_path);
+            for file_path in &file_paths {
+                let path = std::path::Path::new(file_path.as_str());
                 if path.exists() {
                     if let Err(e) = orch2
                         .sync_file_for_project(path, Some(pid), project_slug.as_deref())
@@ -1247,40 +1467,20 @@ pub async fn create_commit(
                 tracing::warn!("Failed to update last_synced: {}", e);
             }
             orch2.analytics_debouncer().trigger(pid);
+            orch2.co_change_debouncer().trigger(pid);
         });
 
-        // Side-effect 3: Hebbian energy boost on notes linked to committed files
-        let ar_config = orchestrator.auto_reinforcement_config().clone();
-        if ar_config.enabled && !files_for_boost.is_empty() {
-            let neo4j = orchestrator.neo4j_arc();
-            tokio::spawn(async move {
-                for file_path in &files_for_boost {
-                    match neo4j
-                        .get_notes_for_entity(&crate::notes::EntityType::File, file_path)
-                        .await
-                    {
-                        Ok(notes) => {
-                            for note in &notes {
-                                if let Err(e) = neo4j
-                                    .boost_energy(note.id, ar_config.commit_energy_boost)
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        note_id = %note.id, error = %e,
-                                        "Auto-reinforce commit: energy boost failed"
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                file = %file_path, error = %e,
-                                "Auto-reinforce commit: get_entity_notes failed"
-                            );
-                        }
-                    }
-                }
-            });
+        // Side-effect 3: Debounced Hebbian energy boost + synapse reinforcement.
+        // Instead of inline processing, delegate to the NeuralReinforcementDebouncer
+        // which batches file paths across rapid-fire commits (e.g., during git
+        // checkout/rebase) and performs a single pass after a 5s quiet period.
+        if orchestrator.auto_reinforcement_config().enabled && !paths_for_boost.is_empty() {
+            orchestrator.neural_reinforcement_debouncer().trigger(
+                crate::graph::ReinforcementPayload {
+                    project_id: pid,
+                    file_paths: paths_for_boost,
+                },
+            );
         }
     }
 
@@ -1338,6 +1538,376 @@ pub async fn get_plan_commits(
 ) -> Result<Json<Vec<CommitNode>>, AppError> {
     let commits = state.orchestrator.neo4j().get_plan_commits(plan_id).await?;
     Ok(Json(commits))
+}
+
+// ============================================================================
+// TOUCHES — Commit ↔ File queries
+// ============================================================================
+
+/// Get files touched by a commit (via TOUCHES relations)
+pub async fn get_commit_files(
+    State(state): State<OrchestratorState>,
+    Path(commit_sha): Path<String>,
+) -> Result<Json<Vec<crate::neo4j::models::CommitFileInfo>>, AppError> {
+    let files = state
+        .orchestrator
+        .neo4j()
+        .get_commit_files(&commit_sha)
+        .await?;
+    Ok(Json(files))
+}
+
+/// Query parameters for file history
+#[derive(Deserialize)]
+pub struct FileHistoryQuery {
+    pub path: String,
+    pub limit: Option<i64>,
+}
+
+/// Get commit history for a file (via TOUCHES relations)
+pub async fn get_file_history(
+    State(state): State<OrchestratorState>,
+    Query(query): Query<FileHistoryQuery>,
+) -> Result<Json<Vec<crate::neo4j::models::FileHistoryEntry>>, AppError> {
+    let history = state
+        .orchestrator
+        .neo4j()
+        .get_file_history(&query.path, query.limit)
+        .await?;
+    Ok(Json(history))
+}
+
+/// Query parameters for co-change graph
+#[derive(Deserialize)]
+pub struct CoChangeGraphQuery {
+    pub min_count: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+/// Get the co-change graph for a project
+pub async fn get_co_change_graph(
+    State(state): State<OrchestratorState>,
+    Path(project_id): Path<Uuid>,
+    Query(query): Query<CoChangeGraphQuery>,
+) -> Result<Json<Vec<crate::neo4j::models::CoChangePair>>, AppError> {
+    let pairs = state
+        .orchestrator
+        .neo4j()
+        .get_co_change_graph(
+            project_id,
+            query.min_count.unwrap_or(3),
+            query.limit.unwrap_or(100),
+        )
+        .await?;
+    Ok(Json(pairs))
+}
+
+/// Query parameters for file co-changers
+#[derive(Deserialize)]
+pub struct FileCoChangersQuery {
+    pub path: String,
+    pub min_count: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+/// Get files that co-change with a given file
+pub async fn get_file_co_changers(
+    State(state): State<OrchestratorState>,
+    Query(query): Query<FileCoChangersQuery>,
+) -> Result<Json<Vec<crate::neo4j::models::CoChanger>>, AppError> {
+    let changers = state
+        .orchestrator
+        .neo4j()
+        .get_file_co_changers(
+            &query.path,
+            query.min_count.unwrap_or(3),
+            query.limit.unwrap_or(50),
+        )
+        .await?;
+    Ok(Json(changers))
+}
+
+/// Backfill TOUCHES relations from git history for a project
+pub async fn backfill_commit_touches(
+    State(state): State<OrchestratorState>,
+    Path(project_slug): Path<String>,
+) -> Result<Json<crate::orchestrator::BackfillResult>, AppError> {
+    // Resolve project
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", project_slug)))?;
+
+    let root_path = std::path::PathBuf::from(crate::expand_tilde(&project.root_path));
+    let result = state
+        .orchestrator
+        .backfill_commit_touches(project.id, &root_path)
+        .await?;
+
+    Ok(Json(result))
+}
+
+/// Backfill embeddings for all decisions that don't have one yet.
+///
+/// Returns synchronously with the count of decisions processed.
+pub async fn backfill_decision_embeddings(
+    State(state): State<OrchestratorState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let (total, created) = state
+        .orchestrator
+        .plan_manager()
+        .backfill_decision_embeddings()
+        .await?;
+
+    Ok(Json(serde_json::json!({
+        "decisions_processed": total,
+        "embeddings_created": created,
+    })))
+}
+
+/// POST /api/admin/backfill-discussed — Backfill DISCUSSED relations on existing sessions
+pub async fn backfill_discussed(
+    State(state): State<OrchestratorState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let (sessions, entities, relations) = state
+        .orchestrator
+        .neo4j()
+        .backfill_discussed()
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(serde_json::json!({
+        "sessions_processed": sessions,
+        "entities_found": entities,
+        "relations_created": relations,
+    })))
+}
+
+// ============================================================================
+// Knowledge Fabric Admin
+// ============================================================================
+
+/// Request body for update-fabric-scores and bootstrap-knowledge-fabric
+#[derive(Deserialize)]
+pub struct FabricProjectRequest {
+    pub project_id: Uuid,
+}
+
+/// POST /api/admin/update-fabric-scores
+///
+/// Orchestrates the full fabric analytics pipeline: extracts the multi-layer
+/// fabric graph (IMPORTS + CO_CHANGED + SYNAPSE) and computes PageRank,
+/// Louvain, and Betweenness scores on it.
+pub async fn update_fabric_scores(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<FabricProjectRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project_id = body.project_id;
+
+    // Verify project exists
+    let _project = state
+        .orchestrator
+        .neo4j()
+        .get_project(project_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", project_id)))?;
+
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(120);
+
+    // Compute fabric graph analytics with timeout (IMPORTS + CO_CHANGED + SYNAPSE layers)
+    let weights = crate::graph::models::FabricWeights::default();
+    let analytics = tokio::time::timeout(timeout, async {
+        state
+            .orchestrator
+            .analytics()
+            .analyze_fabric_graph(project_id, &weights)
+            .await
+    })
+    .await
+    .map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "Fabric scores computation timed out after 120s"
+        ))
+    })?
+    .map_err(AppError::Internal)?;
+
+    let computation_ms = start.elapsed().as_millis() as u64;
+
+    if computation_ms > 10_000 {
+        tracing::warn!(
+            project_id = %project_id,
+            nodes = analytics.metrics.len(),
+            elapsed_ms = computation_ms,
+            "Large graph: fabric scores computation took >10s"
+        );
+    }
+
+    // Also compute churn, knowledge_density, and risk scores
+    let neo = state.orchestrator.neo4j();
+    let churn = neo
+        .compute_churn_scores(project_id)
+        .await
+        .unwrap_or_default();
+    let churn_count = churn.len();
+    let _ = neo.batch_update_churn_scores(&churn).await;
+
+    let density = neo
+        .compute_knowledge_density(project_id)
+        .await
+        .unwrap_or_default();
+    let density_count = density.len();
+    let _ = neo.batch_update_knowledge_density(&density).await;
+
+    let risk = neo
+        .compute_risk_scores(project_id)
+        .await
+        .unwrap_or_default();
+    let risk_count = risk.len();
+    let _ = neo.batch_update_risk_scores(&risk).await;
+
+    Ok(Json(serde_json::json!({
+        "nodes_updated": analytics.metrics.len(),
+        "computation_ms": start.elapsed().as_millis() as u64,
+        "fabric_scores_computed": true,
+        "communities": analytics.communities.len(),
+        "components": analytics.components.len(),
+        "churn_scores_computed": churn_count,
+        "knowledge_density_computed": density_count,
+        "risk_scores_computed": risk_count,
+    })))
+}
+
+/// POST /api/admin/bootstrap-knowledge-fabric
+///
+/// Chains ALL knowledge fabric backfill steps in order, then computes
+/// fabric scores. Each step is best-effort (continues on failure).
+/// Returns a report of completed and failed steps.
+pub async fn bootstrap_knowledge_fabric(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<FabricProjectRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project_id = body.project_id;
+
+    // Verify project exists
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project(project_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", project_id)))?;
+
+    let start = std::time::Instant::now();
+    let mut completed = Vec::new();
+    let mut failed = Vec::new();
+
+    // Step 1: Backfill commit touches
+    let root_path = std::path::PathBuf::from(crate::expand_tilde(&project.root_path));
+    match state
+        .orchestrator
+        .backfill_commit_touches(project_id, &root_path)
+        .await
+    {
+        Ok(result) => completed.push(serde_json::json!({
+            "step": "backfill_touches",
+            "commits_parsed": result.commits_parsed,
+            "commits_backfilled": result.commits_backfilled,
+            "touches_created": result.touches_created,
+        })),
+        Err(e) => failed.push(serde_json::json!({
+            "step": "backfill_touches",
+            "error": e.to_string(),
+        })),
+    }
+
+    // Step 2: Backfill decision embeddings
+    match state
+        .orchestrator
+        .plan_manager()
+        .backfill_decision_embeddings()
+        .await
+    {
+        Ok((total, created)) => completed.push(serde_json::json!({
+            "step": "backfill_decision_embeddings",
+            "decisions_processed": total,
+            "embeddings_created": created,
+        })),
+        Err(e) => failed.push(serde_json::json!({
+            "step": "backfill_decision_embeddings",
+            "error": e.to_string(),
+        })),
+    }
+
+    // Step 3: Backfill DISCUSSED relations
+    match state.orchestrator.neo4j().backfill_discussed().await {
+        Ok((sessions, entities, relations)) => completed.push(serde_json::json!({
+            "step": "backfill_discussed",
+            "sessions_processed": sessions,
+            "entities_found": entities,
+            "relations_created": relations,
+        })),
+        Err(e) => failed.push(serde_json::json!({
+            "step": "backfill_discussed",
+            "error": e.to_string(),
+        })),
+    }
+
+    // Step 4: Update fabric scores (the final analytics computation)
+    let weights = crate::graph::models::FabricWeights::default();
+    let timeout = std::time::Duration::from_secs(120);
+    match tokio::time::timeout(
+        timeout,
+        state
+            .orchestrator
+            .analytics()
+            .analyze_fabric_graph(project_id, &weights),
+    )
+    .await
+    {
+        Ok(Ok(analytics)) => completed.push(serde_json::json!({
+            "step": "update_fabric_scores",
+            "nodes_updated": analytics.metrics.len(),
+            "communities": analytics.communities.len(),
+        })),
+        Ok(Err(e)) => failed.push(serde_json::json!({
+            "step": "update_fabric_scores",
+            "error": e.to_string(),
+        })),
+        Err(_) => failed.push(serde_json::json!({
+            "step": "update_fabric_scores",
+            "error": "Timed out after 120s",
+        })),
+    }
+
+    // Step 5: Compute churn, knowledge density, and risk scores
+    let neo = state.orchestrator.neo4j();
+    if let Ok(churn) = neo.compute_churn_scores(project_id).await {
+        let count = churn.len();
+        let _ = neo.batch_update_churn_scores(&churn).await;
+        completed.push(serde_json::json!({"step": "churn_scores", "files_scored": count}));
+    }
+    if let Ok(density) = neo.compute_knowledge_density(project_id).await {
+        let count = density.len();
+        let _ = neo.batch_update_knowledge_density(&density).await;
+        completed.push(serde_json::json!({"step": "knowledge_density", "files_scored": count}));
+    }
+    if let Ok(risk) = neo.compute_risk_scores(project_id).await {
+        let count = risk.len();
+        let _ = neo.batch_update_risk_scores(&risk).await;
+        completed.push(serde_json::json!({"step": "risk_scores", "files_scored": count}));
+    }
+
+    let total_time_ms = start.elapsed().as_millis() as u64;
+
+    Ok(Json(serde_json::json!({
+        "steps_completed": completed,
+        "steps_failed": failed,
+        "total_time_ms": total_time_ms,
+    })))
 }
 
 // ============================================================================
@@ -2693,5 +3263,569 @@ mod tests {
         let state = make_origin_test_state(6600, Some("https://ffs.dev"), None);
         let result = state.validate_origin(Some("https://ffs.dev/"));
         assert_eq!(result.unwrap(), Some("https://ffs.dev".to_string()));
+    }
+
+    // ================================================================
+    // Knowledge Fabric — Handler Tests
+    // ================================================================
+
+    /// Build a simple test router (no seeded data)
+    async fn test_app() -> axum::Router {
+        let app_state = mock_app_state();
+        let orchestrator = Arc::new(Orchestrator::new(app_state).await.unwrap());
+        let watcher = Arc::new(tokio::sync::RwLock::new(FileWatcher::new(
+            orchestrator.clone(),
+        )));
+        let state = Arc::new(ServerState {
+            orchestrator,
+            watcher,
+            chat_manager: None,
+            event_bus: Arc::new(crate::events::HybridEmitter::new(Arc::new(
+                crate::events::EventBus::default(),
+            ))),
+            nats_emitter: None,
+            auth_config: Some(crate::test_helpers::test_auth_config()),
+            serve_frontend: false,
+            frontend_path: "./dist".to_string(),
+            setup_completed: true,
+            server_port: 6600,
+            public_url: None,
+            ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+        });
+        create_router(state)
+    }
+
+    /// Create an authenticated POST request with JSON body
+    fn auth_post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", test_bearer_token())
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap()
+    }
+
+    /// Create an authenticated DELETE request
+    fn auth_delete(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .header("authorization", test_bearer_token())
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// Parse response body as JSON
+    async fn body_json(resp: axum::http::Response<Body>) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    // ----------------------------------------------------------------
+    // Decision semantic search
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_search_decisions_semantic_empty() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/decisions/search-semantic?query=authentication",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_decisions_semantic_with_limit() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/decisions/search-semantic?query=test&limit=5",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // Decisions affecting
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_decisions_affecting_empty() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/decisions/affecting?entity_type=File&entity_id=src/main.rs",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_decisions_affecting_with_status_filter() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/decisions/affecting?entity_type=File&entity_id=src/main.rs&status=accepted",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // Decision affects CRUD
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_add_decision_affects() {
+        let app = test_app().await;
+        let decision_id = uuid::Uuid::new_v4();
+        let uri = format!("/api/decisions/{}/affects", decision_id);
+        let body = serde_json::json!({
+            "entity_type": "File",
+            "entity_id": "src/lib.rs",
+            "impact_description": "Changes authentication flow"
+        });
+        let resp = app.oneshot(auth_post_json(&uri, body)).await.unwrap();
+        assert_eq!(resp.status(), HttpStatus::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_add_decision_affects_without_description() {
+        let app = test_app().await;
+        let decision_id = uuid::Uuid::new_v4();
+        let uri = format!("/api/decisions/{}/affects", decision_id);
+        let body = serde_json::json!({
+            "entity_type": "Function",
+            "entity_id": "handle_request"
+        });
+        let resp = app.oneshot(auth_post_json(&uri, body)).await.unwrap();
+        assert_eq!(resp.status(), HttpStatus::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_list_decision_affects_empty() {
+        let app = test_app().await;
+        let decision_id = uuid::Uuid::new_v4();
+        let uri = format!("/api/decisions/{}/affects", decision_id);
+        let resp = app.oneshot(auth_get(&uri)).await.unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_remove_decision_affects_path() {
+        let app = test_app().await;
+        let decision_id = uuid::Uuid::new_v4();
+        let uri = format!("/api/decisions/{}/affects/Function/my_func", decision_id);
+        let resp = app.oneshot(auth_delete(&uri)).await.unwrap();
+        assert_eq!(resp.status(), HttpStatus::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_remove_decision_affects_query_params() {
+        let app = test_app().await;
+        let decision_id = uuid::Uuid::new_v4();
+        let uri = format!(
+            "/api/decisions/{}/affects?entity_type=File&entity_id=src%2Flib.rs",
+            decision_id
+        );
+        let resp = app.oneshot(auth_delete(&uri)).await.unwrap();
+        assert_eq!(resp.status(), HttpStatus::NO_CONTENT);
+    }
+
+    // ----------------------------------------------------------------
+    // Decision supersede
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_supersede_decision() {
+        let app = test_app().await;
+        let new_id = uuid::Uuid::new_v4();
+        let old_id = uuid::Uuid::new_v4();
+        let uri = format!("/api/decisions/{}/supersedes/{}", new_id, old_id);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header("authorization", test_bearer_token())
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::NO_CONTENT);
+    }
+
+    // ----------------------------------------------------------------
+    // Decision timeline
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_decision_timeline_empty() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get("/api/decisions/timeline"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_decision_timeline_with_task_filter() {
+        let app = test_app().await;
+        let task_id = uuid::Uuid::new_v4();
+        let uri = format!("/api/decisions/timeline?task_id={}", task_id);
+        let resp = app.oneshot(auth_get(&uri)).await.unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_decision_timeline_with_date_range() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/decisions/timeline?from=2024-01-01&to=2025-01-01",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // Commit files (TOUCHES)
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_commit_files_empty() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get("/api/commits/abc123/files"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    // ----------------------------------------------------------------
+    // File history
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_file_history_empty() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/files/history?path=%2Fhome%2Fuser%2Fproject%2Fsrc%2Fmain.rs",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_history_with_limit() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get("/api/files/history?path=src%2Flib.rs&limit=5"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_history_missing_path() {
+        let app = test_app().await;
+        let resp = app.oneshot(auth_get("/api/files/history")).await.unwrap();
+        // path is a required query param
+        assert_eq!(resp.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    // ----------------------------------------------------------------
+    // Co-change graph
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_co_change_graph_empty() {
+        let app = test_app().await;
+        let project_id = uuid::Uuid::new_v4();
+        let uri = format!("/api/projects/{}/co-changes", project_id);
+        let resp = app.oneshot(auth_get(&uri)).await.unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_co_change_graph_with_params() {
+        let app = test_app().await;
+        let project_id = uuid::Uuid::new_v4();
+        let uri = format!(
+            "/api/projects/{}/co-changes?min_count=5&limit=50",
+            project_id
+        );
+        let resp = app.oneshot(auth_get(&uri)).await.unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+    }
+
+    // ----------------------------------------------------------------
+    // File co-changers
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_file_co_changers_empty() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get("/api/files/co-changers?path=src%2Flib.rs"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_co_changers_with_params() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get(
+                "/api/files/co-changers?path=src%2Flib.rs&min_count=2&limit=20",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_co_changers_missing_path() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(auth_get("/api/files/co-changers"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    // ----------------------------------------------------------------
+    // Backfill decision embeddings
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_backfill_decision_embeddings() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/backfill-decision-embeddings")
+                    .header("authorization", test_bearer_token())
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert!(json["decisions_processed"].is_number());
+        assert!(json["embeddings_created"].is_number());
+    }
+
+    // ----------------------------------------------------------------
+    // Backfill discussed
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_backfill_discussed() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/backfill-discussed")
+                    .header("authorization", test_bearer_token())
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["sessions_processed"], 0);
+        assert_eq!(json["entities_found"], 0);
+        assert_eq!(json["relations_created"], 0);
+    }
+
+    // ----------------------------------------------------------------
+    // Request/Response serialization tests
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_search_decisions_semantic_query_deserialize() {
+        let json = r#"{"query":"auth flow","limit":5,"project_id":"e83b0663-9600-450d-9f63-234e857394df"}"#;
+        let q: SearchDecisionsSemanticQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.query, "auth flow");
+        assert_eq!(q.limit, Some(5));
+        assert_eq!(
+            q.project_id,
+            Some("e83b0663-9600-450d-9f63-234e857394df".to_string())
+        );
+    }
+
+    #[test]
+    fn test_search_decisions_semantic_query_minimal() {
+        let json = r#"{"query":"test"}"#;
+        let q: SearchDecisionsSemanticQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.query, "test");
+        assert_eq!(q.limit, None);
+        assert_eq!(q.project_id, None);
+    }
+
+    #[test]
+    fn test_decisions_affecting_query_deserialize() {
+        let json = r#"{"entity_type":"File","entity_id":"src/main.rs","status":"accepted"}"#;
+        let q: DecisionsAffectingQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.entity_type, "File");
+        assert_eq!(q.entity_id, "src/main.rs");
+        assert_eq!(q.status, Some("accepted".to_string()));
+    }
+
+    #[test]
+    fn test_decisions_affecting_query_no_status() {
+        let json = r#"{"entity_type":"Function","entity_id":"handle_request"}"#;
+        let q: DecisionsAffectingQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.entity_type, "Function");
+        assert_eq!(q.status, None);
+    }
+
+    #[test]
+    fn test_add_affects_request_deserialize() {
+        let json = r#"{"entity_type":"File","entity_id":"src/lib.rs","impact_description":"Modifies auth"}"#;
+        let r: AddAffectsRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(r.entity_type, "File");
+        assert_eq!(r.entity_id, "src/lib.rs");
+        assert_eq!(r.impact_description, Some("Modifies auth".to_string()));
+    }
+
+    #[test]
+    fn test_add_affects_request_no_description() {
+        let json = r#"{"entity_type":"Function","entity_id":"foo"}"#;
+        let r: AddAffectsRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(r.impact_description, None);
+    }
+
+    #[test]
+    fn test_remove_affects_query_deserialize() {
+        let json = r#"{"entity_type":"File","entity_id":"src/lib.rs"}"#;
+        let q: RemoveAffectsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.entity_type, "File");
+        assert_eq!(q.entity_id, "src/lib.rs");
+    }
+
+    #[test]
+    fn test_decision_timeline_query_all_fields() {
+        let json = r#"{"task_id":"e83b0663-9600-450d-9f63-234e857394df","from":"2024-01-01","to":"2025-01-01"}"#;
+        let q: DecisionTimelineQuery = serde_json::from_str(json).unwrap();
+        assert!(q.task_id.is_some());
+        assert_eq!(q.from, Some("2024-01-01".to_string()));
+        assert_eq!(q.to, Some("2025-01-01".to_string()));
+    }
+
+    #[test]
+    fn test_decision_timeline_query_empty() {
+        let json = r#"{}"#;
+        let q: DecisionTimelineQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.task_id, None);
+        assert_eq!(q.from, None);
+        assert_eq!(q.to, None);
+    }
+
+    #[test]
+    fn test_file_history_query_deserialize() {
+        let json = r#"{"path":"src/main.rs","limit":10}"#;
+        let q: FileHistoryQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.path, "src/main.rs");
+        assert_eq!(q.limit, Some(10));
+    }
+
+    #[test]
+    fn test_file_history_query_no_limit() {
+        let json = r#"{"path":"src/main.rs"}"#;
+        let q: FileHistoryQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.path, "src/main.rs");
+        assert_eq!(q.limit, None);
+    }
+
+    #[test]
+    fn test_co_change_graph_query_defaults() {
+        let json = r#"{}"#;
+        let q: CoChangeGraphQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.min_count, None);
+        assert_eq!(q.limit, None);
+    }
+
+    #[test]
+    fn test_co_change_graph_query_with_values() {
+        let json = r#"{"min_count":5,"limit":50}"#;
+        let q: CoChangeGraphQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.min_count, Some(5));
+        assert_eq!(q.limit, Some(50));
+    }
+
+    #[test]
+    fn test_file_co_changers_query_full() {
+        let json = r#"{"path":"src/lib.rs","min_count":2,"limit":20}"#;
+        let q: FileCoChangersQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.path, "src/lib.rs");
+        assert_eq!(q.min_count, Some(2));
+        assert_eq!(q.limit, Some(20));
+    }
+
+    #[test]
+    fn test_file_co_changers_query_minimal() {
+        let json = r#"{"path":"src/lib.rs"}"#;
+        let q: FileCoChangersQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.path, "src/lib.rs");
+        assert_eq!(q.min_count, None);
+        assert_eq!(q.limit, None);
+    }
+
+    #[test]
+    fn test_fabric_project_request_deserialize() {
+        let json = r#"{"project_id":"e83b0663-9600-450d-9f63-234e857394df"}"#;
+        let r: FabricProjectRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            r.project_id.to_string(),
+            "e83b0663-9600-450d-9f63-234e857394df"
+        );
     }
 }

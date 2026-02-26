@@ -21,6 +21,10 @@ pub struct ProjectNode {
     /// When GDS analytics (PageRank, Louvain, etc.) were last computed for this project.
     /// None if analytics have never been computed.
     pub analytics_computed_at: Option<DateTime<Utc>>,
+    /// When CO_CHANGED relations were last computed from TOUCHES history.
+    /// Used for incremental computation — only new commits since this date are processed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_co_change_computed_at: Option<DateTime<Utc>>,
 }
 
 // ============================================================================
@@ -110,6 +114,21 @@ pub struct ChatEventRecord {
     pub data: String,
     /// When this event was created
     pub created_at: DateTime<Utc>,
+}
+
+/// An entity discussed in a chat session (via DISCUSSED relation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscussedEntity {
+    /// Entity type: "File", "Function", "Struct", "Trait", "Enum"
+    pub entity_type: String,
+    /// Entity identifier: file path (for File) or symbol name
+    pub entity_id: String,
+    /// Number of times the entity was mentioned in the session
+    pub mention_count: i64,
+    /// When the entity was last mentioned
+    pub last_mentioned_at: Option<String>,
+    /// Source file path (for symbols, not for File entities)
+    pub file_path: Option<String>,
 }
 
 // ============================================================================
@@ -352,6 +371,44 @@ pub enum StepStatus {
     Skipped,
 }
 
+/// Decision status lifecycle: proposed → accepted → deprecated/superseded
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionStatus {
+    /// Newly created, not yet validated
+    Proposed,
+    /// Validated and active
+    Accepted,
+    /// No longer recommended but not replaced
+    Deprecated,
+    /// Replaced by another decision (via SUPERSEDES relation)
+    Superseded,
+}
+
+impl std::fmt::Display for DecisionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Proposed => write!(f, "proposed"),
+            Self::Accepted => write!(f, "accepted"),
+            Self::Deprecated => write!(f, "deprecated"),
+            Self::Superseded => write!(f, "superseded"),
+        }
+    }
+}
+
+impl std::str::FromStr for DecisionStatus {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "proposed" => Ok(Self::Proposed),
+            "accepted" => Ok(Self::Accepted),
+            "deprecated" => Ok(Self::Deprecated),
+            "superseded" => Ok(Self::Superseded),
+            _ => Err(anyhow::anyhow!("Invalid decision status: {}", s)),
+        }
+    }
+}
+
 /// An architectural decision
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionNode {
@@ -362,6 +419,47 @@ pub struct DecisionNode {
     pub chosen_option: Option<String>,
     pub decided_by: String,
     pub decided_at: DateTime<Utc>,
+    /// Lifecycle status: proposed, accepted, deprecated, superseded
+    #[serde(default = "default_decision_status")]
+    pub status: DecisionStatus,
+    /// Vector embedding (768d, nomic-embed-text) for semantic search.
+    /// Stored via `db.create.setNodeVectorProperty` for HNSW index compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f64>>,
+    /// Name of the embedding model used (for traceability on re-embed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+}
+
+fn default_decision_status() -> DecisionStatus {
+    DecisionStatus::Proposed
+}
+
+/// An AFFECTS relation from a Decision to an entity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AffectsRelation {
+    /// Type of the affected entity (File, Function, Struct, Trait, etc.)
+    pub entity_type: String,
+    /// Identifier of the affected entity (path for File, id for others)
+    pub entity_id: String,
+    /// Human-readable name of the entity
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_name: Option<String>,
+    /// Optional description of how the decision impacts this entity
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact_description: Option<String>,
+}
+
+/// A decision in a timeline view, with its supersession chain
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionTimelineEntry {
+    pub decision: DecisionNode,
+    /// IDs of decisions this one supersedes (chain from newest to oldest)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub supersedes_chain: Vec<Uuid>,
+    /// ID of the decision that supersedes this one (if any)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<Uuid>,
 }
 
 /// A constraint on a plan
@@ -403,6 +501,107 @@ pub struct CommitNode {
     pub message: String,
     pub author: String,
     pub timestamp: DateTime<Utc>,
+}
+
+/// Info about a file changed in a commit (for TOUCHES relations).
+///
+/// Supports two JSON input formats (backward compatible):
+/// - String: `"src/main.rs"` → `FileChangedInfo { path: "src/main.rs", additions: None, deletions: None }`
+/// - Object: `{ "path": "src/main.rs", "additions": 10, "deletions": 3 }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChangedInfo {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additions: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<i64>,
+}
+
+impl From<String> for FileChangedInfo {
+    fn from(path: String) -> Self {
+        Self {
+            path,
+            additions: None,
+            deletions: None,
+        }
+    }
+}
+
+impl From<&str> for FileChangedInfo {
+    fn from(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            additions: None,
+            deletions: None,
+        }
+    }
+}
+
+/// Info about a file touched by a commit (returned by get_commit_files)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitFileInfo {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additions: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<i64>,
+}
+
+/// A commit in the history of a file (returned by get_file_history)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileHistoryEntry {
+    pub hash: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additions: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<i64>,
+}
+
+/// A pair of files that co-change (returned by get_co_change_graph)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoChangePair {
+    pub file_a: String,
+    pub file_b: String,
+    pub count: i64,
+    pub last_at: Option<String>,
+}
+
+/// A file that co-changes with a given file (returned by get_file_co_changers)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoChanger {
+    pub path: String,
+    pub count: i64,
+    pub last_at: Option<String>,
+}
+
+/// Deserializes a list of file changes that can be either strings or objects.
+/// This allows backward-compatible API: `["a.rs", "b.rs"]` or `[{"path": "a.rs", "additions": 10}]`
+pub fn deserialize_files_changed<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<FileChangedInfo>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FileEntry {
+        Simple(String),
+        Detailed(FileChangedInfo),
+    }
+
+    let opt: Option<Vec<FileEntry>> = Option::deserialize(deserializer)?;
+    Ok(opt.map(|entries| {
+        entries
+            .into_iter()
+            .map(|e| match e {
+                FileEntry::Simple(path) => FileChangedInfo::from(path),
+                FileEntry::Detailed(info) => info,
+            })
+            .collect()
+    }))
 }
 
 // ============================================================================
@@ -805,6 +1004,18 @@ pub struct NodeGdsMetrics {
     pub community_label: Option<String>,
     pub in_degree: i64,
     pub out_degree: i64,
+    /// Fabric PageRank — computed on multi-layer graph (IMPORTS + CO_CHANGED + ...)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fabric_pagerank: Option<f64>,
+    /// Fabric betweenness centrality — computed on multi-layer graph
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fabric_betweenness: Option<f64>,
+    /// Fabric community ID — Louvain on multi-layer graph
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fabric_community_id: Option<i64>,
+    /// Fabric community label — human-readable
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fabric_community_label: Option<String>,
 }
 
 /// Statistical percentiles for a project's GDS metrics distribution.
@@ -835,6 +1046,18 @@ pub struct BridgeFile {
     pub path: String,
     pub betweenness: f64,
     pub community_label: Option<String>,
+}
+
+/// Neural network metrics for a project's SYNAPSE layer.
+///
+/// Summarizes the state of the note-level neural connections:
+/// active synapses, average energy, weak synapse ratio, and dead notes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeuralMetrics {
+    pub active_synapses: i64,
+    pub avg_energy: f64,
+    pub weak_synapses_ratio: f64,
+    pub dead_notes_count: i64,
 }
 
 /// A feature graph — a named subgraph capturing all code entities related to a feature.
@@ -1036,6 +1259,49 @@ pub struct RefreshTokenNode {
     pub created_at: DateTime<Utc>,
     /// Whether this token has been revoked (logout, rotation, etc.)
     pub revoked: bool,
+}
+
+// ============================================================================
+// Analytics: Churn, Knowledge Density, Risk Score (T5.5, T5.6, T5.7)
+// ============================================================================
+
+/// Churn score for a file based on commit frequency and co-change patterns.
+/// Computed from TOUCHES relations between Commit and File nodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChurnScore {
+    pub path: String,
+    pub commit_count: i64,
+    pub total_churn: i64, // additions + deletions
+    pub co_change_count: i64,
+    pub churn_score: f64, // normalized 0.0-1.0
+}
+
+/// Knowledge density for a file based on associated notes and decisions.
+/// Files with low density are "knowledge gaps" that may need documentation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileKnowledgeDensity {
+    pub path: String,
+    pub note_count: i64,
+    pub decision_count: i64,
+    pub knowledge_density: f64, // normalized 0.0-1.0
+}
+
+/// Composite risk score for a file combining structural importance, churn, and knowledge gaps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileRiskScore {
+    pub path: String,
+    pub risk_score: f64,
+    pub risk_level: String, // "low", "medium", "high", "critical"
+    pub factors: RiskFactors,
+}
+
+/// Individual risk factor contributions for a file's composite risk score.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskFactors {
+    pub pagerank: f64,
+    pub churn: f64,
+    pub knowledge_gap: f64, // 1 - density
+    pub betweenness: f64,
 }
 
 #[cfg(test)]

@@ -4,7 +4,10 @@ use crate::embeddings::{EmbeddingProvider, FastEmbedProvider, HttpEmbeddingProvi
 use crate::events::{
     CrudAction, CrudEvent, EntityType as EventEntityType, EventEmitter, HybridEmitter,
 };
-use crate::graph::{AnalyticsConfig, AnalyticsDebouncer, AnalyticsEngine, GraphAnalyticsEngine};
+use crate::graph::{
+    AnalyticsConfig, AnalyticsDebouncer, AnalyticsEngine, CoChangeDebouncer, GraphAnalyticsEngine,
+    NeuralReinforcementDebouncer,
+};
 use crate::neo4j::models::*;
 use crate::neurons::{AutoReinforcementConfig, SpreadingActivationEngine};
 use crate::notes::{EntityType, NoteLifecycleManager, NoteManager};
@@ -128,6 +131,8 @@ pub struct Orchestrator {
     planner: Arc<super::ImplementationPlanner>,
     analytics: Arc<dyn AnalyticsEngine>,
     analytics_debouncer: AnalyticsDebouncer,
+    co_change_debouncer: CoChangeDebouncer,
+    neural_reinforcement_debouncer: NeuralReinforcementDebouncer,
     activation_engine: Option<Arc<SpreadingActivationEngine>>,
     auto_reinforcement: AutoReinforcementConfig,
     event_bus: Option<Arc<HybridEmitter>>,
@@ -244,9 +249,13 @@ fn init_http_embedding_provider(config: &crate::Config) -> Option<Arc<dyn Embedd
 impl Orchestrator {
     /// Create a new orchestrator
     pub async fn new(state: AppState) -> Result<Self> {
-        let plan_manager = Arc::new(PlanManager::new(state.neo4j.clone(), state.meili.clone()));
-
         let embedding_provider = init_embedding_provider(&state.config);
+
+        let mut pm = PlanManager::new(state.neo4j.clone(), state.meili.clone());
+        if let Some(ref provider) = embedding_provider {
+            pm = pm.with_embedding_provider(provider.clone());
+        }
+        let plan_manager = Arc::new(pm);
 
         let mut note_manager = NoteManager::new(state.neo4j.clone(), state.meili.clone());
         if let Some(ref provider) = embedding_provider {
@@ -289,6 +298,10 @@ impl Orchestrator {
             2000,
             Some(state.neo4j.clone()),
         );
+        let co_change_debouncer = CoChangeDebouncer::new(state.neo4j.clone(), 30_000);
+        let ar_config = AutoReinforcementConfig::default();
+        let neural_reinforcement_debouncer =
+            NeuralReinforcementDebouncer::new(state.neo4j.clone(), ar_config.clone(), 5_000);
 
         Ok(Self {
             state,
@@ -300,8 +313,10 @@ impl Orchestrator {
             planner,
             analytics,
             analytics_debouncer,
+            co_change_debouncer,
+            neural_reinforcement_debouncer,
             activation_engine,
-            auto_reinforcement: AutoReinforcementConfig::default(),
+            auto_reinforcement: ar_config,
             event_bus: None,
             event_emitter: None,
             embedding_provider: embedding_provider.clone(),
@@ -316,11 +331,15 @@ impl Orchestrator {
         let emitter: Arc<dyn EventEmitter> = event_bus.clone();
         let embedding_provider = init_embedding_provider(&state.config);
 
-        let plan_manager = Arc::new(PlanManager::with_event_emitter(
+        let mut pm = PlanManager::with_event_emitter(
             state.neo4j.clone(),
             state.meili.clone(),
             emitter.clone(),
-        ));
+        );
+        if let Some(ref provider) = embedding_provider {
+            pm = pm.with_embedding_provider(provider.clone());
+        }
+        let plan_manager = Arc::new(pm);
 
         let mut note_manager = NoteManager::with_event_emitter(
             state.neo4j.clone(),
@@ -367,6 +386,10 @@ impl Orchestrator {
             2000,
             Some(state.neo4j.clone()),
         );
+        let co_change_debouncer = CoChangeDebouncer::new(state.neo4j.clone(), 30_000);
+        let ar_config = AutoReinforcementConfig::default();
+        let neural_reinforcement_debouncer =
+            NeuralReinforcementDebouncer::new(state.neo4j.clone(), ar_config.clone(), 5_000);
 
         Ok(Self {
             state,
@@ -378,8 +401,10 @@ impl Orchestrator {
             planner,
             analytics,
             analytics_debouncer,
+            co_change_debouncer,
+            neural_reinforcement_debouncer,
             activation_engine,
-            auto_reinforcement: AutoReinforcementConfig::default(),
+            auto_reinforcement: ar_config,
             event_bus: Some(event_bus),
             event_emitter: Some(emitter),
             embedding_provider: embedding_provider.clone(),
@@ -396,11 +421,15 @@ impl Orchestrator {
     ) -> Result<Self> {
         let embedding_provider = init_embedding_provider(&state.config);
 
-        let plan_manager = Arc::new(PlanManager::with_event_emitter(
+        let mut pm = PlanManager::with_event_emitter(
             state.neo4j.clone(),
             state.meili.clone(),
             emitter.clone(),
-        ));
+        );
+        if let Some(ref provider) = embedding_provider {
+            pm = pm.with_embedding_provider(provider.clone());
+        }
+        let plan_manager = Arc::new(pm);
 
         let mut note_manager = NoteManager::with_event_emitter(
             state.neo4j.clone(),
@@ -447,6 +476,10 @@ impl Orchestrator {
             2000,
             Some(state.neo4j.clone()),
         );
+        let co_change_debouncer = CoChangeDebouncer::new(state.neo4j.clone(), 30_000);
+        let ar_config = AutoReinforcementConfig::default();
+        let neural_reinforcement_debouncer =
+            NeuralReinforcementDebouncer::new(state.neo4j.clone(), ar_config.clone(), 5_000);
 
         Ok(Self {
             state,
@@ -458,8 +491,10 @@ impl Orchestrator {
             planner,
             analytics,
             analytics_debouncer,
+            co_change_debouncer,
+            neural_reinforcement_debouncer,
             activation_engine,
-            auto_reinforcement: AutoReinforcementConfig::default(),
+            auto_reinforcement: ar_config,
             event_bus: None,
             event_emitter: Some(emitter),
             embedding_provider: embedding_provider.clone(),
@@ -1120,6 +1155,19 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
         &self.analytics_debouncer
     }
 
+    /// Get the CO_CHANGED debouncer (for co-change computation triggers)
+    pub fn co_change_debouncer(&self) -> &CoChangeDebouncer {
+        &self.co_change_debouncer
+    }
+
+    /// Get the neural reinforcement debouncer (for commit Hebbian hooks).
+    ///
+    /// Debounces rapid-fire commits (e.g., during git checkout/rebase) to
+    /// prevent CPU spikes from hundreds of energy boost + synapse calls.
+    pub fn neural_reinforcement_debouncer(&self) -> &NeuralReinforcementDebouncer {
+        &self.neural_reinforcement_debouncer
+    }
+
     /// Get the spreading activation engine (if embedding provider is available).
     ///
     /// Returns `None` when `EMBEDDING_PROVIDER=disabled` or initialization failed.
@@ -1130,6 +1178,209 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
     /// Get the auto-reinforcement configuration.
     pub fn auto_reinforcement_config(&self) -> &AutoReinforcementConfig {
         &self.auto_reinforcement
+    }
+
+    // ========================================================================
+    // CO_CHANGED computation
+    // ========================================================================
+
+    /// Compute CO_CHANGED relations for a project from TOUCHES history.
+    ///
+    /// Incremental: only processes commits since `last_co_change_computed_at`.
+    /// Defaults: min_count=3, max_relations=500.
+    pub async fn compute_co_changed(&self, project_id: uuid::Uuid) -> Result<i64> {
+        let start = std::time::Instant::now();
+
+        // Get project to read last_co_change_computed_at
+        let since = self
+            .neo4j()
+            .get_project(project_id)
+            .await?
+            .and_then(|p| p.last_co_change_computed_at);
+
+        let count = self
+            .neo4j()
+            .compute_co_changed(project_id, since, 3, 500)
+            .await?;
+
+        tracing::info!(
+            project_id = %project_id,
+            since = ?since,
+            relations = count,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "CO_CHANGED computation finished"
+        );
+
+        Ok(count)
+    }
+
+    /// Backfill TOUCHES relations from git history for a project.
+    ///
+    /// Parses `git log --name-only` and creates TOUCHES relations for each commit.
+    /// Idempotent: commits that already have TOUCHES relations are skipped.
+    /// After backfilling, triggers a full CO_CHANGED computation.
+    pub async fn backfill_commit_touches(
+        &self,
+        project_id: uuid::Uuid,
+        root_path: &Path,
+    ) -> Result<BackfillResult> {
+        let start = std::time::Instant::now();
+
+        // Step 1: Parse git log
+        let git_commits = Self::git_log_touched_files(root_path, 1000)?;
+        let total_from_git = git_commits.len();
+
+        if git_commits.is_empty() {
+            return Ok(BackfillResult {
+                commits_parsed: 0,
+                commits_backfilled: 0,
+                touches_created: 0,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+
+        // Step 2: Create Commit nodes + TOUCHES relations in batches
+        let mut commits_backfilled = 0u64;
+        let mut touches_created = 0u64;
+        let neo4j = self.neo4j();
+
+        for chunk in git_commits.chunks(100) {
+            for gc in chunk {
+                // Create commit node (MERGE = idempotent)
+                let commit = CommitNode {
+                    hash: gc.hash.clone(),
+                    message: gc.message.clone(),
+                    author: gc.author.clone(),
+                    timestamp: gc.timestamp,
+                };
+                neo4j.create_commit(&commit).await?;
+
+                // Create TOUCHES (MERGE = idempotent)
+                // git log returns relative paths (e.g. "src/lib.rs") but File nodes
+                // in Neo4j use absolute paths — prefix with root_path to match.
+                if !gc.files.is_empty() {
+                    let file_infos: Vec<crate::neo4j::models::FileChangedInfo> = gc
+                        .files
+                        .iter()
+                        .map(|f| {
+                            let abs_path = root_path.join(&f.path);
+                            crate::neo4j::models::FileChangedInfo {
+                                path: abs_path.to_string_lossy().to_string(),
+                                additions: f.additions,
+                                deletions: f.deletions,
+                            }
+                        })
+                        .collect();
+                    neo4j.create_commit_touches(&gc.hash, &file_infos).await?;
+                    touches_created += gc.files.len() as u64;
+                }
+                commits_backfilled += 1;
+            }
+        }
+
+        // Step 3: Trigger full CO_CHANGED computation (since=None for full recompute)
+        if let Err(e) = neo4j.compute_co_changed(project_id, None, 3, 500).await {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "CO_CHANGED computation after backfill failed"
+            );
+        }
+
+        let result = BackfillResult {
+            commits_parsed: total_from_git as u64,
+            commits_backfilled,
+            touches_created,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        };
+
+        tracing::info!(
+            project_id = %project_id,
+            commits_parsed = result.commits_parsed,
+            commits_backfilled = result.commits_backfilled,
+            touches_created = result.touches_created,
+            elapsed_ms = result.elapsed_ms,
+            "Backfill TOUCHES complete"
+        );
+
+        Ok(result)
+    }
+
+    /// Parse git log to extract commits and their touched files with stats.
+    ///
+    /// Uses `git log --numstat --format=...` to get additions/deletions per file.
+    /// Limited to `max_commits` most recent commits.
+    fn git_log_touched_files(root_path: &Path, max_commits: usize) -> Result<Vec<GitCommitFiles>> {
+        use std::process::Command;
+
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--numstat",
+                &format!("--max-count={}", max_commits),
+                "--format=COMMIT_START%n%H%n%s%n%an%n%aI",
+            ])
+            .current_dir(root_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "git log failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut commits = Vec::new();
+        let mut lines = stdout.lines().peekable();
+
+        while let Some(line) = lines.next() {
+            if line == "COMMIT_START" {
+                let hash = lines.next().unwrap_or("").to_string();
+                let message = lines.next().unwrap_or("").to_string();
+                let author = lines.next().unwrap_or("").to_string();
+                let date_str = lines.next().unwrap_or("");
+                let timestamp = chrono::DateTime::parse_from_rfc3339(date_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+
+                let mut files = Vec::new();
+                // --numstat lines: "<additions>\t<deletions>\t<path>"
+                // Binary files show "-\t-\t<path>"
+                while let Some(next) = lines.peek() {
+                    if *next == "COMMIT_START" || next.is_empty() {
+                        if next.is_empty() {
+                            lines.next(); // skip empty separator line
+                            continue;
+                        }
+                        break;
+                    }
+                    let stat_line = lines.next().unwrap();
+                    let parts: Vec<&str> = stat_line.splitn(3, '\t').collect();
+                    if parts.len() == 3 {
+                        let additions = parts[0].parse::<i64>().ok(); // "-" for binary → None
+                        let deletions = parts[1].parse::<i64>().ok();
+                        files.push(GitFileChange {
+                            path: parts[2].to_string(),
+                            additions,
+                            deletions,
+                        });
+                    }
+                }
+
+                if !hash.is_empty() {
+                    commits.push(GitCommitFiles {
+                        hash,
+                        message,
+                        author,
+                        timestamp,
+                        files,
+                    });
+                }
+            }
+        }
+
+        Ok(commits)
     }
 
     // ========================================================================
@@ -2495,9 +2746,10 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
         description: Option<String>,
         rationale: Option<String>,
         chosen_option: Option<String>,
+        status: Option<DecisionStatus>,
     ) -> Result<()> {
         self.neo4j()
-            .update_decision(decision_id, description, rationale, chosen_option)
+            .update_decision(decision_id, description, rationale, chosen_option, status)
             .await?;
         self.emit(CrudEvent::new(
             EventEntityType::Decision,
@@ -3179,6 +3431,33 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
     }
 }
 
+/// Result of backfilling TOUCHES relations from git history
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackfillResult {
+    pub commits_parsed: u64,
+    pub commits_backfilled: u64,
+    pub touches_created: u64,
+    pub elapsed_ms: u64,
+}
+
+/// A commit with its touched files (parsed from git log)
+#[derive(Debug, Clone)]
+pub struct GitCommitFiles {
+    pub hash: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub files: Vec<GitFileChange>,
+}
+
+/// A file changed in a git commit (from --numstat output).
+#[derive(Debug, Clone)]
+pub struct GitFileChange {
+    pub path: String,
+    pub additions: Option<i64>,
+    pub deletions: Option<i64>,
+}
+
 /// Result of a sync operation
 #[derive(Debug, Default)]
 pub struct SyncResult {
@@ -3326,7 +3605,7 @@ mod tests {
     async fn test_update_decision_emits_event() {
         let (orch, mut rx) = orch_with_bus().await;
         let id = Uuid::new_v4();
-        orch.update_decision(id, Some("desc".into()), None, None)
+        orch.update_decision(id, Some("desc".into()), None, None, None)
             .await
             .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -4608,5 +4887,148 @@ mod tests {
 
         let text = Orchestrator::build_function_embedding_text(&func);
         assert_eq!(text, "main()");
+    }
+
+    // ================================================================
+    // Knowledge Fabric — git_log_touched_files parser + backfill tests
+    // ================================================================
+
+    #[test]
+    fn test_git_file_change_struct() {
+        let change = GitFileChange {
+            path: "src/main.rs".to_string(),
+            additions: Some(10),
+            deletions: Some(3),
+        };
+        assert_eq!(change.path, "src/main.rs");
+        assert_eq!(change.additions, Some(10));
+        assert_eq!(change.deletions, Some(3));
+    }
+
+    #[test]
+    fn test_git_file_change_binary() {
+        // Binary files have None for additions/deletions ("-\t-\tpath")
+        let change = GitFileChange {
+            path: "assets/logo.png".to_string(),
+            additions: None,
+            deletions: None,
+        };
+        assert!(change.additions.is_none());
+        assert!(change.deletions.is_none());
+    }
+
+    #[test]
+    fn test_git_commit_files_struct() {
+        let commit = GitCommitFiles {
+            hash: "abc123def456".to_string(),
+            message: "fix: resolve auth bug".to_string(),
+            author: "Test Author".to_string(),
+            timestamp: chrono::Utc::now(),
+            files: vec![
+                GitFileChange {
+                    path: "src/auth.rs".to_string(),
+                    additions: Some(5),
+                    deletions: Some(2),
+                },
+                GitFileChange {
+                    path: "src/tests.rs".to_string(),
+                    additions: Some(20),
+                    deletions: Some(0),
+                },
+            ],
+        };
+        assert_eq!(commit.hash, "abc123def456");
+        assert_eq!(commit.files.len(), 2);
+        assert_eq!(commit.files[0].additions, Some(5));
+        assert_eq!(commit.files[1].path, "src/tests.rs");
+    }
+
+    #[test]
+    fn test_backfill_result_struct() {
+        let result = BackfillResult {
+            commits_parsed: 100,
+            commits_backfilled: 95,
+            touches_created: 450,
+            elapsed_ms: 1234,
+        };
+        assert_eq!(result.commits_parsed, 100);
+        assert_eq!(result.commits_backfilled, 95);
+        assert_eq!(result.touches_created, 450);
+        assert_eq!(result.elapsed_ms, 1234);
+    }
+
+    #[test]
+    fn test_git_log_touched_files_on_this_repo() {
+        // This test runs on the actual project repo — should always work in CI
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let commits = Orchestrator::git_log_touched_files(&root, 5).unwrap();
+
+        // Should have at most 5 commits (max_commits=5)
+        assert!(
+            commits.len() <= 5,
+            "Expected <=5 commits, got {}",
+            commits.len()
+        );
+
+        // Each commit should have a non-empty hash and author
+        for c in &commits {
+            assert!(!c.hash.is_empty(), "Commit hash should not be empty");
+            assert!(!c.author.is_empty(), "Author should not be empty");
+        }
+    }
+
+    #[test]
+    fn test_git_log_touched_files_has_file_stats() {
+        // Parse 3 commits from the actual repo and check file stats
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let commits = Orchestrator::git_log_touched_files(&root, 3).unwrap();
+
+        if !commits.is_empty() {
+            // At least one commit should have files
+            let has_files = commits.iter().any(|c| !c.files.is_empty());
+            assert!(has_files, "At least one commit should have touched files");
+
+            // Check that file paths are relative (no leading /)
+            for c in &commits {
+                for f in &c.files {
+                    assert!(
+                        !f.path.starts_with('/'),
+                        "git log should return relative paths, got: {}",
+                        f.path
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_git_log_touched_files_invalid_dir() {
+        let result = Orchestrator::git_log_touched_files(
+            std::path::Path::new("/tmp/nonexistent_dir_12345"),
+            5,
+        );
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_backfill_commit_touches_on_mock() {
+        let (orch, _rx) = orch_with_bus().await;
+        let project = test_project();
+        orch.create_project(&project).await.unwrap();
+
+        // Use the actual repo root so git log works
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let result = orch
+            .backfill_commit_touches(project.id, &root)
+            .await
+            .unwrap();
+
+        // Should parse at least a few commits
+        assert!(result.commits_parsed > 0, "Should parse some commits");
+        assert!(
+            result.commits_backfilled > 0,
+            "Should backfill some commits"
+        );
+        assert!(result.elapsed_ms > 0 || result.commits_parsed > 0);
     }
 }
