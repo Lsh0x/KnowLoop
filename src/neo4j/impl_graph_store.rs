@@ -2290,4 +2290,106 @@ impl GraphStore for Neo4jClient {
             Err(_) => Ok(false),
         }
     }
+
+    // ========================================================================
+    // Skill operations (delegates to neo4j/skill.rs)
+    // ========================================================================
+
+    async fn create_skill(&self, skill: &crate::skills::SkillNode) -> anyhow::Result<()> {
+        self.create_skill(skill).await
+    }
+
+    async fn get_skill(&self, id: uuid::Uuid) -> anyhow::Result<Option<crate::skills::SkillNode>> {
+        self.get_skill(id).await
+    }
+
+    async fn update_skill(&self, skill: &crate::skills::SkillNode) -> anyhow::Result<()> {
+        self.update_skill(skill).await
+    }
+
+    async fn delete_skill(&self, id: uuid::Uuid) -> anyhow::Result<bool> {
+        self.delete_skill(id).await
+    }
+
+    async fn list_skills(
+        &self,
+        project_id: uuid::Uuid,
+        status: Option<crate::skills::SkillStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::skills::SkillNode>, usize)> {
+        self.list_skills(project_id, status, limit, offset).await
+    }
+
+    async fn get_skill_members(
+        &self,
+        skill_id: uuid::Uuid,
+    ) -> anyhow::Result<(
+        Vec<crate::notes::Note>,
+        Vec<crate::neo4j::models::DecisionNode>,
+    )> {
+        self.get_skill_members(skill_id).await
+    }
+
+    async fn add_skill_member(
+        &self,
+        skill_id: uuid::Uuid,
+        entity_type: &str,
+        entity_id: uuid::Uuid,
+    ) -> anyhow::Result<()> {
+        self.add_skill_member(skill_id, entity_type, entity_id)
+            .await
+    }
+
+    async fn remove_skill_member(
+        &self,
+        skill_id: uuid::Uuid,
+        entity_type: &str,
+        entity_id: uuid::Uuid,
+    ) -> anyhow::Result<bool> {
+        self.remove_skill_member(skill_id, entity_type, entity_id)
+            .await
+    }
+
+    async fn remove_all_skill_members(&self, skill_id: uuid::Uuid) -> anyhow::Result<i64> {
+        self.remove_all_skill_members(skill_id).await
+    }
+
+    async fn get_skills_for_note(
+        &self,
+        note_id: uuid::Uuid,
+    ) -> anyhow::Result<Vec<crate::skills::SkillNode>> {
+        self.get_skills_for_note(note_id).await
+    }
+
+    async fn get_skills_for_project(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> anyhow::Result<Vec<crate::skills::SkillNode>> {
+        self.get_skills_for_project(project_id).await
+    }
+
+    async fn activate_skill(
+        &self,
+        skill_id: uuid::Uuid,
+        query: &str,
+    ) -> anyhow::Result<crate::skills::ActivatedSkillContext> {
+        self.activate_skill(skill_id, query).await
+    }
+
+    async fn match_skills_by_trigger(
+        &self,
+        project_id: uuid::Uuid,
+        input: &str,
+    ) -> anyhow::Result<Vec<(crate::skills::SkillNode, f64)>> {
+        self.match_skills_by_trigger(project_id, input).await
+    }
+
+    async fn get_synapse_graph(
+        &self,
+        project_id: uuid::Uuid,
+        min_weight: f64,
+    ) -> anyhow::Result<Vec<(String, String, f64)>> {
+        self.get_synapse_graph(project_id, min_weight).await
+    }
 }

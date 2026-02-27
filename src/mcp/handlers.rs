@@ -61,6 +61,7 @@ impl ToolHandler {
             "feature_graph",
             "code",
             "admin",
+            "skill",
         ];
 
         if !mega_tools.contains(&name) {
@@ -290,6 +291,20 @@ impl ToolHandler {
             ("code", "get_knowledge_gaps") => "get_knowledge_gaps",
             ("code", "get_risk_assessment") => "get_risk_assessment",
 
+            // Skill
+            ("skill", "list") => "list_skills",
+            ("skill", "create") => "create_skill",
+            ("skill", "get") => "get_skill",
+            ("skill", "update") => "update_skill",
+            ("skill", "delete") => "delete_skill",
+            ("skill", "get_members") => "get_skill_members",
+            ("skill", "add_member") => "add_skill_member",
+            ("skill", "remove_member") => "remove_skill_member",
+            ("skill", "activate") => "activate_skill",
+            ("skill", "export") => "export_skill",
+            ("skill", "import") => "import_skill",
+            ("skill", "get_health") => "get_skill_health",
+
             // Admin
             ("admin", "sync_directory") => "sync_directory",
             ("admin", "start_watch") => "start_watch",
@@ -312,6 +327,9 @@ impl ToolHandler {
             ("admin", "backfill_discussed") => "backfill_discussed",
             ("admin", "update_fabric_scores") => "update_fabric_scores",
             ("admin", "bootstrap_knowledge_fabric") => "bootstrap_knowledge_fabric",
+            ("admin", "detect_skills") => "detect_skills",
+            ("admin", "maintain_skills") => "maintain_skills",
+            ("admin", "install_hooks") => "install_hooks",
 
             _ => {
                 return Err(anyhow!(
@@ -1855,6 +1873,48 @@ impl ToolHandler {
                 Ok(Some(result))
             }
 
+            "detect_skills" => {
+                let mut body = serde_json::Map::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                let result = http
+                    .post("/api/admin/detect-skills", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "maintain_skills" => {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "project_id".to_string(),
+                    json!(extract_string(args, "project_id")?),
+                );
+                if let Some(level) = args.get("level").and_then(|v| v.as_str()) {
+                    body.insert("level".to_string(), Value::String(level.to_string()));
+                }
+                let result = http
+                    .post("/api/admin/skill-maintenance", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "install_hooks" => {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "project_id".to_string(),
+                    json!(extract_string(args, "project_id")?),
+                );
+                body.insert("cwd".to_string(), json!(extract_string(args, "cwd")?));
+                if let Some(port) = args.get("port").and_then(|v| v.as_u64()) {
+                    body.insert("port".to_string(), json!(port));
+                }
+                let result = http
+                    .post("/api/admin/install-hooks", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
             // ── P8: Workspaces (34 tools) ──────────────────────────────────
 
             // --- Workspace CRUD (5) ---
@@ -2973,6 +3033,173 @@ impl ToolHandler {
             "migrate_calls_confidence" => {
                 let result = http
                     .post("/api/admin/migrate-calls-confidence", &json!({}))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            // ── P10: Skills (9 tools) ──────────────────────────────────
+            "list_skills" => {
+                let project_id = extract_id(args, "project_id")?;
+                let mut query = vec![("project_id".to_string(), project_id)];
+                if let Some(s) = args.get("status").and_then(|v| v.as_str()) {
+                    query.push(("status".to_string(), s.to_string()));
+                }
+                if let Some(l) = args.get("limit").and_then(|v| v.as_u64()) {
+                    query.push(("limit".to_string(), l.to_string()));
+                }
+                if let Some(o) = args.get("offset").and_then(|v| v.as_u64()) {
+                    query.push(("offset".to_string(), o.to_string()));
+                }
+                let result = http.get_with_query("/api/skills", &query).await?;
+                Ok(Some(result))
+            }
+
+            "create_skill" => {
+                let result = http.post("/api/skills", args).await?;
+                Ok(Some(result))
+            }
+
+            "get_skill" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let result = http.get(&format!("/api/skills/{}", skill_id)).await?;
+                Ok(Some(result))
+            }
+
+            "update_skill" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let mut body = serde_json::Map::new();
+                if let Some(v) = args.get("name") {
+                    body.insert("name".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("description") {
+                    body.insert("description".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("status") {
+                    body.insert("status".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("tags") {
+                    body.insert("tags".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("trigger_patterns") {
+                    body.insert("trigger_patterns".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("context_template") {
+                    body.insert("context_template".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("energy") {
+                    body.insert("energy".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("cohesion") {
+                    body.insert("cohesion".to_string(), v.clone());
+                }
+                let result = http
+                    .put(&format!("/api/skills/{}", skill_id), &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "delete_skill" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let result = http.delete(&format!("/api/skills/{}", skill_id)).await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "get_skill_members" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let result = http
+                    .get(&format!("/api/skills/{}/members", skill_id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "add_skill_member" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let entity_type = extract_string(args, "entity_type")?;
+                let entity_id = extract_id(args, "entity_id")?;
+                // Validate entity_type (defense-in-depth, also validated server-side)
+                if entity_type != "note" && entity_type != "decision" {
+                    return Err(anyhow!(
+                        "Invalid entity_type '{}': expected 'note' or 'decision'",
+                        entity_type
+                    ));
+                }
+                let body = json!({
+                    "entity_type": entity_type,
+                    "entity_id": entity_id
+                });
+                let result = http
+                    .post(&format!("/api/skills/{}/members", skill_id), &body)
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"added": true})
+                } else {
+                    result
+                }))
+            }
+
+            "remove_skill_member" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let entity_type = extract_string(args, "entity_type")?;
+                let entity_id = extract_id(args, "entity_id")?;
+                // Validate entity_type to prevent URL path injection
+                if entity_type != "note" && entity_type != "decision" {
+                    return Err(anyhow!(
+                        "Invalid entity_type '{}': expected 'note' or 'decision'",
+                        entity_type
+                    ));
+                }
+                let result = http
+                    .delete(&format!(
+                        "/api/skills/{}/members/{}/{}",
+                        skill_id, entity_type, entity_id
+                    ))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"removed": true})
+                } else {
+                    result
+                }))
+            }
+
+            "activate_skill" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let query = extract_string(args, "query")?;
+                let body = json!({"query": query});
+                let result = http
+                    .post(&format!("/api/skills/{}/activate", skill_id), &body)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "export_skill" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let mut query = Vec::new();
+                if let Some(name) = extract_optional_string(args, "source_project_name") {
+                    query.push(("source_project_name".to_string(), name));
+                }
+                let result = if query.is_empty() {
+                    http.get(&format!("/api/skills/{}/export", skill_id))
+                        .await?
+                } else {
+                    http.get_with_query(&format!("/api/skills/{}/export", skill_id), &query)
+                        .await?
+                };
+                Ok(Some(result))
+            }
+
+            "import_skill" => {
+                let result = http.post("/api/skills/import", args).await?;
+                Ok(Some(result))
+            }
+
+            "get_skill_health" => {
+                let skill_id = extract_id(args, "skill_id")?;
+                let result = http
+                    .get(&format!("/api/skills/{}/health", skill_id))
                     .await?;
                 Ok(Some(result))
             }

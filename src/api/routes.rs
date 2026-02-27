@@ -7,8 +7,10 @@ use super::auth_handlers;
 use super::chat_handlers;
 use super::code_handlers;
 use super::handlers::{self, OrchestratorState};
+use super::hook_handlers;
 use super::note_handlers;
 use super::project_handlers;
+use super::skill_handlers;
 use super::workspace_handlers;
 use super::ws_chat_handler;
 use super::ws_handlers;
@@ -169,6 +171,19 @@ fn public_routes() -> Router<OrchestratorState> {
         .route("/hooks/wake", post(handlers::wake))
         // DEPRECATED: Use NATS for inter-process events. Kept for backward compatibility.
         .route("/internal/events", post(handlers::receive_event))
+        // ================================================================
+        // Hook activation (public — called from Claude Code hooks, rate limited)
+        // ================================================================
+        .route("/api/hooks/activate", post(hook_handlers::activate_hook))
+        .route("/api/hooks/health", get(hook_handlers::hooks_health))
+        .route(
+            "/api/hooks/session-context",
+            get(hook_handlers::session_context),
+        )
+        .route(
+            "/api/hooks/resolve-project",
+            get(hook_handlers::resolve_project),
+        )
 }
 
 // ============================================================================
@@ -661,6 +676,40 @@ fn protected_routes() -> Router<OrchestratorState> {
             get(note_handlers::get_entity_notes),
         )
         // ================================================================
+        // Skills (Neural Skills)
+        // ================================================================
+        .route(
+            "/api/skills",
+            get(skill_handlers::list_skills).post(skill_handlers::create_skill),
+        )
+        .route(
+            "/api/skills/{skill_id}",
+            get(skill_handlers::get_skill)
+                .put(skill_handlers::update_skill)
+                .delete(skill_handlers::delete_skill),
+        )
+        .route(
+            "/api/skills/{skill_id}/members",
+            get(skill_handlers::get_skill_members).post(skill_handlers::add_skill_member),
+        )
+        .route(
+            "/api/skills/{skill_id}/members/{entity_type}/{entity_id}",
+            axum::routing::delete(skill_handlers::remove_skill_member),
+        )
+        .route(
+            "/api/skills/{skill_id}/activate",
+            post(skill_handlers::activate_skill),
+        )
+        .route(
+            "/api/skills/{skill_id}/export",
+            get(skill_handlers::export_skill),
+        )
+        .route("/api/skills/import", post(skill_handlers::import_skill))
+        .route(
+            "/api/skills/{skill_id}/health",
+            get(skill_handlers::get_skill_health),
+        )
+        // ================================================================
         // Admin — Embedding Backfill
         // ================================================================
         .route(
@@ -735,6 +784,15 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/admin/bootstrap-knowledge-fabric",
             post(handlers::bootstrap_knowledge_fabric),
+        )
+        .route("/api/admin/detect-skills", post(handlers::detect_skills))
+        .route(
+            "/api/admin/skill-maintenance",
+            post(handlers::skill_maintenance),
+        )
+        .route(
+            "/api/admin/install-hooks",
+            post(hook_handlers::install_hooks),
         )
         // ================================================================
         // Workspaces

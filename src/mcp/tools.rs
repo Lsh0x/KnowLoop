@@ -1,6 +1,6 @@
 //! MCP Tool definitions — Mega-tools architecture
 //!
-//! Instead of 160 individual tools, we expose ~18 mega-tools with an `action` parameter.
+//! Instead of 160 individual tools, we expose ~19 mega-tools with an `action` parameter.
 //! Each mega-tool groups all operations for a domain (e.g., project, plan, task).
 //! The `action` parameter selects the specific operation; additional parameters vary by action.
 //!
@@ -30,6 +30,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         feature_graph_tool(),
         code_tool(),
         admin_tool(),
+        skill_tool(),
     ]
 }
 
@@ -240,6 +241,20 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "get_knowledge_gaps" => Some(("code", "get_knowledge_gaps")),
         "get_risk_assessment" => Some(("code", "get_risk_assessment")),
 
+        // Skill
+        "list_skills" => Some(("skill", "list")),
+        "create_skill" => Some(("skill", "create")),
+        "get_skill" => Some(("skill", "get")),
+        "update_skill" => Some(("skill", "update")),
+        "delete_skill" => Some(("skill", "delete")),
+        "get_skill_members" => Some(("skill", "get_members")),
+        "add_skill_member" => Some(("skill", "add_member")),
+        "remove_skill_member" => Some(("skill", "remove_member")),
+        "activate_skill" => Some(("skill", "activate")),
+        "export_skill" => Some(("skill", "export")),
+        "import_skill" => Some(("skill", "import")),
+        "get_skill_health" => Some(("skill", "get_health")),
+
         // Admin
         "sync_directory" => Some(("admin", "sync_directory")),
         "start_watch" => Some(("admin", "start_watch")),
@@ -258,6 +273,8 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "decay_synapses" => Some(("admin", "decay_synapses")),
         "backfill_synapses" => Some(("admin", "backfill_synapses")),
         "backfill_decision_embeddings" => Some(("admin", "backfill_decision_embeddings")),
+        "detect_skills" => Some(("admin", "detect_skills")),
+        "maintain_skills" => Some(("admin", "maintain_skills")),
 
         _ => None,
     }
@@ -776,17 +793,19 @@ fn code_tool() -> ToolDefinition {
 fn admin_tool() -> ToolDefinition {
     ToolDefinition {
         name: "admin".to_string(),
-        description: "Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_builtin_calls, migrate_calls_confidence, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric".to_string(),
+        description: "Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_builtin_calls, migrate_calls_confidence, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric, detect_skills, install_hooks".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["sync_directory", "start_watch", "stop_watch", "watch_status", "meilisearch_stats", "delete_meilisearch_orphans", "cleanup_cross_project_calls", "cleanup_builtin_calls", "migrate_calls_confidence", "cleanup_sync_data", "update_staleness_scores", "update_energy_scores", "search_neurons", "reinforce_neurons", "decay_synapses", "backfill_synapses", "backfill_decision_embeddings", "backfill_touches", "backfill_discussed", "update_fabric_scores", "bootstrap_knowledge_fabric"],
+                    "enum": ["sync_directory", "start_watch", "stop_watch", "watch_status", "meilisearch_stats", "delete_meilisearch_orphans", "cleanup_cross_project_calls", "cleanup_builtin_calls", "migrate_calls_confidence", "cleanup_sync_data", "update_staleness_scores", "update_energy_scores", "search_neurons", "reinforce_neurons", "decay_synapses", "backfill_synapses", "backfill_decision_embeddings", "backfill_touches", "backfill_discussed", "update_fabric_scores", "bootstrap_knowledge_fabric", "detect_skills", "maintain_skills", "install_hooks"],
                     "description": "Operation to perform"
                 },
                 "path": {"type": "string", "description": "Directory path (sync_directory/start_watch)"},
-                "project_id": {"type": "string", "description": "Project UUID (sync_directory/start_watch/update_staleness_scores/update_energy_scores/update_fabric_scores/bootstrap_knowledge_fabric)"},
+                "project_id": {"type": "string", "description": "Project UUID (sync_directory/start_watch/update_staleness_scores/update_energy_scores/update_fabric_scores/bootstrap_knowledge_fabric/detect_skills/install_hooks)"},
+                "cwd": {"type": "string", "description": "Working directory for .po-config (install_hooks)"},
+                "port": {"type": "integer", "description": "PO server port (install_hooks, default 6600)"},
                 "query": {"type": "string", "description": "Search query (search_neurons)"},
                 "note_ids": {"type": "array", "items": {"type": "string"}, "description": "Note UUIDs to co-activate (reinforce_neurons, min 2)"},
                 "energy_boost": {"type": "number", "description": "Energy boost amount 0-1 (reinforce_neurons, default 0.2)"},
@@ -794,7 +813,48 @@ fn admin_tool() -> ToolDefinition {
                 "min_strength": {"type": "number", "description": "Min strength filter (search_neurons)"},
                 "decay_amount": {"type": "number", "description": "Amount to subtract from each synapse weight (decay_synapses, default 0.01)"},
                 "prune_threshold": {"type": "number", "description": "Prune synapses below this weight (decay_synapses, default 0.1)"},
-                "limit": {"type": "integer", "description": "Max items (search_neurons)"}
+                "limit": {"type": "integer", "description": "Max items (search_neurons)"},
+                "level": {"type": "string", "enum": ["hourly", "daily", "weekly", "full"], "description": "Maintenance level (maintain_skills, default: daily)"}
+            })),
+            required: Some(vec!["action".to_string()]),
+        },
+    }
+}
+
+fn skill_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "skill".to_string(),
+        description: "Manage neural skills (emergent knowledge clusters). Actions: list, create, get, update, delete, get_members, add_member, remove_member, activate, export, import, get_health".to_string(),
+        input_schema: InputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "create", "get", "update", "delete", "get_members", "add_member", "remove_member", "activate", "export", "import", "get_health"],
+                    "description": "Operation to perform"
+                },
+                "skill_id": {"type": "string", "description": "Skill UUID (get/update/delete/get_members/add_member/remove_member/activate/export)"},
+                "project_id": {"type": "string", "description": "Project UUID (list/create/import)"},
+                "name": {"type": "string", "description": "Skill name (create/update)"},
+                "description": {"type": "string", "description": "Skill description (create/update)"},
+                "status": {"type": "string", "description": "Status (update): emerging, active, dormant, archived, imported"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags (create/update)"},
+                "trigger_patterns": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Trigger patterns (create/update): [{\"pattern_type\": \"regex\"|\"file_glob\"|\"semantic\", \"pattern_value\": \"...\", \"confidence_threshold\": 0.7}]"
+                },
+                "context_template": {"type": "string", "description": "Context template (create/update)"},
+                "energy": {"type": "number", "description": "Energy 0-1 (update)"},
+                "cohesion": {"type": "number", "description": "Cohesion 0-1 (update)"},
+                "entity_type": {"type": "string", "description": "Member entity type: 'note' or 'decision' (add_member/remove_member)"},
+                "entity_id": {"type": "string", "description": "Member entity UUID (add_member/remove_member)"},
+                "query": {"type": "string", "description": "Activation query (activate)"},
+                "package": {"type": "object", "description": "SkillPackage JSON to import (import)"},
+                "conflict_strategy": {"type": "string", "description": "Conflict strategy (import): skip, merge, replace. Default: skip"},
+                "source_project_name": {"type": "string", "description": "Source project name for export metadata (export)"},
+                "limit": {"type": "integer", "description": "Max items (list)"},
+                "offset": {"type": "integer", "description": "Skip items (list)"}
             })),
             required: Some(vec!["action".to_string()]),
         },
@@ -810,8 +870,8 @@ mod tests {
         let tools = all_tools();
         assert_eq!(
             tools.len(),
-            18,
-            "Expected 18 mega-tools, got {}",
+            19,
+            "Expected 19 mega-tools, got {}",
             tools.len()
         );
     }
@@ -1077,6 +1137,7 @@ mod tests {
             "feature_graph",
             "code",
             "admin",
+            "skill",
         ];
         for name in &mega_names {
             assert!(
