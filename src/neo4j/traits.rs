@@ -5,7 +5,8 @@
 //! enabling testing with mock implementations and future backend swaps.
 
 use crate::graph::models::{
-    FabricFileAnalyticsUpdate, FileAnalyticsUpdate, FunctionAnalyticsUpdate,
+    AnalysisProfile, FabricFileAnalyticsUpdate, FileAnalyticsUpdate, FunctionAnalyticsUpdate,
+    TopologyRule, TopologyViolation,
 };
 use crate::neo4j::models::*;
 use crate::notes::{
@@ -334,6 +335,19 @@ pub trait GraphStore: Send + Sync {
 
     /// Count files for a project (lightweight, no data transfer)
     async fn count_project_files(&self, project_id: Uuid) -> Result<i64>;
+
+    /// Invalidate pre-computed GraIL properties on changed files and their neighbors.
+    ///
+    /// Sets `*_version = -1` on:
+    /// - Direct files: `cc_version`, `structural_dna_version`, `wl_hash_version`
+    /// - 1-2 hop neighbors: `cc_version` (1-hop), `wl_hash_version` (2-hop)
+    ///
+    /// Returns the total number of File nodes marked as stale.
+    async fn invalidate_computed_properties(
+        &self,
+        project_id: Uuid,
+        paths: &[String],
+    ) -> Result<u64>;
 
     // ========================================================================
     // Symbol operations
@@ -1799,6 +1813,27 @@ pub trait GraphStore: Send + Sync {
         updates: &[FabricFileAnalyticsUpdate],
     ) -> Result<()>;
 
+    /// Batch-update structural DNA vectors on File nodes.
+    /// Writes the `structural_dna` property (Vec<f64>) via UNWIND in chunks of 1000.
+    /// DNA = K-dimensional distance vector to anchor nodes, normalized [0,1].
+    async fn batch_update_structural_dna(
+        &self,
+        updates: &[crate::graph::models::StructuralDnaUpdate],
+    ) -> Result<()>;
+
+    /// Write predicted missing links for a project.
+    /// Persists top-N link predictions as PREDICTED_LINK relationships in Neo4j.
+    async fn write_predicted_links(
+        &self,
+        project_id: &str,
+        links: &[crate::graph::models::LinkPrediction],
+    ) -> Result<()>;
+
+    /// Read structural DNA vectors for all File nodes in a project.
+    /// Returns (file_path, dna_vector) pairs.
+    async fn get_project_structural_dna(&self, project_id: &str)
+        -> Result<Vec<(String, Vec<f64>)>>;
+
     // ========================================================================
     // SYNAPSE (neural connections bridged to file-level)
     // ========================================================================
@@ -1976,10 +2011,168 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Vec<(String, String, f64)>>;
 
     // ========================================================================
+    // Analysis Profile operations
+    // ========================================================================
+
+    /// Create or update an analysis profile.
+    ///
+    /// Uses MERGE on `id` so built-in profiles can be upserted idempotently.
+    /// If `project_id` is Some, links the profile to the project via HAS_PROFILE.
+    async fn create_analysis_profile(&self, profile: &AnalysisProfile) -> Result<()>;
+
+    /// List analysis profiles visible to a project.
+    ///
+    /// Returns global profiles (project_id IS NULL) + project-specific profiles.
+    /// If `project_id` is None, returns only global profiles.
+    async fn list_analysis_profiles(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<AnalysisProfile>>;
+
+    /// Get a single analysis profile by id.
+    async fn get_analysis_profile(&self, id: &str) -> Result<Option<AnalysisProfile>>;
+
+    /// Delete an analysis profile by id.
+    ///
+    /// Returns an error if the profile is built-in (`is_builtin = true`).
+    async fn delete_analysis_profile(&self, id: &str) -> Result<()>;
+
+    // ========================================================================
+    // Bridge subgraph extraction (GraIL Plan 1)
+    // ========================================================================
+
+    /// Extract the enclosing bridge subgraph between two nodes via bidirectional
+    /// BFS intersection. Returns raw nodes and edges; double-radius labeling
+    /// and bottleneck detection are done in Rust (see graph/algorithms.rs).
+    ///
+    /// - `source`/`target`: file paths within the project
+    /// - `max_hops`: BFS radius (1..=5)
+    /// - `relation_types`: edge types to traverse (e.g. ["IMPORTS", "CALLS"])
+    /// - `project_id`: project UUID for scoping
+    async fn find_bridge_subgraph(
+        &self,
+        source: &str,
+        target: &str,
+        max_hops: u32,
+        relation_types: &[String],
+        project_id: &str,
+    ) -> Result<(
+        Vec<crate::graph::models::BridgeRawNode>,
+        Vec<crate::graph::models::BridgeRawEdge>,
+    )>;
+
+    // ========================================================================
+    // Multi-signal impact queries
+    // ========================================================================
+
+    /// Get the knowledge density for a file: count of notes LINKED_TO + decisions AFFECTS,
+    /// normalized by max count across all files in the project. Returns f64 in [0, 1].
+    async fn get_knowledge_density(&self, file_path: &str, project_id: &str) -> Result<f64>;
+
+    /// Get the PageRank score for a file node.
+    /// Reads the `cc_pagerank` property set by GDS projection. Falls back to 0.0.
+    async fn get_node_pagerank(&self, file_path: &str, project_id: &str) -> Result<f64>;
+
+    /// Get bridge proximity scores for a file's top co-changers.
+    /// For each co-changer, computes 1.0 / shortestPath distance to the target.
+    /// Returns Vec<(path, score)> sorted by score descending.
+    async fn get_bridge_proximity(
+        &self,
+        file_path: &str,
+        project_id: &str,
+    ) -> Result<Vec<(String, f64)>>;
+
+    /// Compute the average multi-signal impact score across the top-10 files
+    /// by PageRank. Uses GDS properties (pagerank, betweenness, churn_score,
+    /// knowledge_density) to approximate the 5-signal fusion in a single query.
+    /// Returns 0.0 if no files have GDS metrics computed.
+    async fn get_avg_multi_signal_score(&self, project_id: Uuid) -> Result<f64>;
+
+    // ========================================================================
+    // Topology Firewall (GraIL Plan 3)
+    // ========================================================================
+
+    /// Create a topology rule.
+    ///
+    /// Stores the rule as a `TopologyRule` node in Neo4j with the given
+    /// project_id, rule_type, source/target patterns, threshold, and severity.
+    async fn create_topology_rule(&self, rule: &TopologyRule) -> Result<()>;
+
+    /// List all topology rules for a project.
+    async fn list_topology_rules(&self, project_id: &str) -> Result<Vec<TopologyRule>>;
+
+    /// Delete a topology rule by id.
+    async fn delete_topology_rule(&self, rule_id: &str) -> Result<()>;
+
+    /// Check all topology rules for a project and return violations.
+    ///
+    /// Iterates over all rules for the project and runs type-specific Cypher
+    /// queries to detect violations:
+    /// - `MustNotImport`: files matching source_pattern that IMPORTS files matching target_pattern
+    /// - `MustNotCall`: functions matching source_pattern that CALLS functions matching target_pattern
+    /// - `MaxFanOut`: files matching source_pattern with more than threshold IMPORTS
+    /// - `NoCircular`: circular import chains (depth 2..6) among files matching source_pattern
+    /// - `MaxDistance`: shortest path between source and target patterns >= threshold
+    async fn check_topology_rules(&self, project_id: &str) -> Result<Vec<TopologyViolation>>;
+
+    /// Check if a specific file's new imports would violate any topology rules.
+    ///
+    /// Designed for real-time pre-write validation (<50ms target).
+    /// Only checks `MustNotImport` rules where `file_path` matches the source pattern
+    /// and any of `new_imports` matches the target pattern.
+    async fn check_file_topology(
+        &self,
+        project_id: &str,
+        file_path: &str,
+        new_imports: &[String],
+    ) -> Result<Vec<TopologyViolation>>;
+
+    // ========================================================================
     // Health check
     // ========================================================================
 
     /// Check connectivity to the graph database.
     /// Returns Ok(true) if the database is reachable, Ok(false) if not.
     async fn health_check(&self) -> Result<bool>;
+
+    // ========================================================================
+    // Context Cards persistence
+    // ========================================================================
+
+    /// Batch-write context cards as cc_* properties on File nodes.
+    async fn batch_save_context_cards(
+        &self,
+        cards: &[crate::graph::models::ContextCard],
+    ) -> Result<()>;
+
+    /// Invalidate context cards for given file paths + their 1-hop neighbors.
+    /// Sets cc_version = -1 on the target files and their direct neighbors.
+    async fn invalidate_context_cards(&self, paths: &[String], project_id: &str) -> Result<()>;
+
+    /// Read a single context card from Neo4j cc_* properties.
+    /// Returns None if the file doesn't exist or has no cc_* properties.
+    async fn get_context_card(
+        &self,
+        path: &str,
+        project_id: &str,
+    ) -> Result<Option<crate::graph::models::ContextCard>>;
+
+    /// Batch-read context cards for multiple files.
+    async fn get_context_cards_batch(
+        &self,
+        paths: &[String],
+        project_id: &str,
+    ) -> Result<Vec<crate::graph::models::ContextCard>>;
+
+    /// Find groups of files with identical WL hash (isomorphic neighborhoods).
+    /// Returns groups with at least `min_group_size` members.
+    async fn find_isomorphic_groups(
+        &self,
+        project_id: &str,
+        min_group_size: usize,
+    ) -> Result<Vec<crate::graph::models::IsomorphicGroup>>;
+
+    /// Check if any file in the project has GraIL analytics (context cards) computed.
+    /// Used by staleness check to detect pre-GraIL projects needing first computation.
+    async fn has_context_cards(&self, project_id: &str) -> Result<bool>;
 }

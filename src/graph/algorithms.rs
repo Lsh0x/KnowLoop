@@ -7,6 +7,11 @@
 //! - **Clustering coefficient** — local clustering per node
 //! - **Weakly connected components** — via petgraph's `algo::connected_components` on undirected view
 //!
+//! ## GraIL-extended algorithms (Plans 1-10):
+//! - **Structural DNA** — K-anchor distance vectors for positional fingerprinting
+//! - **WL Subgraph Hash** — Weisfeiler-Lehman hash for structural isomorphism
+//! - **compute_all_extended** — orchestrated pipeline with timing & error resilience
+//!
 //! All algorithms operate on `CodeGraph` and return results indexed by node ID (String).
 //! The Louvain algorithm is implemented from scratch because the `graphina` crate
 //! requires Rust 1.86+ (our MSRV target is 1.70+).
@@ -14,11 +19,14 @@
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use serde::Serialize;
 
 use super::models::{
-    AnalyticsConfig, CodeGraph, CodeHealthReport, CommunityInfo, ComponentInfo, GraphAnalytics,
-    NodeMetrics,
+    AnalysisProfile, AnalyticsConfig, CodeGraph, CodeHealthReport, CommunityInfo, ComponentInfo,
+    ComputeAllResult, ComputeMode, GrailConfig, GrailStats, GraphAnalytics, NodeMetrics,
+    RankCluster, RankConfidence, RankedList, RankedResult, StepTiming,
 };
 
 // ============================================================================
@@ -755,7 +763,7 @@ pub fn compute_health(
 // Orchestrator: compute_all
 // ============================================================================
 
-/// Run all 5 algorithms and assemble a complete `GraphAnalytics` result.
+/// Run all base algorithms and assemble a complete `GraphAnalytics` result.
 ///
 /// Execution order:
 /// 1. PageRank (depends on graph structure only)
@@ -835,6 +843,1891 @@ pub fn compute_all(graph: &CodeGraph, config: &AnalyticsConfig) -> GraphAnalytic
         node_count: g.node_count(),
         edge_count: g.edge_count(),
         computation_ms: elapsed.as_millis() as u64,
+        profile_name: None,
+    }
+}
+
+// ============================================================================
+// GraIL extended pipeline: compute_all_extended
+// ============================================================================
+
+/// Helper: time a step and collect its result.
+fn timed_step<T, F: FnOnce() -> Result<T, String>>(name: &str, f: F) -> (Option<T>, StepTiming) {
+    let start = std::time::Instant::now();
+    match f() {
+        Ok(result) => {
+            let elapsed = start.elapsed();
+            (
+                Some(result),
+                StepTiming {
+                    name: name.to_string(),
+                    duration_ms: elapsed.as_millis() as u64,
+                    success: true,
+                    error: None,
+                },
+            )
+        }
+        Err(e) => {
+            let elapsed = start.elapsed();
+            tracing::warn!(step = name, error = %e, "GraIL pipeline step failed — dependent steps will degrade gracefully");
+            (
+                None,
+                StepTiming {
+                    name: name.to_string(),
+                    duration_ms: elapsed.as_millis() as u64,
+                    success: false,
+                    error: Some(e),
+                },
+            )
+        }
+    }
+}
+
+/// Run the full GraIL-extended analytics pipeline.
+///
+/// This extends `compute_all` with additional stages from the GraIL plans:
+///
+/// ## Pipeline order (from note 0602a13c):
+/// 1. *(Optional)* Apply profile weights → re-weight edges
+/// 2. PageRank
+/// 3. Betweenness centrality
+/// 4. Louvain communities
+/// 5. Structural DNA (K-anchor distances, depends on PageRank)
+/// 6. WL subgraph hashing (independent, runs after DNA)
+/// 7. Stress test top-N nodes (by PageRank)
+/// 8. Missing link prediction (depends on DNA similarity)
+/// 9. Context cards aggregation (depends on ALL above)
+/// 10. Topology rule check (post-validation)
+///
+/// Each step is individually timed and error-resilient: a failing step
+/// logs its error and does not block subsequent independent steps.
+/// Dependent steps degrade gracefully (e.g., missing links runs with
+/// 4 signals instead of 5 if DNA failed).
+pub fn compute_all_extended(
+    graph: &CodeGraph,
+    config: &AnalyticsConfig,
+    grail: &GrailConfig,
+    stale_node_ids: Option<&HashSet<String>>,
+) -> ComputeAllResult {
+    let wall_start = std::time::Instant::now();
+    let mut timings: Vec<StepTiming> = Vec::with_capacity(10);
+    let mut grail_stats = GrailStats::default();
+
+    // Determine compute mode: incremental if stale < 30% of total, else full
+    let total_nodes = graph.graph.node_count();
+    let (mode, incremental_targets) = match stale_node_ids {
+        Some(stale) if !stale.is_empty() && total_nodes > 0 => {
+            let stale_ratio = stale.len() as f64 / total_nodes as f64;
+            if stale_ratio < 0.30 {
+                tracing::info!(
+                    stale_count = stale.len(),
+                    total = total_nodes,
+                    ratio = format!("{:.1}%", stale_ratio * 100.0),
+                    "Incremental mode: recalculating only stale nodes + neighborhood"
+                );
+                (ComputeMode::Incremental, Some(stale.clone()))
+            } else {
+                tracing::info!(
+                    stale_count = stale.len(),
+                    total = total_nodes,
+                    ratio = format!("{:.1}%", stale_ratio * 100.0),
+                    "Full recalc: stale ratio >= 30%"
+                );
+                (ComputeMode::Full, None)
+            }
+        }
+        _ => (ComputeMode::Full, None),
+    };
+
+    // --- Step 0 (optional): Apply profile weights ---
+    let working_graph: CodeGraph;
+    if let Some(ref profile) = grail.profile {
+        let (result, timing) = timed_step("apply_profile_weights", || {
+            Ok(apply_profile_weights(graph, profile))
+        });
+        timings.push(timing);
+        working_graph = result.unwrap_or_else(|| graph.clone());
+    } else {
+        working_graph = graph.clone();
+    }
+
+    // --- Steps 1-8: Base analytics (PageRank, Betweenness, Louvain, Health) ---
+    let (base_analytics, base_timing) =
+        timed_step("base_analytics", || Ok(compute_all(&working_graph, config)));
+    timings.push(base_timing);
+
+    let analytics = base_analytics.unwrap_or_else(|| GraphAnalytics {
+        metrics: HashMap::new(),
+        communities: vec![],
+        components: vec![],
+        health: CodeHealthReport::default(),
+        modularity: 0.0,
+        node_count: working_graph.graph.node_count(),
+        edge_count: working_graph.graph.edge_count(),
+        computation_ms: 0,
+        profile_name: None,
+    });
+
+    // Extract PageRank scores for downstream use
+    let pagerank_scores: HashMap<String, f64> = analytics
+        .metrics
+        .iter()
+        .map(|(id, m)| (id.clone(), m.pagerank))
+        .collect();
+
+    // --- Step 5: Structural DNA (depends on PageRank) ---
+    let (dna_result, dna_timing) = timed_step("structural_dna", || {
+        let mut dna = structural_dna(&working_graph, &pagerank_scores, grail.dna_k)?;
+        // In incremental mode, only keep stale nodes (caller will merge with existing)
+        if let Some(ref targets) = incremental_targets {
+            dna.retain(|id, _| targets.contains(id));
+        }
+        Ok(dna)
+    });
+    timings.push(dna_timing);
+
+    let structural_dna_map = dna_result.unwrap_or_default();
+    grail_stats.dna_computed = structural_dna_map.len();
+
+    // --- Step 6: WL Subgraph Hash ---
+    let (wl_result, wl_timing) = timed_step("wl_subgraph_hash", || {
+        let mut hashes =
+            wl_subgraph_hash_all(&working_graph, grail.wl_radius, grail.wl_iterations)?;
+        // In incremental mode, only keep stale nodes
+        if let Some(ref targets) = incremental_targets {
+            hashes.retain(|id, _| targets.contains(id));
+        }
+        Ok(hashes)
+    });
+    timings.push(wl_timing);
+
+    let wl_hashes = wl_result.unwrap_or_default();
+    grail_stats.wl_computed = wl_hashes.len();
+
+    // --- Step 7: Stress Test top-N ---
+    let (_stress_result, stress_timing) = timed_step("stress_test_top_n", || {
+        // TODO(Plan 5): stress_test_top_n(&working_graph, &pagerank_scores, grail.stress_top_n)
+        grail_stats.stress_tested = 0;
+        Ok(())
+    });
+    timings.push(stress_timing);
+
+    // --- Step 8: Missing Link Prediction (depends on DNA) ---
+    if structural_dna_map.is_empty() {
+        tracing::warn!(
+            "missing_links will run with 4 signals instead of 5 — structural DNA unavailable"
+        );
+    }
+    let (links_result, links_timing) = timed_step("missing_links", || {
+        let co_change_data = extract_co_change_data(&working_graph);
+        let dna_ref = if structural_dna_map.is_empty() {
+            None
+        } else {
+            Some(&structural_dna_map)
+        };
+        let predictions = suggest_missing_links(
+            &working_graph,
+            &co_change_data,
+            dna_ref,
+            grail.missing_links_top_n,
+            grail.min_plausibility,
+        );
+        grail_stats.links_predicted = predictions.len();
+        Ok(predictions)
+    });
+    timings.push(links_timing);
+
+    let predicted_links = links_result.unwrap_or_default();
+
+    // --- Step 9: Context Cards (aggregates ALL above) ---
+    let (cards_result, cards_timing) = timed_step("context_cards", || {
+        let cards = compute_context_cards(graph, &analytics, &structural_dna_map, &wl_hashes);
+        grail_stats.cards_computed = cards.len();
+        Ok(cards)
+    });
+    timings.push(cards_timing);
+    let context_cards = cards_result.unwrap_or_default();
+
+    // --- Step 10: Topology Rule Check (post-validation) ---
+    let (_topo_result, topo_timing) = timed_step("topology_check", || {
+        // TODO(Plan 3): check_topology_rules(project_id) — requires Neo4j, not in-memory
+        grail_stats.violations_found = 0;
+        Ok(())
+    });
+    timings.push(topo_timing);
+
+    let total_ms = wall_start.elapsed().as_millis() as u64;
+
+    ComputeAllResult {
+        analytics,
+        timings,
+        grail_stats,
+        structural_dna: structural_dna_map,
+        wl_hashes,
+        predicted_links,
+        context_cards,
+        mode,
+        total_ms,
+    }
+}
+
+// ============================================================================
+// GraIL — helper: undirected neighbors
+// ============================================================================
+
+/// Get all neighbors of a node in both directions (simulates undirected graph).
+fn undirected_neighbors(
+    g: &petgraph::graph::DiGraph<super::models::CodeNode, super::models::CodeEdge>,
+    idx: NodeIndex,
+) -> Vec<NodeIndex> {
+    let mut neighbors: Vec<NodeIndex> = g
+        .neighbors_directed(idx, Direction::Outgoing)
+        .chain(g.neighbors_directed(idx, Direction::Incoming))
+        .collect();
+    neighbors.sort();
+    neighbors.dedup();
+    neighbors
+}
+
+// ============================================================================
+// GraIL algorithms — Structural DNA (Plan 2)
+// ============================================================================
+
+/// Compute structural DNA vectors for all nodes in the graph.
+///
+/// DNA = vector of shortest distances from each node to K anchor nodes
+/// (top-K by PageRank). Inspired by GraIL's double-radius node labeling.
+///
+/// Returns: HashMap<node_id, Vec<f64>> where Vec has K dimensions, normalized [0,1].
+pub fn structural_dna(
+    graph: &CodeGraph,
+    pagerank_scores: &HashMap<String, f64>,
+    k: usize,
+) -> Result<HashMap<String, Vec<f64>>, String> {
+    let g = &graph.graph;
+    if g.node_count() == 0 {
+        return Ok(HashMap::new());
+    }
+
+    // Select K anchor nodes (top-K PageRank)
+    let mut scored: Vec<(&String, &f64)> = pagerank_scores.iter().collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let anchors: Vec<NodeIndex> = scored
+        .iter()
+        .take(k)
+        .filter_map(|(id, _)| graph.get_index(id))
+        .collect();
+
+    if anchors.is_empty() {
+        return Err("No anchor nodes found (PageRank scores empty?)".to_string());
+    }
+
+    // BFS from each anchor on undirected view → distance vectors
+    let mut dna_map: HashMap<String, Vec<f64>> = HashMap::with_capacity(g.node_count());
+
+    // Initialize all DNA vectors
+    for idx in g.node_indices() {
+        dna_map.insert(g[idx].id.clone(), vec![f64::MAX; anchors.len()]);
+    }
+
+    // BFS from each anchor
+    for (anchor_dim, &anchor_idx) in anchors.iter().enumerate() {
+        let mut visited = vec![false; g.node_count()];
+        let mut queue = std::collections::VecDeque::new();
+        visited[anchor_idx.index()] = true;
+        queue.push_back((anchor_idx, 0u32));
+
+        while let Some((current, dist)) = queue.pop_front() {
+            let id = &g[current].id;
+            if let Some(dna) = dna_map.get_mut(id) {
+                dna[anchor_dim] = dist as f64;
+            }
+
+            for neighbor in undirected_neighbors(g, current) {
+                if !visited[neighbor.index()] {
+                    visited[neighbor.index()] = true;
+                    queue.push_back((neighbor, dist + 1));
+                }
+            }
+        }
+    }
+
+    // Normalize each dimension to [0, 1]
+    let num_anchors = anchors.len();
+    for dim in 0..num_anchors {
+        let max_dist = dna_map
+            .values()
+            .map(|v| v[dim])
+            .filter(|d| *d < f64::MAX)
+            .fold(0.0f64, f64::max);
+
+        if max_dist > 0.0 {
+            for dna in dna_map.values_mut() {
+                if dna[dim] < f64::MAX {
+                    dna[dim] /= max_dist;
+                } else {
+                    dna[dim] = 1.0; // unreachable nodes get max distance
+                }
+            }
+        }
+    }
+
+    Ok(dna_map)
+}
+
+/// Compute cosine similarity between two DNA vectors.
+pub fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let norm_b: f64 = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+/// Find structural twins — nodes with most similar DNA vectors.
+pub fn find_structural_twins(
+    dna_map: &HashMap<String, Vec<f64>>,
+    target_id: &str,
+    top_n: usize,
+) -> Vec<(String, f64)> {
+    let target_dna = match dna_map.get(target_id) {
+        Some(dna) => dna,
+        None => return vec![],
+    };
+
+    let mut similarities: Vec<(String, f64)> = dna_map
+        .iter()
+        .filter(|(id, _)| id.as_str() != target_id)
+        .map(|(id, dna)| (id.clone(), cosine_similarity(target_dna, dna)))
+        .collect();
+
+    similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    similarities.truncate(top_n);
+    similarities
+}
+
+// ============================================================================
+// Structural DNA — K-means Clustering
+// ============================================================================
+
+/// K-means clustering on structural DNA vectors.
+///
+/// Groups files by structural similarity into `n_clusters` clusters.
+/// Each cluster represents an architectural role (e.g., handlers, models, utils).
+///
+/// Algorithm:
+/// 1. Initialize centroids via K-means++ (spread-out initial seeds)
+/// 2. Iterate assignment + update steps until convergence (max 100 iterations)
+/// 3. Auto-label each cluster based on dominant file name patterns
+///
+/// Returns empty vec if dna_map has fewer entries than n_clusters.
+pub fn cluster_dna_vectors(
+    dna_map: &HashMap<String, Vec<f64>>,
+    n_clusters: usize,
+) -> Vec<super::models::DnaCluster> {
+    if dna_map.is_empty() || n_clusters == 0 || dna_map.len() < n_clusters {
+        return vec![];
+    }
+
+    let paths: Vec<&String> = dna_map.keys().collect();
+    let vectors: Vec<&Vec<f64>> = paths.iter().map(|p| &dna_map[*p]).collect();
+    let n = vectors.len();
+    let dim = vectors[0].len();
+
+    if dim == 0 {
+        return vec![];
+    }
+
+    // --- K-means++ initialization ---
+    let mut centroids: Vec<Vec<f64>> = Vec::with_capacity(n_clusters);
+
+    // First centroid: pick the first vector (deterministic for reproducibility)
+    centroids.push(vectors[0].clone());
+
+    for _ in 1..n_clusters {
+        // For each point, compute min squared distance to nearest centroid
+        let mut distances: Vec<f64> = vectors
+            .iter()
+            .map(|v| {
+                centroids
+                    .iter()
+                    .map(|c| squared_euclidean(v, c))
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .collect();
+
+        // Pick the point with max distance (deterministic K-means++)
+        let max_idx = distances
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        centroids.push(vectors[max_idx].clone());
+        // Zero out to avoid picking same point
+        distances[max_idx] = 0.0;
+    }
+
+    // --- K-means iterations ---
+    let mut assignments = vec![0usize; n];
+    let max_iter = 100;
+
+    for _ in 0..max_iter {
+        let mut changed = false;
+
+        // Assignment step: assign each vector to nearest centroid
+        for (i, v) in vectors.iter().enumerate() {
+            let nearest = centroids
+                .iter()
+                .enumerate()
+                .map(|(ci, c)| (ci, squared_euclidean(v, c)))
+                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(ci, _)| ci)
+                .unwrap_or(0);
+
+            if assignments[i] != nearest {
+                assignments[i] = nearest;
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+
+        // Update step: recompute centroids as mean of assigned vectors
+        let mut new_centroids = vec![vec![0.0; dim]; n_clusters];
+        let mut counts = vec![0usize; n_clusters];
+
+        for (i, v) in vectors.iter().enumerate() {
+            let ci = assignments[i];
+            counts[ci] += 1;
+            for (d, val) in v.iter().enumerate() {
+                new_centroids[ci][d] += val;
+            }
+        }
+
+        for (ci, centroid) in new_centroids.iter_mut().enumerate().take(n_clusters) {
+            if counts[ci] > 0 {
+                for val in centroid.iter_mut().take(dim) {
+                    *val /= counts[ci] as f64;
+                }
+            }
+        }
+
+        centroids = new_centroids;
+    }
+
+    // --- Build clusters ---
+    let mut clusters: Vec<super::models::DnaCluster> = Vec::with_capacity(n_clusters);
+
+    for (ci, _centroid) in centroids.iter().enumerate().take(n_clusters) {
+        let member_indices: Vec<usize> = assignments
+            .iter()
+            .enumerate()
+            .filter(|(_, &a)| a == ci)
+            .map(|(i, _)| i)
+            .collect();
+
+        if member_indices.is_empty() {
+            continue; // Skip empty clusters
+        }
+
+        let members: Vec<String> = member_indices.iter().map(|&i| paths[i].clone()).collect();
+
+        // Compute intra-cluster cohesion (average pairwise cosine similarity)
+        let cohesion = if members.len() <= 1 {
+            1.0
+        } else {
+            let mut sum = 0.0;
+            let mut count = 0;
+            for i in 0..member_indices.len() {
+                for j in (i + 1)..member_indices.len() {
+                    sum +=
+                        cosine_similarity(vectors[member_indices[i]], vectors[member_indices[j]]);
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                sum / count as f64
+            } else {
+                1.0
+            }
+        };
+
+        let label = infer_cluster_label(&members);
+
+        clusters.push(super::models::DnaCluster {
+            id: ci,
+            centroid: centroids[ci].clone(),
+            members,
+            label,
+            cohesion,
+        });
+    }
+
+    // Sort by cluster size descending
+    clusters.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
+
+    clusters
+}
+
+/// Squared Euclidean distance between two vectors.
+fn squared_euclidean(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
+}
+
+/// Infer a human-readable label for a cluster based on dominant file name patterns.
+///
+/// Looks for common suffixes/patterns like `handler`, `model`, `service`, `test`, etc.
+fn infer_cluster_label(paths: &[String]) -> String {
+    let patterns: &[(&str, &str)] = &[
+        ("handler", "Handlers"),
+        ("controller", "Controllers"),
+        ("route", "Routes"),
+        ("model", "Models"),
+        ("schema", "Schemas"),
+        ("service", "Services"),
+        ("repository", "Repositories"),
+        ("store", "Stores"),
+        ("client", "Clients"),
+        ("test", "Tests"),
+        ("spec", "Tests"),
+        ("mock", "Mocks"),
+        ("util", "Utilities"),
+        ("helper", "Helpers"),
+        ("config", "Configuration"),
+        ("middleware", "Middleware"),
+        ("trait", "Traits"),
+        ("interface", "Interfaces"),
+        ("mod.rs", "Modules"),
+        ("index", "Index/Entry"),
+        ("lib", "Library"),
+        ("main", "Entry Points"),
+        ("error", "Error Handling"),
+        ("types", "Types"),
+        ("api", "API"),
+    ];
+
+    // Count matches for each pattern
+    let mut scores: Vec<(&str, usize)> = patterns
+        .iter()
+        .map(|(pattern, label)| {
+            let count = paths
+                .iter()
+                .filter(|p| {
+                    let lower = p.to_lowercase();
+                    let filename = lower.rsplit('/').next().unwrap_or(&lower);
+                    filename.contains(pattern)
+                })
+                .count();
+            (*label, count)
+        })
+        .filter(|(_, count)| *count > 0)
+        .collect();
+
+    scores.sort_by(|a, b| b.1.cmp(&a.1));
+
+    if let Some((label, count)) = scores.first() {
+        if *count * 3 >= paths.len() {
+            // At least 1/3 of files match this pattern → use it
+            return label.to_string();
+        }
+    }
+
+    // Fallback: try to find common directory prefix
+    if let Some(common_dir) = find_common_directory(paths) {
+        return common_dir;
+    }
+
+    format!("Cluster ({})", paths.len())
+}
+
+/// Find the most specific common directory among paths.
+fn find_common_directory(paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    // Extract directory parts from each path
+    let dirs: Vec<Vec<&str>> = paths
+        .iter()
+        .filter_map(|p| {
+            let parts: Vec<&str> = p.split('/').collect();
+            if parts.len() > 1 {
+                Some(parts[..parts.len() - 1].to_vec())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if dirs.is_empty() {
+        return None;
+    }
+
+    // Find longest common prefix
+    let first = &dirs[0];
+    let mut common_len = 0;
+
+    for i in 0..first.len() {
+        if dirs.iter().all(|d| d.len() > i && d[i] == first[i]) {
+            common_len = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Use the deepest common directory component as label
+    if common_len > 0 {
+        let deepest = first[common_len - 1];
+        if !["src", "lib", "app", "pkg"].contains(&deepest) {
+            return Some(deepest.to_string());
+        }
+        // If the deepest is too generic, try one level deeper if possible
+        if common_len >= 2 {
+            return Some(first[common_len - 2..common_len].join("/"));
+        }
+    }
+
+    None
+}
+
+// ============================================================================
+// GraIL algorithms — WL Subgraph Hash (Plan 7)
+// ============================================================================
+
+/// Compute Weisfeiler-Lehman hash for a single node's neighborhood.
+///
+/// Algorithm: BFS up to `radius` hops, then `wl_iterations` rounds of
+/// WL relabeling. Final hash = hash of sorted multiset of all labels.
+pub fn wl_node_hash(
+    graph: &CodeGraph,
+    center: NodeIndex,
+    radius: usize,
+    wl_iterations: usize,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let g = &graph.graph;
+
+    // BFS to collect neighborhood within radius (undirected view)
+    let mut neighborhood: Vec<NodeIndex> = Vec::new();
+    let mut visited = vec![false; g.node_count()];
+    let mut queue = std::collections::VecDeque::new();
+    visited[center.index()] = true;
+    queue.push_back((center, 0usize));
+
+    while let Some((node, dist)) = queue.pop_front() {
+        neighborhood.push(node);
+        if dist < radius {
+            for neighbor in undirected_neighbors(g, node) {
+                if !visited[neighbor.index()] {
+                    visited[neighbor.index()] = true;
+                    queue.push_back((neighbor, dist + 1));
+                }
+            }
+        }
+    }
+
+    // Initialize labels from node type
+    let mut labels: HashMap<NodeIndex, u64> = HashMap::new();
+    for &idx in &neighborhood {
+        let mut hasher = DefaultHasher::new();
+        g[idx].node_type.hash(&mut hasher);
+        labels.insert(idx, hasher.finish());
+    }
+
+    // WL iterations: relabel each node based on sorted neighbor labels
+    for _ in 0..wl_iterations {
+        let mut new_labels: HashMap<NodeIndex, u64> = HashMap::new();
+        for &idx in &neighborhood {
+            let mut neighbor_labels: Vec<u64> = undirected_neighbors(g, idx)
+                .into_iter()
+                .filter(|n| labels.contains_key(n))
+                .map(|n| labels[&n])
+                .collect();
+            neighbor_labels.sort();
+
+            let mut hasher = DefaultHasher::new();
+            labels[&idx].hash(&mut hasher);
+            for nl in neighbor_labels.iter() {
+                nl.hash(&mut hasher);
+            }
+            new_labels.insert(idx, hasher.finish());
+        }
+        labels = new_labels;
+    }
+
+    // Final hash = hash of sorted multiset of all labels in neighborhood
+    let mut all_labels: Vec<u64> = labels.values().copied().collect();
+    all_labels.sort();
+    let mut hasher = DefaultHasher::new();
+    for label in &all_labels {
+        label.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Compute WL hash for all nodes in the graph.
+pub fn wl_subgraph_hash_all(
+    graph: &CodeGraph,
+    radius: usize,
+    wl_iterations: usize,
+) -> Result<HashMap<String, u64>, String> {
+    let g = &graph.graph;
+    let mut hashes: HashMap<String, u64> = HashMap::with_capacity(g.node_count());
+
+    for idx in g.node_indices() {
+        let hash = wl_node_hash(graph, idx, radius, wl_iterations);
+        hashes.insert(g[idx].id.clone(), hash);
+    }
+
+    Ok(hashes)
+}
+
+/// Find groups of nodes with identical WL hash (isomorphic neighborhoods).
+pub fn find_isomorphic_groups(wl_hashes: &HashMap<String, u64>) -> HashMap<u64, Vec<String>> {
+    let mut groups: HashMap<u64, Vec<String>> = HashMap::new();
+    for (id, hash) in wl_hashes {
+        groups.entry(*hash).or_default().push(id.clone());
+    }
+    // Keep only groups with 2+ members
+    groups.retain(|_, members| members.len() >= 2);
+    groups
+}
+
+// ============================================================================
+// Analysis Profiles — Contextual edge weighting (Plan 6 / GraIL R-GCN)
+// ============================================================================
+
+/// Apply an analysis profile's edge weights to a graph, returning a new weighted graph.
+///
+/// For each edge in the graph, the weight is multiplied by the profile's weight
+/// for that edge type. Edge types not present in the profile use `default_weight`
+/// (0.5 = neutral reduction).
+///
+/// This is O(E) — a single pass over all edges.
+///
+/// # Example
+/// ```ignore
+/// let security = profile_security();
+/// let weighted = apply_profile_weights(&graph, &security);
+/// let analytics = compute_all(&weighted, &config);
+/// ```
+pub fn apply_profile_weights(graph: &CodeGraph, profile: &AnalysisProfile) -> CodeGraph {
+    let default_weight = 0.5;
+    let mut weighted = graph.clone();
+
+    for edge_idx in weighted.graph.edge_indices() {
+        if let Some(edge) = weighted.graph.edge_weight_mut(edge_idx) {
+            let edge_type_str = edge.edge_type.to_string();
+            let profile_weight = profile
+                .edge_weights
+                .get(&edge_type_str)
+                .copied()
+                .unwrap_or(default_weight);
+            edge.weight *= profile_weight;
+        }
+    }
+
+    weighted
+}
+
+/// Run the full analytics pipeline on a profile-weighted graph.
+///
+/// 1. Applies profile edge weights via `apply_profile_weights`
+/// 2. Runs `compute_all` (PageRank, Betweenness, Louvain, etc.) on the weighted graph
+///
+/// Returns `GraphAnalytics` computed on the weighted graph. The `profile_name` field
+/// in the result indicates which profile was used.
+pub fn compute_all_with_profile(
+    graph: &CodeGraph,
+    config: &AnalyticsConfig,
+    profile: &AnalysisProfile,
+) -> GraphAnalytics {
+    let weighted = apply_profile_weights(graph, profile);
+    let mut analytics = compute_all(&weighted, config);
+    analytics.profile_name = Some(profile.name.clone());
+    analytics
+}
+
+// ============================================================================
+// Margin Ranking — Universal relative ranking (Plan 10 / GraIL)
+// ============================================================================
+
+/// Returns a human-readable cluster label based on cluster index (0-based).
+///
+/// Labels follow a severity gradient: critical → high → moderate → low → peripheral.
+pub fn cluster_label(index: usize) -> String {
+    match index {
+        0 => "critical".to_string(),
+        1 => "high".to_string(),
+        2 => "moderate".to_string(),
+        3 => "low".to_string(),
+        _ => "peripheral".to_string(),
+    }
+}
+
+/// Detect natural clusters in a sorted (descending) list of scored items.
+///
+/// Uses gap analysis: when the score gap between consecutive items exceeds
+/// `min_gap_ratio × score_range`, a cluster boundary is created.
+///
+/// # Arguments
+/// * `scores` — Items with their scores, **must be sorted descending by score**
+/// * `min_gap_ratio` — Minimum relative gap to trigger a cluster boundary (e.g., 0.15 = 15%)
+///
+/// # Returns
+/// A list of `RankCluster` with 1-based ranks, average scores, and labels.
+pub fn detect_natural_clusters(scores: &[(String, f64)], min_gap_ratio: f64) -> Vec<RankCluster> {
+    if scores.len() < 2 {
+        if scores.len() == 1 {
+            return vec![RankCluster {
+                start_rank: 1,
+                end_rank: 1,
+                avg_score: scores[0].1,
+                label: cluster_label(0),
+            }];
+        }
+        return vec![];
+    }
+
+    let range = scores.first().unwrap().1 - scores.last().unwrap().1;
+    if range <= 0.0 {
+        // All scores are identical → single cluster
+        let avg = scores.iter().map(|s| s.1).sum::<f64>() / scores.len() as f64;
+        return vec![RankCluster {
+            start_rank: 1,
+            end_rank: scores.len(),
+            avg_score: avg,
+            label: cluster_label(0),
+        }];
+    }
+
+    let threshold = min_gap_ratio * range;
+
+    let mut clusters = Vec::new();
+    let mut cluster_start = 0usize;
+
+    for i in 0..scores.len() - 1 {
+        let gap = scores[i].1 - scores[i + 1].1;
+        if gap > threshold {
+            // Close current cluster (1-based ranks)
+            let slice = &scores[cluster_start..=i];
+            let avg = slice.iter().map(|s| s.1).sum::<f64>() / slice.len() as f64;
+            clusters.push(RankCluster {
+                start_rank: cluster_start + 1,
+                end_rank: i + 1,
+                avg_score: avg,
+                label: cluster_label(clusters.len()),
+            });
+            cluster_start = i + 1;
+        }
+    }
+
+    // Close the last cluster
+    let slice = &scores[cluster_start..];
+    let avg = slice.iter().map(|s| s.1).sum::<f64>() / slice.len() as f64;
+    clusters.push(RankCluster {
+        start_rank: cluster_start + 1,
+        end_rank: scores.len(),
+        avg_score: avg,
+        label: cluster_label(clusters.len()),
+    });
+
+    clusters
+}
+
+/// Transform a list of scored items into a `RankedList<T>` with margins,
+/// confidence levels, and natural clusters.
+///
+/// Items are sorted by score descending. For each item, the margin to the
+/// next and previous items is computed, and confidence is derived from the
+/// minimum margin (how "safe" is this ranking position).
+///
+/// # Arguments
+/// * `items` — Vec of (item, score) pairs
+/// * `total_candidates` — Total number of candidates before any filtering
+///
+/// # Performance
+/// O(n log n) for sort + O(n) for margins + O(n) for clusters = O(n log n) total.
+pub fn into_ranked<T: Serialize + Clone>(
+    mut items: Vec<(T, f64)>,
+    total_candidates: usize,
+) -> RankedList<T> {
+    if items.is_empty() {
+        return RankedList {
+            items: vec![],
+            total_candidates,
+            score_range: (0.0, 0.0),
+            natural_clusters: vec![],
+        };
+    }
+
+    // Sort by score descending (stable sort to preserve input order for ties)
+    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let min_score = items.last().unwrap().1;
+    let max_score = items.first().unwrap().1;
+
+    // Build scored labels for cluster detection
+    let scored_labels: Vec<(String, f64)> = items
+        .iter()
+        .enumerate()
+        .map(|(i, (_, score))| (format!("item_{}", i), *score))
+        .collect();
+
+    let natural_clusters = detect_natural_clusters(&scored_labels, 0.15);
+
+    // Build ranked results with margins and confidence
+    let n = items.len();
+    let ranked_items: Vec<RankedResult<T>> = items
+        .into_iter()
+        .enumerate()
+        .map(|(i, (item, score))| {
+            let margin_to_next = if i + 1 < n {
+                Some(score - scored_labels[i + 1].1)
+            } else {
+                None
+            };
+            let margin_to_prev = if i > 0 {
+                Some(scored_labels[i - 1].1 - score)
+            } else {
+                None
+            };
+
+            // Confidence = based on the minimum margin (weakest separation)
+            let min_margin = match (margin_to_next, margin_to_prev) {
+                (Some(mn), Some(mp)) => mn.min(mp),
+                (Some(m), None) | (None, Some(m)) => m,
+                (None, None) => 0.0,
+            };
+
+            RankedResult {
+                item,
+                rank: i + 1,
+                score,
+                margin_to_next,
+                margin_to_prev,
+                confidence: RankConfidence::from_margin(min_margin),
+                signals: vec![],
+            }
+        })
+        .collect();
+
+    RankedList {
+        items: ranked_items,
+        total_candidates,
+        score_range: (min_score, max_score),
+        natural_clusters,
+    }
+}
+
+// ============================================================================
+// Bridge Subgraph — Double-radius labeling & bottleneck detection (GraIL Plan 1)
+// ============================================================================
+
+/// Compute BFS distances from a single source node to all reachable nodes
+/// in the bridge subgraph. Works on an adjacency list built from raw edges.
+///
+/// Returns a map of `path -> distance`. Unreachable nodes are not included.
+fn bfs_distances(adj: &HashMap<&str, Vec<&str>>, source: &str) -> HashMap<String, u32> {
+    use std::collections::VecDeque;
+    let mut distances = HashMap::new();
+    distances.insert(source.to_string(), 0u32);
+    let mut queue = VecDeque::new();
+    queue.push_back(source);
+
+    while let Some(current) = queue.pop_front() {
+        let current_dist = distances[current];
+        if let Some(neighbors) = adj.get(current) {
+            for &neighbor in neighbors {
+                if !distances.contains_key(neighbor) {
+                    distances.insert(neighbor.to_string(), current_dist + 1);
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+    distances
+}
+
+/// Compute double-radius labels for each node in the bridge subgraph.
+///
+/// For each node, returns `(distance_to_source, distance_to_target)`.
+/// Unreachable nodes get `u32::MAX` for the unreachable direction.
+///
+/// ## Arguments
+/// - `node_paths`: paths of all nodes in the bridge subgraph
+/// - `edges`: list of `(from_path, to_path)` tuples (directed edges)
+/// - `source`: source node path
+/// - `target`: target node path
+///
+/// ## Example
+/// Linear graph A→B→C with source=A, target=C:
+/// - A = (0, 2), B = (1, 1), C = (2, 0)
+pub fn double_radius_label(
+    node_paths: &[String],
+    edges: &[(String, String)],
+    source: &str,
+    target: &str,
+) -> HashMap<String, (u32, u32)> {
+    // Build undirected adjacency list for BFS traversal
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for path in node_paths {
+        adj.entry(path.as_str()).or_default();
+    }
+    for (from, to) in edges {
+        adj.entry(from.as_str()).or_default().push(to.as_str());
+        adj.entry(to.as_str()).or_default().push(from.as_str());
+    }
+
+    let dist_from_source = bfs_distances(&adj, source);
+    let dist_from_target = bfs_distances(&adj, target);
+
+    let mut labels = HashMap::with_capacity(node_paths.len());
+    for path in node_paths {
+        let d_s = dist_from_source
+            .get(path.as_str())
+            .copied()
+            .unwrap_or(u32::MAX);
+        let d_t = dist_from_target
+            .get(path.as_str())
+            .copied()
+            .unwrap_or(u32::MAX);
+        labels.insert(path.clone(), (d_s, d_t));
+    }
+    labels
+}
+
+/// Find bottleneck nodes in the bridge subgraph using Brandes' betweenness
+/// centrality algorithm on the local subgraph. Returns top-N node paths
+/// sorted by betweenness descending.
+///
+/// Excludes source and target from the results (they're anchors, not bottlenecks).
+///
+/// ## Arguments
+/// - `node_paths`: paths of all nodes in the bridge subgraph
+/// - `edges`: list of `(from_path, to_path)` tuples
+/// - `source`: source node path (excluded from results)
+/// - `target`: target node path (excluded from results)
+/// - `top_n`: number of bottleneck nodes to return
+pub fn find_bottleneck_nodes(
+    node_paths: &[String],
+    edges: &[(String, String)],
+    source: &str,
+    target: &str,
+    top_n: usize,
+) -> Vec<String> {
+    use std::collections::VecDeque;
+
+    if node_paths.len() < 3 {
+        return Vec::new(); // Need at least source + target + 1 intermediate
+    }
+
+    // Map paths to indices for efficient computation
+    let path_to_idx: HashMap<&str, usize> = node_paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.as_str(), i))
+        .collect();
+    let n = node_paths.len();
+
+    // Build undirected adjacency list (by index)
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (from, to) in edges {
+        if let (Some(&fi), Some(&ti)) =
+            (path_to_idx.get(from.as_str()), path_to_idx.get(to.as_str()))
+        {
+            if !adj[fi].contains(&ti) {
+                adj[fi].push(ti);
+            }
+            if !adj[ti].contains(&fi) {
+                adj[ti].push(fi);
+            }
+        }
+    }
+
+    // Brandes' algorithm for betweenness centrality on undirected graph
+    let mut betweenness = vec![0.0f64; n];
+
+    for s in 0..n {
+        let mut stack = Vec::new();
+        let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut sigma = vec![0.0f64; n]; // number of shortest paths
+        sigma[s] = 1.0;
+        let mut dist: Vec<i64> = vec![-1; n];
+        dist[s] = 0;
+
+        let mut queue = VecDeque::new();
+        queue.push_back(s);
+
+        while let Some(v) = queue.pop_front() {
+            stack.push(v);
+            for &w in &adj[v] {
+                // w found for the first time?
+                if dist[w] < 0 {
+                    queue.push_back(w);
+                    dist[w] = dist[v] + 1;
+                }
+                // shortest path to w via v?
+                if dist[w] == dist[v] + 1 {
+                    sigma[w] += sigma[v];
+                    predecessors[w].push(v);
+                }
+            }
+        }
+
+        let mut delta = vec![0.0f64; n];
+        while let Some(w) = stack.pop() {
+            for &v in &predecessors[w] {
+                delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
+            }
+            if w != s {
+                betweenness[w] += delta[w];
+            }
+        }
+    }
+
+    // Normalize (undirected: divide by 2)
+    for b in betweenness.iter_mut() {
+        *b /= 2.0;
+    }
+
+    // Collect intermediate nodes (exclude source and target), sort by betweenness
+    let mut candidates: Vec<(usize, f64)> = betweenness
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let path = &node_paths[*i];
+            path != source && path != target
+        })
+        .map(|(i, &b)| (i, b))
+        .collect();
+
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(top_n);
+
+    candidates
+        .into_iter()
+        .filter(|(_, b)| *b > 0.0)
+        .map(|(i, _)| node_paths[i].clone())
+        .collect()
+}
+
+/// Compute the density of the bridge subgraph.
+///
+/// Density = directed_edges / (nodes * (nodes - 1))
+/// For undirected interpretation: density = edges / (nodes * (nodes - 1) / 2)
+///
+/// Returns 0.0 if nodes <= 1.
+pub fn compute_bridge_density(node_count: usize, edge_count: usize) -> f64 {
+    if node_count <= 1 {
+        return 0.0;
+    }
+    let max_edges = node_count * (node_count - 1);
+    edge_count as f64 / max_edges as f64
+}
+
+// ============================================================================
+// GraIL algorithms — Stress Testing (Plan 5)
+// ============================================================================
+
+/// Build an undirected petgraph from our directed CodeGraph.
+///
+/// Creates a `UnGraph<(), ()>` where node indices match the original graph.
+/// An optional `exclude_edge` predicate can filter specific edges.
+fn build_undirected<F>(
+    g: &petgraph::Graph<super::models::CodeNode, super::models::CodeEdge, petgraph::Directed>,
+    exclude_edge: F,
+) -> petgraph::graph::UnGraph<(), ()>
+where
+    F: Fn(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex) -> bool,
+{
+    let mut ug = petgraph::graph::UnGraph::<(), ()>::with_capacity(g.node_count(), g.edge_count());
+    // Add nodes in index order so indices match
+    for _ in g.node_indices() {
+        ug.add_node(());
+    }
+    // Add edges (skip excluded)
+    for e in g.edge_indices() {
+        if let Some((s, t)) = g.edge_endpoints(e) {
+            if !exclude_edge(s, t) {
+                let s_new = petgraph::graph::NodeIndex::new(s.index());
+                let t_new = petgraph::graph::NodeIndex::new(t.index());
+                ug.add_edge(s_new, t_new, ());
+            }
+        }
+    }
+    ug
+}
+
+/// Simulate removing a node from the graph and measure impact.
+///
+/// Computes WCC before and after removal. Orphaned nodes are those
+/// that were in the same component as the target but end up in a
+/// singleton component after removal.
+///
+/// Returns `StressTestResult` with resilience_score = 1.0 - (orphans / total).
+pub fn stress_test_node_removal(
+    graph: &CodeGraph,
+    target_id: &str,
+) -> Option<super::models::StressTestResult> {
+    use petgraph::algo::connected_components;
+
+    let g = &graph.graph;
+    let target_idx = graph.id_to_index.get(target_id)?;
+
+    let total_nodes = g.node_count();
+    if total_nodes <= 1 {
+        return Some(super::models::StressTestResult {
+            target: target_id.to_string(),
+            mode: super::models::StressTestMode::NodeRemoval,
+            resilience_score: 0.0,
+            orphaned_nodes: 0,
+            blast_radius: 0,
+            cascade_depth: 0,
+            components_before: 1,
+            components_after: 0,
+            critical_edges: vec![],
+        });
+    }
+
+    // Convert to undirected for WCC
+    let undirected = build_undirected(g, |_, _| false);
+    let components_before = connected_components(&undirected);
+
+    // BFS on undirected graph, skipping target node, to compute:
+    // - components_after (number of WCC excluding target)
+    // - orphaned_nodes (singleton components created by removal)
+    let target_ug = petgraph::graph::NodeIndex::<u32>::new(target_idx.index());
+    let mut component_sizes: Vec<usize> = Vec::new();
+    let mut visited = vec![false; undirected.node_count()];
+    visited[target_ug.index()] = true; // mark target as visited so we skip it
+
+    for start in undirected.node_indices() {
+        if visited[start.index()] {
+            continue;
+        }
+        // BFS to find component size
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(start);
+        visited[start.index()] = true;
+        let mut size = 0usize;
+        while let Some(current) = queue.pop_front() {
+            size += 1;
+            for neighbor in undirected.neighbors(current) {
+                if !visited[neighbor.index()] {
+                    visited[neighbor.index()] = true;
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+        component_sizes.push(size);
+    }
+
+    let components_after = component_sizes.len();
+    let orphaned_nodes = component_sizes.iter().filter(|&&s| s == 1).count();
+    let blast_radius = components_after.saturating_sub(components_before);
+
+    let resilience_score = if total_nodes > 1 {
+        1.0 - (orphaned_nodes as f64 / (total_nodes - 1) as f64)
+    } else {
+        0.0
+    };
+
+    Some(super::models::StressTestResult {
+        target: target_id.to_string(),
+        mode: super::models::StressTestMode::NodeRemoval,
+        resilience_score: resilience_score.max(0.0),
+        orphaned_nodes,
+        blast_radius,
+        cascade_depth: 0,
+        components_before,
+        components_after,
+        critical_edges: vec![],
+    })
+}
+
+/// Find bridge edges using Tarjan's algorithm.
+///
+/// A bridge is an edge whose removal increases the number of connected components.
+/// Uses DFS with discovery time and low-link values.
+///
+/// Returns Vec<(source_id, target_id)> for all bridges in the graph.
+pub fn find_bridges(graph: &CodeGraph) -> Vec<(String, String)> {
+    let g = &graph.graph;
+    let n = g.node_count();
+    if n == 0 {
+        return vec![];
+    }
+
+    let mut disc = vec![0u32; n];
+    let mut low = vec![0u32; n];
+    let mut visited = vec![false; n];
+    let mut timer: u32 = 1;
+    let mut bridges: Vec<(NodeIndex, NodeIndex)> = Vec::new();
+
+    // Build undirected adjacency (merge both directions)
+    let mut adj: Vec<Vec<NodeIndex>> = vec![Vec::new(); n];
+    for edge_idx in g.edge_indices() {
+        if let Some((s, t)) = g.edge_endpoints(edge_idx) {
+            adj[s.index()].push(t);
+            adj[t.index()].push(s);
+        }
+    }
+    // Deduplicate adjacency lists
+    for neighbors in &mut adj {
+        neighbors.sort_by_key(|n| n.index());
+        neighbors.dedup();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dfs_bridge(
+        u: NodeIndex,
+        parent: Option<NodeIndex>,
+        adj: &[Vec<NodeIndex>],
+        disc: &mut [u32],
+        low: &mut [u32],
+        visited: &mut [bool],
+        timer: &mut u32,
+        bridges: &mut Vec<(NodeIndex, NodeIndex)>,
+    ) {
+        visited[u.index()] = true;
+        disc[u.index()] = *timer;
+        low[u.index()] = *timer;
+        *timer += 1;
+
+        for &v in &adj[u.index()] {
+            if Some(v) == parent {
+                continue;
+            }
+            if visited[v.index()] {
+                low[u.index()] = low[u.index()].min(disc[v.index()]);
+            } else {
+                dfs_bridge(v, Some(u), adj, disc, low, visited, timer, bridges);
+                low[u.index()] = low[u.index()].min(low[v.index()]);
+                if low[v.index()] > disc[u.index()] {
+                    bridges.push((u, v));
+                }
+            }
+        }
+    }
+
+    // Run DFS from each unvisited node (handles disconnected graphs)
+    for node in g.node_indices() {
+        if !visited[node.index()] {
+            dfs_bridge(
+                node,
+                None,
+                &adj,
+                &mut disc,
+                &mut low,
+                &mut visited,
+                &mut timer,
+                &mut bridges,
+            );
+        }
+    }
+
+    // Convert to ID strings
+    bridges
+        .into_iter()
+        .map(|(u, v)| (g[u].id.clone(), g[v].id.clone()))
+        .collect()
+}
+
+/// Simulate cascade removal: iteratively remove orphaned dependents.
+///
+/// Starting from the target node, removes it, then finds all nodes
+/// whose incoming dependencies are ALL in the removed set, removes them too,
+/// repeating until no new orphans are found or max_iterations is reached.
+///
+/// Returns blast_radius (total removed) and cascade_depth.
+pub fn stress_test_cascade(
+    graph: &CodeGraph,
+    target_id: &str,
+    max_iterations: usize,
+) -> Option<super::models::StressTestResult> {
+    let g = &graph.graph;
+    let target_idx = *graph.id_to_index.get(target_id)?;
+    let total_nodes = g.node_count();
+
+    let mut removed: HashSet<NodeIndex> = HashSet::new();
+    removed.insert(target_idx);
+
+    let mut cascade_depth = 0;
+
+    for _ in 0..max_iterations {
+        let mut new_orphans: Vec<NodeIndex> = Vec::new();
+
+        for node in g.node_indices() {
+            if removed.contains(&node) {
+                continue;
+            }
+            // Check if ALL incoming edges come from removed nodes
+            let incoming: Vec<NodeIndex> =
+                g.neighbors_directed(node, Direction::Incoming).collect();
+
+            if !incoming.is_empty() && incoming.iter().all(|n| removed.contains(n)) {
+                new_orphans.push(node);
+            }
+        }
+
+        if new_orphans.is_empty() {
+            break;
+        }
+
+        for orphan in &new_orphans {
+            removed.insert(*orphan);
+        }
+        cascade_depth += 1;
+    }
+
+    let blast_radius = removed.len();
+    let orphaned_nodes = blast_radius.saturating_sub(1); // exclude the target itself
+
+    let resilience_score = if total_nodes > 1 {
+        1.0 - (orphaned_nodes as f64 / (total_nodes - 1) as f64)
+    } else {
+        0.0
+    };
+
+    // Compute WCC before
+    let undirected = build_undirected(g, |_, _| false);
+    let components_before = petgraph::algo::connected_components(&undirected);
+
+    Some(super::models::StressTestResult {
+        target: target_id.to_string(),
+        mode: super::models::StressTestMode::Cascade,
+        resilience_score: resilience_score.max(0.0),
+        orphaned_nodes,
+        blast_radius,
+        cascade_depth,
+        components_before,
+        components_after: 0, // Not trivially computed for cascade
+        critical_edges: vec![],
+    })
+}
+
+/// Simulate removing an edge from the graph and measure impact.
+///
+/// Checks if the edge is a bridge (increases WCC count by 1).
+pub fn stress_test_edge_removal(
+    graph: &CodeGraph,
+    from_id: &str,
+    to_id: &str,
+) -> Option<super::models::StressTestResult> {
+    let g = &graph.graph;
+    let _from_idx = graph.id_to_index.get(from_id)?;
+    let _to_idx = graph.id_to_index.get(to_id)?;
+
+    // Build undirected and count components before
+    let undirected_before = build_undirected(g, |_, _| false);
+    let components_before = petgraph::algo::connected_components(&undirected_before);
+
+    // Build undirected WITHOUT the target edge
+    let from_idx = *_from_idx;
+    let to_idx = *_to_idx;
+    let undirected_after = build_undirected(g, |s, t| {
+        (s == from_idx && t == to_idx) || (s == to_idx && t == from_idx)
+    });
+    let components_after = petgraph::algo::connected_components(&undirected_after);
+
+    let is_bridge = components_after > components_before;
+    let resilience_score = if is_bridge { 0.0 } else { 1.0 };
+
+    Some(super::models::StressTestResult {
+        target: format!("{} -> {}", from_id, to_id),
+        mode: super::models::StressTestMode::EdgeRemoval,
+        resilience_score,
+        orphaned_nodes: 0,
+        blast_radius: if is_bridge { 1 } else { 0 },
+        cascade_depth: 0,
+        components_before,
+        components_after,
+        critical_edges: if is_bridge {
+            vec![(from_id.to_string(), to_id.to_string())]
+        } else {
+            vec![]
+        },
+    })
+}
+
+// ============================================================================
+// GraIL algorithms — Context Cards (Plan 8)
+// ============================================================================
+
+/// Compute context cards for all File nodes in the graph.
+///
+/// Aggregates analytics metrics (PageRank, betweenness, clustering, community),
+/// structural DNA, WL hash, and edge counts (imports/calls in/out) into a
+/// self-contained `ContextCard` for each file.
+///
+/// Co-change data is extracted from CO_CHANGED edges. The top-5 co-changers
+/// are included in each card.
+pub fn compute_context_cards(
+    graph: &CodeGraph,
+    analytics: &GraphAnalytics,
+    dna_map: &HashMap<String, Vec<f64>>,
+    wl_hashes: &HashMap<String, u64>,
+) -> Vec<super::models::ContextCard> {
+    use super::models::{CodeEdgeType, CodeNodeType, ContextCard};
+
+    let g = &graph.graph;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Build community_id → label lookup
+    let community_labels: HashMap<u32, &str> = analytics
+        .communities
+        .iter()
+        .map(|c| (c.id, c.label.as_str()))
+        .collect();
+
+    // Extract co-change data for top-5 co-changers
+    let co_change_data = extract_co_change_data(graph);
+
+    let mut cards = Vec::new();
+
+    for (node_id, node_idx) in &graph.id_to_index {
+        let node = &g[*node_idx];
+        if node.node_type != CodeNodeType::File {
+            continue;
+        }
+
+        // Get analytics metrics
+        let metrics = analytics.metrics.get(node_id);
+        let pagerank = metrics.map(|m| m.pagerank).unwrap_or(0.0);
+        let betweenness = metrics.map(|m| m.betweenness).unwrap_or(0.0);
+        let clustering = metrics.map(|m| m.clustering_coefficient).unwrap_or(0.0);
+        let community_id = metrics.map(|m| m.community_id).unwrap_or(0);
+        let community_label = community_labels
+            .get(&community_id)
+            .unwrap_or(&"unknown")
+            .to_string();
+
+        // Count imports in/out and calls in/out
+        let mut imports_out = 0usize;
+        let mut imports_in = 0usize;
+        let mut calls_out = 0usize;
+        let mut calls_in = 0usize;
+
+        // Outgoing edges
+        for edge_ref in g.edges(*node_idx) {
+            match edge_ref.weight().edge_type {
+                CodeEdgeType::Imports => imports_out += 1,
+                CodeEdgeType::Calls => calls_out += 1,
+                _ => {}
+            }
+        }
+
+        // Incoming edges
+        for edge_ref in g.edges_directed(*node_idx, petgraph::Direction::Incoming) {
+            match edge_ref.weight().edge_type {
+                CodeEdgeType::Imports => imports_in += 1,
+                CodeEdgeType::Calls => calls_in += 1,
+                _ => {}
+            }
+        }
+
+        // Top-5 co-changers
+        let mut co_changers: Vec<(String, f64)> = co_change_data
+            .iter()
+            .filter_map(|((a, b), &weight)| {
+                if a == node_id {
+                    Some((b.clone(), weight))
+                } else if b == node_id {
+                    Some((a.clone(), weight))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        co_changers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        co_changers.truncate(5);
+        let cc_co_changers_top5: Vec<String> = co_changers.into_iter().map(|(p, _)| p).collect();
+
+        // DNA & WL hash
+        let dna = dna_map.get(node_id).cloned().unwrap_or_default();
+        let wl = wl_hashes.get(node_id).copied().unwrap_or(0);
+
+        cards.push(ContextCard {
+            path: node_id.clone(),
+            cc_pagerank: pagerank,
+            cc_betweenness: betweenness,
+            cc_clustering: clustering,
+            cc_community_id: community_id,
+            cc_community_label: community_label,
+            cc_imports_out: imports_out,
+            cc_imports_in: imports_in,
+            cc_calls_out: calls_out,
+            cc_calls_in: calls_in,
+            cc_structural_dna: dna,
+            cc_wl_hash: wl,
+            cc_co_changers_top5,
+            cc_version: 1,
+            cc_computed_at: now.clone(),
+        });
+    }
+
+    cards
+}
+
+// ============================================================================
+// GraIL algorithms — Missing Link Prediction (Plan 9)
+// ============================================================================
+
+/// Find all pairs of nodes at distance exactly 2 (not directly connected).
+///
+/// Algorithm: for each node, BFS 1-hop → for each neighbor, BFS 1-hop →
+/// collect pairs (node, hop2) where hop2 is NOT directly connected to node.
+/// Deduplicate by storing (min_index, max_index).
+///
+/// Complexity: O(V × avg_degree²) — for 10K nodes with avg_degree=5 → ~250K pairs.
+pub fn find_distance_2_3_pairs(graph: &CodeGraph) -> Vec<(NodeIndex, NodeIndex)> {
+    let g = &graph.graph;
+    let mut pairs: HashSet<(usize, usize)> = HashSet::new();
+
+    for node in g.node_indices() {
+        let neighbors: HashSet<NodeIndex> = undirected_neighbors(g, node).into_iter().collect();
+
+        // For each neighbor, look at THEIR neighbors (distance 2 from node)
+        for &neighbor in &neighbors {
+            for hop2 in undirected_neighbors(g, neighbor) {
+                // Skip if hop2 is the source node itself
+                if hop2 == node {
+                    continue;
+                }
+                // Skip if hop2 is directly connected to node (distance 1, not 2)
+                if neighbors.contains(&hop2) {
+                    continue;
+                }
+                // Deduplicate: store as (min, max) index pair
+                let pair = if node.index() < hop2.index() {
+                    (node.index(), hop2.index())
+                } else {
+                    (hop2.index(), node.index())
+                };
+                pairs.insert(pair);
+            }
+        }
+    }
+
+    pairs
+        .into_iter()
+        .map(|(a, b)| (NodeIndex::new(a), NodeIndex::new(b)))
+        .collect()
+}
+
+/// Compute plausibility score for a potential link between two nodes.
+///
+/// Uses 5 signals with weighted fusion:
+/// - **Jaccard** (0.25): neighbor set overlap — high = similar connectivity
+/// - **Co-change** (0.30): temporal coupling from commit history — strongest signal
+/// - **Proximity** (0.15): inverse shortest-path distance — closer = more likely
+/// - **Adamic-Adar** (0.15): weighted common neighbors (1/ln(degree)) — penalizes hubs
+/// - **DNA similarity** (0.15): structural role similarity via cosine on DNA vectors
+///
+/// Returns a `LinkPrediction` with the combined score and individual signal values.
+pub fn link_plausibility(
+    graph: &CodeGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    co_change_data: &HashMap<(String, String), f64>,
+    dna_map: Option<&HashMap<String, Vec<f64>>>,
+) -> super::models::LinkPrediction {
+    let g = &graph.graph;
+
+    // --- Signal 1: Jaccard coefficient (common neighbors / union neighbors) ---
+    let source_neighbors: HashSet<NodeIndex> =
+        undirected_neighbors(g, source).into_iter().collect();
+    let target_neighbors: HashSet<NodeIndex> =
+        undirected_neighbors(g, target).into_iter().collect();
+    let common_count = source_neighbors.intersection(&target_neighbors).count();
+    let union_count = source_neighbors.union(&target_neighbors).count();
+    let jaccard = if union_count > 0 {
+        common_count as f64 / union_count as f64
+    } else {
+        0.0
+    };
+
+    // --- Signal 2: Co-change weight (temporal coupling from commits) ---
+    let source_id = &g[source].id;
+    let target_id = &g[target].id;
+    let co_change_weight = co_change_data
+        .get(&(source_id.clone(), target_id.clone()))
+        .or_else(|| co_change_data.get(&(target_id.clone(), source_id.clone())))
+        .copied()
+        .unwrap_or(0.0)
+        .min(1.0); // Clamp to [0, 1]
+
+    // --- Signal 3: Proximity (inverse shortest-path distance via BFS) ---
+    let proximity = {
+        // BFS from source to target (unweighted, undirected)
+        let mut visited = vec![false; g.node_count()];
+        let mut queue = std::collections::VecDeque::new();
+        visited[source.index()] = true;
+        queue.push_back((source, 0u32));
+        let mut distance = u32::MAX;
+
+        while let Some((current, dist)) = queue.pop_front() {
+            if current == target {
+                distance = dist;
+                break;
+            }
+            if dist >= 10 {
+                break; // Cap search depth
+            }
+            for neighbor in undirected_neighbors(g, current) {
+                if !visited[neighbor.index()] {
+                    visited[neighbor.index()] = true;
+                    queue.push_back((neighbor, dist + 1));
+                }
+            }
+        }
+
+        if distance > 0 && distance < u32::MAX {
+            1.0 / distance as f64
+        } else {
+            0.0
+        }
+    };
+
+    // --- Signal 4: Adamic-Adar index (penalizes high-degree common neighbors) ---
+    let adamic_adar: f64 = source_neighbors
+        .intersection(&target_neighbors)
+        .map(|&common_node| {
+            let degree = undirected_neighbors(g, common_node).len();
+            if degree > 1 {
+                1.0 / (degree as f64).ln()
+            } else {
+                0.0
+            }
+        })
+        .sum();
+    // Normalize Adamic-Adar to [0, 1] range (cap at reasonable max)
+    let adamic_adar_norm = (adamic_adar / 5.0).min(1.0);
+
+    // --- Signal 5: Structural DNA cosine similarity ---
+    let dna_similarity = dna_map
+        .and_then(|dm| {
+            let s_dna = dm.get(source_id)?;
+            let t_dna = dm.get(target_id)?;
+            Some(cosine_similarity(s_dna, t_dna))
+        })
+        .unwrap_or(0.0);
+
+    // --- Weighted fusion ---
+    let plausibility = 0.25 * jaccard
+        + 0.30 * co_change_weight
+        + 0.15 * proximity
+        + 0.15 * adamic_adar_norm
+        + 0.15 * dna_similarity;
+
+    let suggested_relation = infer_relation_type(graph, source, target);
+
+    super::models::LinkPrediction {
+        source: source_id.clone(),
+        target: target_id.clone(),
+        plausibility,
+        signals: vec![
+            ("jaccard".to_string(), jaccard),
+            ("co_change".to_string(), co_change_weight),
+            ("proximity".to_string(), proximity),
+            ("adamic_adar".to_string(), adamic_adar_norm),
+            ("dna_similarity".to_string(), dna_similarity),
+        ],
+        suggested_relation,
+    }
+}
+
+/// Suggest the top-N most plausible missing links in the graph.
+///
+/// Algorithm:
+/// 1. Find all pairs at distance 2 (not directly connected)
+/// 2. Optionally pre-filter by co-change weight > 0 for efficiency
+/// 3. Score each pair with `link_plausibility` (5 signals)
+/// 4. Filter by `min_plausibility`, sort descending, truncate to `top_n`
+///
+/// # Performance
+/// O(V × avg_degree²) for candidate finding + O(candidates × avg_degree) for scoring.
+/// For 10K nodes with avg_degree=5: ~250K candidates → ~1s total.
+pub fn suggest_missing_links(
+    graph: &CodeGraph,
+    co_change_data: &HashMap<(String, String), f64>,
+    dna_map: Option<&HashMap<String, Vec<f64>>>,
+    top_n: usize,
+    min_plausibility: f64,
+) -> Vec<super::models::LinkPrediction> {
+    let candidates = find_distance_2_3_pairs(graph);
+
+    let mut predictions: Vec<super::models::LinkPrediction> = candidates
+        .into_iter()
+        .map(|(s, t)| link_plausibility(graph, s, t, co_change_data, dna_map))
+        .filter(|p| p.plausibility >= min_plausibility)
+        .collect();
+
+    predictions.sort_by(|a, b| {
+        b.plausibility
+            .partial_cmp(&a.plausibility)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    predictions.truncate(top_n);
+    predictions
+}
+
+/// Extract co-change weights from CoChanged edges in the graph.
+///
+/// Returns a HashMap of (source_id, target_id) → weight for all CO_CHANGED edges.
+/// Both directions are stored for O(1) bidirectional lookup.
+pub fn extract_co_change_data(graph: &CodeGraph) -> HashMap<(String, String), f64> {
+    use super::models::CodeEdgeType;
+
+    let g = &graph.graph;
+    let mut data = HashMap::new();
+
+    for edge_idx in g.edge_indices() {
+        if let Some(edge) = g.edge_weight(edge_idx) {
+            if edge.edge_type == CodeEdgeType::CoChanged {
+                if let Some((source_idx, target_idx)) = g.edge_endpoints(edge_idx) {
+                    let source_id = g[source_idx].id.clone();
+                    let target_id = g[target_idx].id.clone();
+                    data.insert((source_id.clone(), target_id.clone()), edge.weight);
+                    data.insert((target_id, source_id), edge.weight);
+                }
+            }
+        }
+    }
+
+    data
+}
+
+/// Infer the most likely relation type for a predicted link.
+///
+/// Uses node types: File→File = IMPORTS, Function→Function = CALLS,
+/// mixed or other = RELATED.
+pub fn infer_relation_type(graph: &CodeGraph, source: NodeIndex, target: NodeIndex) -> String {
+    use super::models::CodeNodeType;
+
+    let source_type = &graph.graph[source].node_type;
+    let target_type = &graph.graph[target].node_type;
+
+    match (source_type, target_type) {
+        (CodeNodeType::File, CodeNodeType::File) => "IMPORTS".to_string(),
+        (CodeNodeType::Function, CodeNodeType::Function) => "CALLS".to_string(),
+        (CodeNodeType::File, CodeNodeType::Function)
+        | (CodeNodeType::Function, CodeNodeType::File) => "DEFINES".to_string(),
+        (CodeNodeType::Struct, CodeNodeType::Trait)
+        | (CodeNodeType::Trait, CodeNodeType::Struct) => "IMPLEMENTS_TRAIT".to_string(),
+        _ => "RELATED".to_string(),
     }
 }
 
@@ -1778,5 +3671,2005 @@ mod tests {
                 comm.id
             );
         }
+    }
+
+    // --- Analysis Profiles (Plan 6) ---
+
+    /// Helper to build a simple test graph with IMPORTS and CALLS edges.
+    fn build_profile_test_graph() -> CodeGraph {
+        use super::super::models::{CodeEdge, CodeEdgeType, CodeNode, CodeNodeType};
+
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "a.rs".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("a.rs".to_string()),
+            name: "a.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "b.rs".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("b.rs".to_string()),
+            name: "b.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "c.rs".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("c.rs".to_string()),
+            name: "c.rs".to_string(),
+            project_id: None,
+        });
+        // a -> b via IMPORTS (weight 1.0)
+        g.add_edge(
+            "a.rs",
+            "b.rs",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        // b -> c via CALLS (weight 1.0)
+        g.add_edge(
+            "b.rs",
+            "c.rs",
+            CodeEdge {
+                edge_type: CodeEdgeType::Calls,
+                weight: 1.0,
+            },
+        );
+        // c -> a via IMPORTS (weight 1.0) — cycle
+        g.add_edge(
+            "c.rs",
+            "a.rs",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g
+    }
+
+    #[test]
+    fn test_apply_profile_weights_zeroes_imports() {
+        use super::super::models::profile_security;
+
+        let g = build_profile_test_graph();
+        // Security profile has IMPORTS=0.4, CALLS=0.9
+        let security = profile_security();
+        let weighted = apply_profile_weights(&g, &security);
+
+        // Check edge weights were multiplied
+        for edge in weighted.graph.edge_references() {
+            let e = edge.weight();
+            match e.edge_type.to_string().as_str() {
+                "IMPORTS" => assert!(
+                    (e.weight - 0.4).abs() < f64::EPSILON,
+                    "IMPORTS edge should be 1.0 * 0.4 = 0.4, got {}",
+                    e.weight
+                ),
+                "CALLS" => assert!(
+                    (e.weight - 0.9).abs() < f64::EPSILON,
+                    "CALLS edge should be 1.0 * 0.9 = 0.9, got {}",
+                    e.weight
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_profile_weights_preserves_node_count() {
+        use super::super::models::profile_refactoring;
+
+        let g = build_profile_test_graph();
+        let weighted = apply_profile_weights(&g, &profile_refactoring());
+        assert_eq!(g.node_count(), weighted.node_count());
+        assert_eq!(g.edge_count(), weighted.edge_count());
+    }
+
+    #[test]
+    fn test_apply_profile_weights_default_for_unknown_edge_type() {
+        use super::super::models::{AnalysisProfile, FusionWeights};
+
+        let g = build_profile_test_graph();
+        // Profile with NO edge weights — all should use default 0.5
+        let empty_profile = AnalysisProfile {
+            id: "test".to_string(),
+            project_id: None,
+            name: "empty".to_string(),
+            description: None,
+            edge_weights: HashMap::new(),
+            fusion_weights: FusionWeights::default(),
+            is_builtin: false,
+        };
+        let weighted = apply_profile_weights(&g, &empty_profile);
+
+        for edge in weighted.graph.edge_references() {
+            assert!(
+                (edge.weight().weight - 0.5).abs() < f64::EPSILON,
+                "Unknown edge type should use default 0.5, got {}",
+                edge.weight().weight
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_all_with_profile_sets_name() {
+        use super::super::models::profile_security;
+
+        let g = build_profile_test_graph();
+        let config = AnalyticsConfig::default();
+        let result = compute_all_with_profile(&g, &config, &profile_security());
+        assert_eq!(result.profile_name.as_deref(), Some("security"));
+    }
+
+    #[test]
+    fn test_compute_all_with_profile_weighted_graph_differs() {
+        use super::super::models::{profile_default, profile_security};
+
+        // Verify that apply_profile_weights produces different edge weights
+        // for different profiles (which is the precondition for weighted
+        // algorithms to produce different results).
+        let g = build_profile_test_graph();
+
+        let default_weighted = apply_profile_weights(&g, &profile_default());
+        let security_weighted = apply_profile_weights(&g, &profile_security());
+
+        // Collect edge weights from both
+        let default_weights: Vec<f64> = default_weighted
+            .graph
+            .edge_references()
+            .map(|e| e.weight().weight)
+            .collect();
+        let security_weights: Vec<f64> = security_weighted
+            .graph
+            .edge_references()
+            .map(|e| e.weight().weight)
+            .collect();
+
+        assert_ne!(
+            default_weights, security_weights,
+            "Different profiles must produce different edge weights"
+        );
+
+        // Also verify compute_all_with_profile runs without error
+        let config = AnalyticsConfig::default();
+        let result = compute_all_with_profile(&g, &config, &profile_security());
+        assert_eq!(result.node_count, 3);
+        assert_eq!(result.profile_name.as_deref(), Some("security"));
+    }
+
+    // --- Margin Ranking (Plan 10) ---
+
+    #[test]
+    fn test_cluster_label_gradient() {
+        assert_eq!(cluster_label(0), "critical");
+        assert_eq!(cluster_label(1), "high");
+        assert_eq!(cluster_label(2), "moderate");
+        assert_eq!(cluster_label(3), "low");
+        assert_eq!(cluster_label(4), "peripheral");
+        assert_eq!(cluster_label(99), "peripheral");
+    }
+
+    #[test]
+    fn test_detect_natural_clusters_three_groups() {
+        // Scores: [0.9, 0.85, 0.5, 0.45, 0.1]
+        // Range = 0.8, threshold = 0.15 * 0.8 = 0.12
+        // Gaps: 0.05 (no), 0.35 (yes!), 0.05 (no), 0.35 (yes!)
+        // → 3 clusters: [0.9, 0.85], [0.5, 0.45], [0.1]
+        let scores: Vec<(String, f64)> = vec![
+            ("a".into(), 0.9),
+            ("b".into(), 0.85),
+            ("c".into(), 0.5),
+            ("d".into(), 0.45),
+            ("e".into(), 0.1),
+        ];
+        let clusters = detect_natural_clusters(&scores, 0.15);
+        assert_eq!(
+            clusters.len(),
+            3,
+            "Expected 3 clusters, got {}",
+            clusters.len()
+        );
+
+        // Cluster 1: ranks 1-2, avg ~0.875
+        assert_eq!(clusters[0].start_rank, 1);
+        assert_eq!(clusters[0].end_rank, 2);
+        assert!((clusters[0].avg_score - 0.875).abs() < 0.001);
+        assert_eq!(clusters[0].label, "critical");
+
+        // Cluster 2: ranks 3-4, avg ~0.475
+        assert_eq!(clusters[1].start_rank, 3);
+        assert_eq!(clusters[1].end_rank, 4);
+        assert!((clusters[1].avg_score - 0.475).abs() < 0.001);
+        assert_eq!(clusters[1].label, "high");
+
+        // Cluster 3: rank 5, avg 0.1
+        assert_eq!(clusters[2].start_rank, 5);
+        assert_eq!(clusters[2].end_rank, 5);
+        assert!((clusters[2].avg_score - 0.1).abs() < 0.001);
+        assert_eq!(clusters[2].label, "moderate");
+    }
+
+    #[test]
+    fn test_detect_natural_clusters_single_item() {
+        let scores: Vec<(String, f64)> = vec![("a".into(), 0.5)];
+        let clusters = detect_natural_clusters(&scores, 0.15);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].start_rank, 1);
+        assert_eq!(clusters[0].end_rank, 1);
+    }
+
+    #[test]
+    fn test_detect_natural_clusters_empty() {
+        let scores: Vec<(String, f64)> = vec![];
+        let clusters = detect_natural_clusters(&scores, 0.15);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn test_detect_natural_clusters_all_equal() {
+        let scores: Vec<(String, f64)> =
+            vec![("a".into(), 0.5), ("b".into(), 0.5), ("c".into(), 0.5)];
+        let clusters = detect_natural_clusters(&scores, 0.15);
+        assert_eq!(clusters.len(), 1, "Equal scores → single cluster");
+    }
+
+    #[test]
+    fn test_into_ranked_basic() {
+        // 5 items with varying scores
+        let items: Vec<(String, f64)> = vec![
+            ("c".into(), 0.5),
+            ("a".into(), 0.9),
+            ("e".into(), 0.1),
+            ("b".into(), 0.85),
+            ("d".into(), 0.45),
+        ];
+        let ranked = into_ranked(items, 100);
+
+        assert_eq!(ranked.items.len(), 5);
+        assert_eq!(ranked.total_candidates, 100);
+        assert!((ranked.score_range.0 - 0.1).abs() < 0.001); // min
+        assert!((ranked.score_range.1 - 0.9).abs() < 0.001); // max
+
+        // Verify sorted descending
+        assert_eq!(ranked.items[0].rank, 1);
+        assert_eq!(ranked.items[0].item, "a"); // score 0.9
+        assert_eq!(ranked.items[1].rank, 2);
+        assert_eq!(ranked.items[1].item, "b"); // score 0.85
+        assert_eq!(ranked.items[2].rank, 3);
+        assert_eq!(ranked.items[2].item, "c"); // score 0.5
+        assert_eq!(ranked.items[3].rank, 4);
+        assert_eq!(ranked.items[3].item, "d"); // score 0.45
+        assert_eq!(ranked.items[4].rank, 5);
+        assert_eq!(ranked.items[4].item, "e"); // score 0.1
+
+        // Verify margins
+        let m0 = ranked.items[0].margin_to_next.unwrap();
+        assert!((m0 - 0.05).abs() < 0.001, "margin 0.9→0.85 = 0.05");
+        assert!(ranked.items[0].margin_to_prev.is_none()); // first item
+
+        let m4 = ranked.items[4].margin_to_prev.unwrap();
+        assert!((m4 - 0.35).abs() < 0.001, "margin 0.45→0.1 = 0.35");
+        assert!(ranked.items[4].margin_to_next.is_none()); // last item
+    }
+
+    #[test]
+    fn test_into_ranked_empty() {
+        let items: Vec<(String, f64)> = vec![];
+        let ranked = into_ranked(items, 0);
+        assert!(ranked.items.is_empty());
+        assert!(ranked.natural_clusters.is_empty());
+    }
+
+    #[test]
+    fn test_into_ranked_confidence_levels() {
+        // Item with large margin → High confidence
+        // Item with small margin → Low confidence
+        // Item with zero margin → Tied
+        let items: Vec<(String, f64)> = vec![
+            ("a".into(), 1.0),
+            ("b".into(), 0.5), // margin_to_prev=0.5 (High), margin_to_next=0.5 (High)
+            ("c".into(), 0.0),
+        ];
+        let ranked = into_ranked(items, 3);
+
+        assert_eq!(ranked.items[0].confidence, RankConfidence::High); // margin_to_next=0.5
+        assert_eq!(ranked.items[1].confidence, RankConfidence::High); // min(0.5, 0.5)=0.5
+        assert_eq!(ranked.items[2].confidence, RankConfidence::High); // margin_to_prev=0.5
+    }
+
+    #[test]
+    fn test_into_ranked_serde_json() {
+        // Note: #[serde(flatten)] requires T to be a struct/map, not a primitive.
+        // Use a simple test struct to verify JSON serialization.
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+        struct TestItem {
+            path: String,
+        }
+
+        let items: Vec<(TestItem, f64)> = vec![
+            (
+                TestItem {
+                    path: "file_a.rs".into(),
+                },
+                0.95,
+            ),
+            (
+                TestItem {
+                    path: "file_b.rs".into(),
+                },
+                0.30,
+            ),
+        ];
+        let ranked = into_ranked(items, 50);
+        let json = serde_json::to_value(&ranked).unwrap();
+
+        // Verify top-level structure
+        assert!(json["items"].is_array());
+        assert_eq!(json["total_candidates"], 50);
+        assert!(json["score_range"].is_array());
+
+        // Verify first item has ranking fields flattened with item fields
+        let first = &json["items"][0];
+        assert_eq!(first["rank"], 1);
+        assert_eq!(first["score"], 0.95);
+        assert!(first["margin_to_next"].is_number());
+        assert!(first["confidence"].is_string());
+        // Flattened: item fields at top level
+        assert_eq!(first["path"], "file_a.rs");
+    }
+
+    #[test]
+    fn test_into_ranked_performance_1000_items() {
+        // Verify that into_ranked with 1000 items completes quickly
+        let items: Vec<(String, f64)> = (0..1000)
+            .map(|i| (format!("item_{}", i), i as f64 / 1000.0))
+            .collect();
+
+        let start = std::time::Instant::now();
+        let ranked = into_ranked(items, 10000);
+        let elapsed = start.elapsed();
+
+        assert_eq!(ranked.items.len(), 1000);
+        assert!(
+            elapsed.as_millis() < 50,
+            "into_ranked(1000) took {}ms, expected < 50ms",
+            elapsed.as_millis()
+        );
+    }
+
+    // ========================================================================
+    // Bridge subgraph tests (GraIL Plan 1)
+    // ========================================================================
+
+    #[test]
+    fn test_double_radius_label_linear_graph() {
+        // A → B → C, source=A, target=C
+        let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let edges = vec![
+            ("A".to_string(), "B".to_string()),
+            ("B".to_string(), "C".to_string()),
+        ];
+        let labels = double_radius_label(&nodes, &edges, "A", "C");
+
+        assert_eq!(labels["A"], (0, 2)); // A: 0 from source, 2 from target
+        assert_eq!(labels["B"], (1, 1)); // B: 1 from both
+        assert_eq!(labels["C"], (2, 0)); // C: 2 from source, 0 from target
+    }
+
+    #[test]
+    fn test_double_radius_label_diamond_graph() {
+        // S → A → T
+        // S → B → T
+        let nodes = vec![
+            "S".to_string(),
+            "A".to_string(),
+            "B".to_string(),
+            "T".to_string(),
+        ];
+        let edges = vec![
+            ("S".to_string(), "A".to_string()),
+            ("S".to_string(), "B".to_string()),
+            ("A".to_string(), "T".to_string()),
+            ("B".to_string(), "T".to_string()),
+        ];
+        let labels = double_radius_label(&nodes, &edges, "S", "T");
+
+        assert_eq!(labels["S"], (0, 2));
+        assert_eq!(labels["A"], (1, 1));
+        assert_eq!(labels["B"], (1, 1));
+        assert_eq!(labels["T"], (2, 0));
+    }
+
+    #[test]
+    fn test_double_radius_label_unreachable_node() {
+        // A → B, C is isolated
+        let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let edges = vec![("A".to_string(), "B".to_string())];
+        let labels = double_radius_label(&nodes, &edges, "A", "B");
+
+        assert_eq!(labels["A"], (0, 1));
+        assert_eq!(labels["B"], (1, 0));
+        assert_eq!(labels["C"], (u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn test_find_bottleneck_diamond() {
+        // S → A → T, S → B → T: A and B are bottlenecks
+        let nodes = vec![
+            "S".to_string(),
+            "A".to_string(),
+            "B".to_string(),
+            "T".to_string(),
+        ];
+        let edges = vec![
+            ("S".to_string(), "A".to_string()),
+            ("S".to_string(), "B".to_string()),
+            ("A".to_string(), "T".to_string()),
+            ("B".to_string(), "T".to_string()),
+        ];
+        let bottlenecks = find_bottleneck_nodes(&nodes, &edges, "S", "T", 3);
+
+        // A and B should both be bottlenecks with equal betweenness
+        assert_eq!(bottlenecks.len(), 2);
+        assert!(bottlenecks.contains(&"A".to_string()));
+        assert!(bottlenecks.contains(&"B".to_string()));
+    }
+
+    #[test]
+    fn test_find_bottleneck_chain() {
+        // A → B → C → D → E, source=A, target=E
+        // B, C, D are intermediate; C has highest betweenness (center)
+        let nodes: Vec<String> = vec!["A", "B", "C", "D", "E"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let edges = vec![
+            ("A".to_string(), "B".to_string()),
+            ("B".to_string(), "C".to_string()),
+            ("C".to_string(), "D".to_string()),
+            ("D".to_string(), "E".to_string()),
+        ];
+        let bottlenecks = find_bottleneck_nodes(&nodes, &edges, "A", "E", 1);
+
+        // C has highest betweenness in a chain
+        assert_eq!(bottlenecks.len(), 1);
+        assert_eq!(bottlenecks[0], "C");
+    }
+
+    #[test]
+    fn test_find_bottleneck_too_few_nodes() {
+        let nodes = vec!["A".to_string(), "B".to_string()];
+        let edges = vec![("A".to_string(), "B".to_string())];
+        let bottlenecks = find_bottleneck_nodes(&nodes, &edges, "A", "B", 3);
+        assert!(bottlenecks.is_empty());
+    }
+
+    #[test]
+    fn test_compute_bridge_density() {
+        // 4 nodes, 6 directed edges → density = 6 / (4*3) = 0.5
+        assert!((compute_bridge_density(4, 6) - 0.5).abs() < f64::EPSILON);
+
+        // 3 nodes, 6 edges (fully connected directed) → 6 / 6 = 1.0
+        assert!((compute_bridge_density(3, 6) - 1.0).abs() < f64::EPSILON);
+
+        // Edge cases
+        assert_eq!(compute_bridge_density(0, 0), 0.0);
+        assert_eq!(compute_bridge_density(1, 0), 0.0);
+        assert_eq!(compute_bridge_density(2, 1), 0.5);
+    }
+
+    // ========================================================================
+    // Structural DNA tests
+    // ========================================================================
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        assert!((cosine_similarity(&[1.0, 1.0], &[1.0, 1.0]) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors() {
+        assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector() {
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_different_lengths() {
+        assert_eq!(cosine_similarity(&[1.0, 2.0], &[1.0]), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_empty() {
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn test_structural_dna_empty_graph() {
+        let g = CodeGraph::new();
+        let pr = HashMap::new();
+        let dna = structural_dna(&g, &pr, 5).unwrap();
+        assert!(dna.is_empty());
+    }
+
+    #[test]
+    fn test_structural_dna_chain_graph() {
+        // Chain: node_0 → node_1 → node_2 → node_3 → node_4
+        let g = make_chain_graph(5);
+        let config = AnalyticsConfig::default();
+        let pr = pagerank(&g, &config);
+
+        let dna = structural_dna(&g, &pr, 2).unwrap();
+
+        // All 5 nodes should have DNA
+        assert_eq!(dna.len(), 5);
+
+        // Each DNA vector should have K=2 dimensions
+        for v in dna.values() {
+            assert_eq!(v.len(), 2);
+        }
+
+        // All values should be in [0, 1]
+        for v in dna.values() {
+            for &d in v {
+                assert!((0.0..=1.0).contains(&d), "DNA value out of range: {}", d);
+            }
+        }
+    }
+
+    #[test]
+    fn test_structural_dna_symmetric_nodes_similar() {
+        // Complete graph K5: all nodes are structurally equivalent
+        let g = make_complete_graph(5);
+        let config = AnalyticsConfig::default();
+        let pr = pagerank(&g, &config);
+
+        let dna = structural_dna(&g, &pr, 2).unwrap();
+        assert_eq!(dna.len(), 5);
+
+        // In K5, anchor nodes have dist=0 to themselves → DNA like [0,1] or [1,0].
+        // Non-anchor nodes have dist=1 to all anchors → DNA like [1,1].
+        // So non-anchor nodes should be perfectly similar (cosine = 1.0),
+        // while anchor-to-non-anchor similarity is ~0.707 (cos([0,1],[1,1])).
+        // Filter to non-anchor nodes only (those with DNA [1.0, 1.0] normalized)
+        let non_anchor_vecs: Vec<&Vec<f64>> = dna
+            .values()
+            .filter(|v| v.iter().all(|d| *d > 0.0)) // exclude anchors (have a 0.0 dim)
+            .collect();
+
+        assert!(
+            non_anchor_vecs.len() >= 2,
+            "Expected at least 2 non-anchor nodes"
+        );
+        for i in 0..non_anchor_vecs.len() {
+            for j in (i + 1)..non_anchor_vecs.len() {
+                let sim = cosine_similarity(non_anchor_vecs[i], non_anchor_vecs[j]);
+                assert!(
+                    sim > 0.99,
+                    "Expected near-perfect similarity between non-anchor K5 nodes, got {}",
+                    sim
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_structural_dna_two_cliques_distinct() {
+        // Two cliques of size 4 connected by a single bridge
+        let g = make_two_cliques(4);
+        let config = AnalyticsConfig::default();
+        let pr = pagerank(&g, &config);
+
+        let dna = structural_dna(&g, &pr, 3).unwrap();
+        assert_eq!(dna.len(), 8); // 4+4 nodes
+
+        // Nodes within the same clique should be more similar than across cliques
+        let a0 = &dna["a_0"];
+        let a1 = &dna["a_1"];
+        let b2 = &dna["b_2"];
+
+        let intra_sim = cosine_similarity(a0, a1);
+        let inter_sim = cosine_similarity(a0, b2);
+
+        // Intra-clique similarity should be higher than inter-clique
+        assert!(
+            intra_sim > inter_sim,
+            "Expected intra({}) > inter({})",
+            intra_sim,
+            inter_sim
+        );
+    }
+
+    #[test]
+    fn test_structural_dna_no_pagerank_scores() {
+        let g = make_chain_graph(3);
+        let pr = HashMap::new(); // empty PageRank
+        let result = structural_dna(&g, &pr, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_structural_twins_basic() {
+        // Use a chain graph where middle nodes have similar structural positions
+        let g = make_chain_graph(7);
+        let config = AnalyticsConfig::default();
+        let pr = pagerank(&g, &config);
+        let dna = structural_dna(&g, &pr, 2).unwrap();
+
+        // Ask for twins of node_3 (center of chain)
+        let twins = find_structural_twins(&dna, "node_3", 3);
+        assert_eq!(twins.len(), 3);
+
+        // All results should have valid similarity scores in [0, 1]
+        for (_, sim) in &twins {
+            assert!(
+                *sim >= 0.0 && *sim <= 1.0,
+                "Similarity out of range: {}",
+                sim
+            );
+        }
+
+        // Results should be sorted descending by similarity
+        for i in 0..twins.len() - 1 {
+            assert!(twins[i].1 >= twins[i + 1].1);
+        }
+    }
+
+    #[test]
+    fn test_find_structural_twins_nonexistent_target() {
+        let dna: HashMap<String, Vec<f64>> = HashMap::new();
+        let twins = find_structural_twins(&dna, "nonexistent", 5);
+        assert!(twins.is_empty());
+    }
+
+    #[test]
+    fn test_find_structural_twins_top_n_truncation() {
+        let g = make_star_graph(10);
+        let config = AnalyticsConfig::default();
+        let pr = pagerank(&g, &config);
+        let dna = structural_dna(&g, &pr, 2).unwrap();
+
+        let twins = find_structural_twins(&dna, "leaf_0", 3);
+        assert_eq!(twins.len(), 3);
+
+        // Results should be sorted by similarity desc
+        for i in 0..twins.len() - 1 {
+            assert!(twins[i].1 >= twins[i + 1].1);
+        }
+    }
+
+    // ========================================================================
+    // cluster_dna_vectors tests
+    // ========================================================================
+
+    #[test]
+    fn test_cluster_dna_empty() {
+        let dna: HashMap<String, Vec<f64>> = HashMap::new();
+        let clusters = cluster_dna_vectors(&dna, 3);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn test_cluster_dna_too_few_points() {
+        let mut dna = HashMap::new();
+        dna.insert("a".to_string(), vec![1.0, 0.0]);
+        dna.insert("b".to_string(), vec![0.0, 1.0]);
+        // 2 points but 3 clusters → should return empty
+        let clusters = cluster_dna_vectors(&dna, 3);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn test_cluster_dna_two_clear_groups() {
+        // Two tight groups with distinct directions (cosine-similar within group)
+        let mut dna = HashMap::new();
+        // Group A: direction ~ (1, 0) — low second dimension
+        dna.insert("src/handlers/auth.rs".to_string(), vec![0.9, 0.1]);
+        dna.insert("src/handlers/user.rs".to_string(), vec![0.95, 0.12]);
+        dna.insert("src/handlers/api.rs".to_string(), vec![0.88, 0.08]);
+        // Group B: direction ~ (0, 1) — low first dimension
+        dna.insert("src/models/user.rs".to_string(), vec![0.1, 0.9]);
+        dna.insert("src/models/schema.rs".to_string(), vec![0.12, 0.95]);
+        dna.insert("src/models/types.rs".to_string(), vec![0.08, 0.88]);
+
+        let clusters = cluster_dna_vectors(&dna, 2);
+        assert_eq!(clusters.len(), 2);
+
+        // Each cluster should have 3 members
+        let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
+        assert!(sizes.contains(&3));
+
+        // Check that handlers are grouped together and models together
+        let handler_cluster = clusters
+            .iter()
+            .find(|c| c.members.iter().any(|m| m.contains("handlers")))
+            .unwrap();
+        assert!(
+            handler_cluster
+                .members
+                .iter()
+                .all(|m| m.contains("handlers")),
+            "All handler files should be in the same cluster"
+        );
+
+        // Cohesion should be high within tight clusters
+        for c in &clusters {
+            assert!(
+                c.cohesion > 0.9,
+                "Tight clusters should have high cohesion: {}",
+                c.cohesion
+            );
+        }
+    }
+
+    #[test]
+    fn test_cluster_dna_labels_inferred() {
+        let mut dna = HashMap::new();
+        dna.insert("src/handlers/auth_handler.rs".to_string(), vec![0.0, 0.0]);
+        dna.insert("src/handlers/user_handler.rs".to_string(), vec![0.01, 0.01]);
+        dna.insert("src/models/user.rs".to_string(), vec![1.0, 1.0]);
+        dna.insert("src/models/schema.rs".to_string(), vec![0.99, 0.99]);
+
+        let clusters = cluster_dna_vectors(&dna, 2);
+        assert_eq!(clusters.len(), 2);
+
+        let labels: Vec<&str> = clusters.iter().map(|c| c.label.as_str()).collect();
+        // At least one should have a recognized label (not "Cluster (N)")
+        assert!(
+            labels.iter().any(|l| *l == "Handlers" || *l == "Models"),
+            "At least one cluster should have a recognized label, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_cluster_dna_single_cluster() {
+        let mut dna = HashMap::new();
+        dna.insert("a.rs".to_string(), vec![0.5, 0.5]);
+        dna.insert("b.rs".to_string(), vec![0.6, 0.4]);
+        dna.insert("c.rs".to_string(), vec![0.4, 0.6]);
+
+        let clusters = cluster_dna_vectors(&dna, 1);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].members.len(), 3);
+    }
+
+    // ====================================================================
+    // Missing Link Prediction (Plan 9)
+    // ====================================================================
+
+    /// Build a chain graph: A → B → C (A and C are NOT directly connected)
+    fn make_chain_abc() -> CodeGraph {
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "A".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("src/a.rs".to_string()),
+            name: "a.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "B".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("src/b.rs".to_string()),
+            name: "b.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "C".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("src/c.rs".to_string()),
+            name: "c.rs".to_string(),
+            project_id: None,
+        });
+        g.add_edge(
+            "A",
+            "B",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "B",
+            "C",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g
+    }
+
+    #[test]
+    fn test_find_distance_2_pairs_chain() {
+        // A → B → C : (A, C) should be at distance 2
+        let g = make_chain_abc();
+        let pairs = find_distance_2_3_pairs(&g);
+        assert_eq!(pairs.len(), 1, "Expected exactly 1 distance-2 pair");
+        let pair = &pairs[0];
+        let ids: HashSet<String> = [g.graph[pair.0].id.clone(), g.graph[pair.1].id.clone()]
+            .into_iter()
+            .collect();
+        assert!(ids.contains("A"), "Pair should contain A");
+        assert!(ids.contains("C"), "Pair should contain C");
+    }
+
+    #[test]
+    fn test_find_distance_2_pairs_triangle_none() {
+        // Triangle: A → B → C, A → C → directly connected, no distance-2 pairs
+        let mut g = make_chain_abc();
+        g.add_edge(
+            "A",
+            "C",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        let pairs = find_distance_2_3_pairs(&g);
+        assert!(pairs.is_empty(), "Triangle should have no distance-2 pairs");
+    }
+
+    #[test]
+    fn test_find_distance_2_pairs_star_graph() {
+        // Star: center → leaf_0, center → leaf_1, center → leaf_2
+        // All leaves are at distance 2 from each other (through center)
+        let g = make_star_graph(3);
+        let pairs = find_distance_2_3_pairs(&g);
+        // 3 leaves → C(3,2) = 3 pairs at distance 2
+        assert_eq!(
+            pairs.len(),
+            3,
+            "Star with 3 leaves should have 3 distance-2 pairs"
+        );
+    }
+
+    #[test]
+    fn test_find_distance_2_pairs_empty() {
+        let g = CodeGraph::new();
+        let pairs = find_distance_2_3_pairs(&g);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn test_find_distance_2_pairs_disconnected() {
+        // Two disconnected nodes — no edges, no pairs
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "X".to_string(),
+            node_type: CodeNodeType::File,
+            path: None,
+            name: "x.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "Y".to_string(),
+            node_type: CodeNodeType::File,
+            path: None,
+            name: "y.rs".to_string(),
+            project_id: None,
+        });
+        let pairs = find_distance_2_3_pairs(&g);
+        assert!(
+            pairs.is_empty(),
+            "Disconnected nodes have no distance-2 pairs"
+        );
+    }
+
+    #[test]
+    fn test_link_plausibility_high_score() {
+        // Diamond: A → B, A → C, B → D, C → D
+        // B and C share common neighbors (A, D) → high Jaccard + Adamic-Adar
+        let mut g = CodeGraph::new();
+        for id in &["A", "B", "C", "D"] {
+            g.add_node(CodeNode {
+                id: id.to_string(),
+                node_type: CodeNodeType::Function,
+                path: Some(format!("src/{}.rs", id.to_lowercase())),
+                name: id.to_string(),
+                project_id: None,
+            });
+        }
+        g.add_edge("A", "B", CodeEdge::default());
+        g.add_edge("A", "C", CodeEdge::default());
+        g.add_edge("B", "D", CodeEdge::default());
+        g.add_edge("C", "D", CodeEdge::default());
+
+        let b_idx = g.id_to_index["B"];
+        let c_idx = g.id_to_index["C"];
+
+        // Add co-change data
+        let mut co_change = HashMap::new();
+        co_change.insert(("B".to_string(), "C".to_string()), 0.8);
+
+        let prediction = link_plausibility(&g, b_idx, c_idx, &co_change, None);
+
+        assert!(
+            prediction.plausibility > 0.4,
+            "B-C with 2 common neighbors + high co-change should have plausibility > 0.4, got {}",
+            prediction.plausibility
+        );
+        assert_eq!(prediction.signals.len(), 5, "Should have 5 signals");
+        assert_eq!(prediction.suggested_relation, "CALLS"); // Function-Function
+    }
+
+    #[test]
+    fn test_link_plausibility_zero_score() {
+        // Two nodes far apart, no common neighbors, no co-change
+        let mut g = CodeGraph::new();
+        for id in &["A", "B", "C", "D", "E"] {
+            g.add_node(CodeNode {
+                id: id.to_string(),
+                node_type: CodeNodeType::File,
+                path: None,
+                name: format!("{}.rs", id.to_lowercase()),
+                project_id: None,
+            });
+        }
+        // Chain: A → B → C → D → E
+        g.add_edge("A", "B", CodeEdge::default());
+        g.add_edge("B", "C", CodeEdge::default());
+        g.add_edge("C", "D", CodeEdge::default());
+        g.add_edge("D", "E", CodeEdge::default());
+
+        let a_idx = g.id_to_index["A"];
+        let e_idx = g.id_to_index["E"];
+        let co_change: HashMap<(String, String), f64> = HashMap::new();
+
+        let prediction = link_plausibility(&g, a_idx, e_idx, &co_change, None);
+
+        // Jaccard = 0 (no common neighbors), co_change = 0, proximity = 1/4 = 0.25
+        assert!(
+            prediction.plausibility < 0.1,
+            "A-E far apart with no co-change should have low plausibility, got {}",
+            prediction.plausibility
+        );
+    }
+
+    #[test]
+    fn test_link_plausibility_with_dna() {
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "X".to_string(),
+            node_type: CodeNodeType::File,
+            path: None,
+            name: "x.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "Y".to_string(),
+            node_type: CodeNodeType::File,
+            path: None,
+            name: "y.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "M".to_string(),
+            node_type: CodeNodeType::File,
+            path: None,
+            name: "m.rs".to_string(),
+            project_id: None,
+        });
+        // X → M → Y (X and Y at distance 2)
+        g.add_edge("X", "M", CodeEdge::default());
+        g.add_edge("M", "Y", CodeEdge::default());
+
+        let x_idx = g.id_to_index["X"];
+        let y_idx = g.id_to_index["Y"];
+        let co_change: HashMap<(String, String), f64> = HashMap::new();
+
+        // Very similar DNA vectors
+        let mut dna = HashMap::new();
+        dna.insert("X".to_string(), vec![0.9, 0.1, 0.5]);
+        dna.insert("Y".to_string(), vec![0.85, 0.15, 0.5]);
+
+        let pred_with_dna = link_plausibility(&g, x_idx, y_idx, &co_change, Some(&dna));
+        let pred_no_dna = link_plausibility(&g, x_idx, y_idx, &co_change, None);
+
+        assert!(
+            pred_with_dna.plausibility > pred_no_dna.plausibility,
+            "DNA similarity should boost plausibility: with={} > without={}",
+            pred_with_dna.plausibility,
+            pred_no_dna.plausibility
+        );
+    }
+
+    #[test]
+    fn test_link_plausibility_five_signals() {
+        // Verify all 5 signals are present and named correctly
+        let g = make_chain_abc();
+        let a_idx = g.id_to_index["A"];
+        let c_idx = g.id_to_index["C"];
+        let co_change: HashMap<(String, String), f64> = HashMap::new();
+
+        let prediction = link_plausibility(&g, a_idx, c_idx, &co_change, None);
+        let signal_names: Vec<&str> = prediction.signals.iter().map(|(n, _)| n.as_str()).collect();
+
+        assert_eq!(
+            signal_names,
+            vec![
+                "jaccard",
+                "co_change",
+                "proximity",
+                "adamic_adar",
+                "dna_similarity"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_type_file_file() {
+        let g = make_chain_abc(); // All File nodes
+        let a_idx = g.id_to_index["A"];
+        let c_idx = g.id_to_index["C"];
+        assert_eq!(infer_relation_type(&g, a_idx, c_idx), "IMPORTS");
+    }
+
+    #[test]
+    fn test_infer_relation_type_function_function() {
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "fn_a".to_string(),
+            node_type: CodeNodeType::Function,
+            path: None,
+            name: "fn_a".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "fn_b".to_string(),
+            node_type: CodeNodeType::Function,
+            path: None,
+            name: "fn_b".to_string(),
+            project_id: None,
+        });
+        let a_idx = g.id_to_index["fn_a"];
+        let b_idx = g.id_to_index["fn_b"];
+        assert_eq!(infer_relation_type(&g, a_idx, b_idx), "CALLS");
+    }
+
+    #[test]
+    fn test_infer_relation_type_struct_trait() {
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "MyStruct".to_string(),
+            node_type: CodeNodeType::Struct,
+            path: None,
+            name: "MyStruct".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "MyTrait".to_string(),
+            node_type: CodeNodeType::Trait,
+            path: None,
+            name: "MyTrait".to_string(),
+            project_id: None,
+        });
+        let s_idx = g.id_to_index["MyStruct"];
+        let t_idx = g.id_to_index["MyTrait"];
+        assert_eq!(infer_relation_type(&g, s_idx, t_idx), "IMPLEMENTS_TRAIT");
+    }
+
+    #[test]
+    fn test_suggest_missing_links_co_change_boosts() {
+        // A → B → C, co-change between A and C → A-C should be top prediction
+        let g = make_chain_abc();
+        let mut co_change = HashMap::new();
+        co_change.insert(("A".to_string(), "C".to_string()), 0.9);
+
+        let predictions = suggest_missing_links(&g, &co_change, None, 10, 0.0);
+        assert_eq!(predictions.len(), 1, "Only 1 distance-2 pair: (A, C)");
+        assert!(
+            predictions[0].plausibility > 0.3,
+            "A-C with high co-change should have plausibility > 0.3, got {}",
+            predictions[0].plausibility
+        );
+    }
+
+    #[test]
+    fn test_suggest_missing_links_min_plausibility_filter() {
+        let g = make_chain_abc();
+        let co_change: HashMap<(String, String), f64> = HashMap::new();
+
+        // With very high min_plausibility, no predictions should pass
+        let predictions = suggest_missing_links(&g, &co_change, None, 10, 0.99);
+        assert!(
+            predictions.is_empty(),
+            "No predictions should pass min_plausibility=0.99"
+        );
+    }
+
+    #[test]
+    fn test_suggest_missing_links_top_n_limit() {
+        // Star graph: center → leaf_0, center → leaf_1, center → leaf_2
+        // 3 distance-2 pairs: (leaf_0, leaf_1), (leaf_0, leaf_2), (leaf_1, leaf_2)
+        let g = make_star_graph(3);
+        let co_change: HashMap<(String, String), f64> = HashMap::new();
+
+        let predictions = suggest_missing_links(&g, &co_change, None, 2, 0.0);
+        assert_eq!(
+            predictions.len(),
+            2,
+            "top_n=2 should limit to 2 predictions"
+        );
+    }
+
+    #[test]
+    fn test_extract_co_change_data() {
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "X".to_string(),
+            node_type: CodeNodeType::File,
+            path: None,
+            name: "x.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "Y".to_string(),
+            node_type: CodeNodeType::File,
+            path: None,
+            name: "y.rs".to_string(),
+            project_id: None,
+        });
+        g.add_edge(
+            "X",
+            "Y",
+            CodeEdge {
+                edge_type: CodeEdgeType::CoChanged,
+                weight: 0.75,
+            },
+        );
+
+        let data = extract_co_change_data(&g);
+        // Both directions should be present
+        assert_eq!(data.get(&("X".to_string(), "Y".to_string())), Some(&0.75));
+        assert_eq!(data.get(&("Y".to_string(), "X".to_string())), Some(&0.75));
+    }
+
+    #[test]
+    fn test_extract_co_change_data_ignores_other_edges() {
+        let g = make_chain_abc(); // Only IMPORTS edges
+        let data = extract_co_change_data(&g);
+        assert!(
+            data.is_empty(),
+            "IMPORTS edges should not be extracted as co-change"
+        );
+    }
+
+    // ========================================================================
+    // Stress Testing (Plan 5) tests
+    // ========================================================================
+
+    /// Helper: build a star graph (center + N leaves).
+    /// All edges are center → leaf_i.
+    fn make_star_stress(n: usize) -> CodeGraph {
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "center".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("center".to_string()),
+            name: "center".to_string(),
+            project_id: None,
+        });
+        for i in 0..n {
+            let id = format!("leaf_{}", i);
+            g.add_node(CodeNode {
+                id: id.clone(),
+                node_type: CodeNodeType::File,
+                path: Some(id.clone()),
+                name: id.clone(),
+                project_id: None,
+            });
+            g.add_edge(
+                "center",
+                &id,
+                CodeEdge {
+                    edge_type: CodeEdgeType::Imports,
+                    weight: 1.0,
+                },
+            );
+        }
+        g
+    }
+
+    /// Helper: A-B-C-D chain.
+    fn make_chain_stress() -> CodeGraph {
+        let mut g = CodeGraph::new();
+        for id in &["A", "B", "C", "D"] {
+            g.add_node(CodeNode {
+                id: id.to_string(),
+                node_type: CodeNodeType::File,
+                path: Some(id.to_string()),
+                name: id.to_string(),
+                project_id: None,
+            });
+        }
+        g.add_edge(
+            "A",
+            "B",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "B",
+            "C",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "C",
+            "D",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g
+    }
+
+    // -- stress_test_node_removal --
+
+    #[test]
+    fn test_stress_node_removal_star_center() {
+        let g = make_star_stress(4);
+        let result = stress_test_node_removal(&g, "center").unwrap();
+        assert_eq!(
+            result.mode,
+            super::super::models::StressTestMode::NodeRemoval
+        );
+        assert_eq!(result.target, "center");
+        // Removing the center should orphan all 4 leaves
+        assert_eq!(result.orphaned_nodes, 4);
+        assert_eq!(result.components_before, 1);
+        assert_eq!(result.components_after, 4);
+        assert!(
+            result.resilience_score < 0.1,
+            "Resilience should be very low"
+        );
+    }
+
+    #[test]
+    fn test_stress_node_removal_leaf() {
+        let g = make_star_stress(4);
+        let result = stress_test_node_removal(&g, "leaf_0").unwrap();
+        // Removing a leaf should have minimal impact
+        assert_eq!(result.orphaned_nodes, 0);
+        assert_eq!(result.components_before, 1);
+        assert_eq!(result.components_after, 1);
+        assert!(result.resilience_score > 0.9, "Resilience should be high");
+    }
+
+    #[test]
+    fn test_stress_node_removal_chain_middle() {
+        let g = make_chain_stress(); // A-B-C-D
+        let result = stress_test_node_removal(&g, "B").unwrap();
+        // Removing B splits: A alone, C-D together
+        assert_eq!(result.components_before, 1);
+        assert_eq!(result.components_after, 2);
+        assert_eq!(result.orphaned_nodes, 1); // A becomes singleton
+    }
+
+    #[test]
+    fn test_stress_node_removal_unknown() {
+        let g = make_chain_stress();
+        assert!(stress_test_node_removal(&g, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_stress_node_removal_single_node() {
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "alone".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("alone".to_string()),
+            name: "alone".to_string(),
+            project_id: None,
+        });
+        let result = stress_test_node_removal(&g, "alone").unwrap();
+        assert_eq!(result.resilience_score, 0.0);
+        assert_eq!(result.components_before, 1);
+        assert_eq!(result.components_after, 0);
+    }
+
+    // -- find_bridges --
+
+    #[test]
+    fn test_find_bridges_chain() {
+        let g = make_chain_stress(); // A-B-C-D
+        let bridges = find_bridges(&g);
+        // In a chain, every edge is a bridge
+        assert_eq!(bridges.len(), 3, "Chain of 4 should have 3 bridges");
+    }
+
+    #[test]
+    fn test_find_bridges_cycle() {
+        // A-B-C-A: no bridges (cycle)
+        let mut g = CodeGraph::new();
+        for id in &["A", "B", "C"] {
+            g.add_node(CodeNode {
+                id: id.to_string(),
+                node_type: CodeNodeType::File,
+                path: Some(id.to_string()),
+                name: id.to_string(),
+                project_id: None,
+            });
+        }
+        g.add_edge(
+            "A",
+            "B",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "B",
+            "C",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "C",
+            "A",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        let bridges = find_bridges(&g);
+        assert!(bridges.is_empty(), "Cycle should have no bridges");
+    }
+
+    #[test]
+    fn test_find_bridges_star() {
+        let g = make_star_stress(3);
+        let bridges = find_bridges(&g);
+        // Star: every edge is a bridge
+        assert_eq!(bridges.len(), 3, "Star with 3 leaves should have 3 bridges");
+    }
+
+    #[test]
+    fn test_find_bridges_empty() {
+        let g = CodeGraph::new();
+        let bridges = find_bridges(&g);
+        assert!(bridges.is_empty());
+    }
+
+    // -- stress_test_cascade --
+
+    #[test]
+    fn test_stress_cascade_chain() {
+        // A→B→C→D: removing A should cascade: A removed → B has no incoming
+        // but depends on direction. In cascade, we remove nodes with NO remaining incoming edges.
+        let g = make_chain_stress(); // A→B→C→D
+        let result = stress_test_cascade(&g, "A", 10).unwrap();
+        assert_eq!(result.mode, super::super::models::StressTestMode::Cascade);
+        // A removed → B loses its only incoming → B removed → C removed → D removed
+        assert_eq!(
+            result.blast_radius, 4,
+            "Full cascade should remove all 4 nodes"
+        );
+        assert!(
+            result.cascade_depth >= 1,
+            "Should have at least 1 cascade round"
+        );
+    }
+
+    #[test]
+    fn test_stress_cascade_star_center() {
+        let g = make_star_stress(3); // center→leaf_0, center→leaf_1, center→leaf_2
+        let result = stress_test_cascade(&g, "center", 10).unwrap();
+        // center removed → all leaves lose incoming → all removed
+        assert_eq!(result.blast_radius, 4); // center + 3 leaves
+    }
+
+    #[test]
+    fn test_stress_cascade_leaf() {
+        let g = make_star_stress(3);
+        let result = stress_test_cascade(&g, "leaf_0", 10).unwrap();
+        // Removing a leaf shouldn't cascade
+        assert_eq!(result.blast_radius, 1); // only the leaf itself
+        assert_eq!(result.cascade_depth, 0);
+    }
+
+    #[test]
+    fn test_stress_cascade_unknown() {
+        let g = make_chain_stress();
+        assert!(stress_test_cascade(&g, "nonexistent", 10).is_none());
+    }
+
+    #[test]
+    fn test_stress_cascade_max_iterations() {
+        let g = make_chain_stress(); // A→B→C→D
+                                     // With max_iterations=1, cascade should stop after 1 round
+        let result = stress_test_cascade(&g, "A", 1).unwrap();
+        assert!(result.cascade_depth <= 1);
+    }
+
+    // -- stress_test_edge_removal --
+
+    #[test]
+    fn test_stress_edge_removal_bridge() {
+        let g = make_chain_stress(); // A-B-C-D
+        let result = stress_test_edge_removal(&g, "B", "C").unwrap();
+        assert_eq!(
+            result.mode,
+            super::super::models::StressTestMode::EdgeRemoval
+        );
+        // B-C is a bridge in the chain
+        assert_eq!(
+            result.resilience_score, 0.0,
+            "Bridge removal should give 0 resilience"
+        );
+        assert!(result.components_after > result.components_before);
+        assert_eq!(result.critical_edges.len(), 1);
+    }
+
+    #[test]
+    fn test_stress_edge_removal_non_bridge() {
+        // A-B-C-A cycle: no edge is a bridge
+        let mut g = CodeGraph::new();
+        for id in &["A", "B", "C"] {
+            g.add_node(CodeNode {
+                id: id.to_string(),
+                node_type: CodeNodeType::File,
+                path: Some(id.to_string()),
+                name: id.to_string(),
+                project_id: None,
+            });
+        }
+        g.add_edge(
+            "A",
+            "B",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "B",
+            "C",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "C",
+            "A",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        let result = stress_test_edge_removal(&g, "A", "B").unwrap();
+        assert_eq!(
+            result.resilience_score, 1.0,
+            "Non-bridge should give 1.0 resilience"
+        );
+        assert_eq!(result.components_before, result.components_after);
+        assert!(result.critical_edges.is_empty());
+    }
+
+    #[test]
+    fn test_stress_edge_removal_unknown() {
+        let g = make_chain_stress();
+        assert!(stress_test_edge_removal(&g, "A", "nonexistent").is_none());
+    }
+
+    // ========================================================================
+    // Context Cards (Plan 8) tests
+    // ========================================================================
+
+    /// Helper: 5-file graph for context card tests.
+    fn make_file_graph_cc() -> CodeGraph {
+        let mut g = CodeGraph::new();
+        let files = [
+            "src/main.rs",
+            "src/lib.rs",
+            "src/api/mod.rs",
+            "src/api/handlers.rs",
+            "src/api/routes.rs",
+        ];
+        for path in &files {
+            g.add_node(CodeNode {
+                id: path.to_string(),
+                node_type: CodeNodeType::File,
+                path: Some(path.to_string()),
+                name: path.rsplit('/').next().unwrap_or(path).to_string(),
+                project_id: None,
+            });
+        }
+        g.add_edge(
+            "src/main.rs",
+            "src/lib.rs",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "src/main.rs",
+            "src/api/mod.rs",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "src/api/mod.rs",
+            "src/api/handlers.rs",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "src/api/mod.rs",
+            "src/api/routes.rs",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g.add_edge(
+            "src/api/routes.rs",
+            "src/api/handlers.rs",
+            CodeEdge {
+                edge_type: CodeEdgeType::Imports,
+                weight: 1.0,
+            },
+        );
+        g
+    }
+
+    #[test]
+    fn test_context_cards_file_graph() {
+        use super::super::models::AnalyticsConfig;
+        // 5-file graph: main → lib, main → api/mod, api/mod → handlers, api/mod → routes, routes → handlers
+        let g = make_file_graph_cc();
+        let config = AnalyticsConfig::default();
+        let analytics = compute_all(&g, &config);
+        let dna_map = HashMap::new();
+        let wl_hashes = HashMap::new();
+
+        let cards = compute_context_cards(&g, &analytics, &dna_map, &wl_hashes);
+
+        assert_eq!(cards.len(), 5, "Should produce 1 card per file node");
+
+        // All cards should have positive pagerank (connected graph)
+        for card in &cards {
+            assert!(
+                card.cc_pagerank > 0.0,
+                "PageRank should be > 0 for {}",
+                card.path
+            );
+            assert_eq!(card.cc_version, 1);
+            assert!(!card.cc_computed_at.is_empty());
+        }
+
+        // Check main.rs has 2 outgoing imports (lib + api/mod) and 0 incoming
+        let main_card = cards.iter().find(|c| c.path == "src/main.rs").unwrap();
+        assert_eq!(main_card.cc_imports_out, 2, "main.rs should import 2 files");
+        assert_eq!(
+            main_card.cc_imports_in, 0,
+            "main.rs should have 0 importers"
+        );
+
+        // Check handlers has 0 outgoing and 2 incoming (api/mod + routes)
+        let handlers_card = cards
+            .iter()
+            .find(|c| c.path == "src/api/handlers.rs")
+            .unwrap();
+        assert_eq!(handlers_card.cc_imports_out, 0);
+        assert_eq!(handlers_card.cc_imports_in, 2);
+    }
+
+    #[test]
+    fn test_context_cards_only_files() {
+        // Mix of File + Function nodes: only File nodes get cards
+        let mut g = CodeGraph::new();
+        g.add_node(CodeNode {
+            id: "src/main.rs".to_string(),
+            node_type: CodeNodeType::File,
+            path: Some("src/main.rs".to_string()),
+            name: "main.rs".to_string(),
+            project_id: None,
+        });
+        g.add_node(CodeNode {
+            id: "my_func".to_string(),
+            node_type: CodeNodeType::Function,
+            path: None,
+            name: "my_func".to_string(),
+            project_id: None,
+        });
+        g.add_edge(
+            "src/main.rs",
+            "my_func",
+            CodeEdge {
+                edge_type: CodeEdgeType::Defines,
+                weight: 1.0,
+            },
+        );
+
+        use super::super::models::AnalyticsConfig;
+        let config = AnalyticsConfig::default();
+        let analytics = compute_all(&g, &config);
+        let cards = compute_context_cards(&g, &analytics, &HashMap::new(), &HashMap::new());
+
+        assert_eq!(cards.len(), 1, "Only File nodes should get context cards");
+        assert_eq!(cards[0].path, "src/main.rs");
+    }
+
+    #[test]
+    fn test_context_cards_with_dna_and_wl() {
+        let g = make_chain_abc(); // A→B→C
+        use super::super::models::AnalyticsConfig;
+        let config = AnalyticsConfig::default();
+        let analytics = compute_all(&g, &config);
+
+        let mut dna_map = HashMap::new();
+        dna_map.insert("A".to_string(), vec![1.0, 0.5, 0.0]);
+        let mut wl_hashes = HashMap::new();
+        wl_hashes.insert("A".to_string(), 12345u64);
+
+        let cards = compute_context_cards(&g, &analytics, &dna_map, &wl_hashes);
+        let a_card = cards.iter().find(|c| c.path == "A").unwrap();
+        assert_eq!(a_card.cc_structural_dna, vec![1.0, 0.5, 0.0]);
+        assert_eq!(a_card.cc_wl_hash, 12345);
+
+        // B should have no DNA or WL
+        let b_card = cards.iter().find(|c| c.path == "B").unwrap();
+        assert!(b_card.cc_structural_dna.is_empty());
+        assert_eq!(b_card.cc_wl_hash, 0);
+    }
+
+    #[test]
+    fn test_context_cards_empty_graph() {
+        use super::super::models::AnalyticsConfig;
+        let g = CodeGraph::new();
+        let config = AnalyticsConfig::default();
+        let analytics = compute_all(&g, &config);
+        let cards = compute_context_cards(&g, &analytics, &HashMap::new(), &HashMap::new());
+        assert!(cards.is_empty());
+    }
+
+    #[test]
+    fn test_context_cards_default() {
+        use super::super::models::ContextCard;
+        let card = ContextCard::default();
+        assert_eq!(card.cc_version, 0);
+        assert_eq!(card.cc_pagerank, 0.0);
+        assert!(card.path.is_empty());
+    }
+
+    // ── WL Subgraph Hash tests ──────────────────────────────────────
+
+    #[test]
+    fn test_wl_node_hash_single_node() {
+        let mut g = CodeGraph::new();
+        g.graph.add_node(CodeNode {
+            id: "A".into(),
+            node_type: CodeNodeType::Function,
+            name: "a".into(),
+            path: None,
+            project_id: None,
+        });
+        let idx = g.graph.node_indices().next().unwrap();
+        let hash = wl_node_hash(&g, idx, 2, 3);
+        assert_ne!(hash, 0, "Hash of a single node should be non-zero");
+    }
+
+    #[test]
+    fn test_wl_node_hash_deterministic() {
+        let g = make_chain_graph(5);
+        let idx = g.graph.node_indices().next().unwrap();
+        let h1 = wl_node_hash(&g, idx, 2, 3);
+        let h2 = wl_node_hash(&g, idx, 2, 3);
+        assert_eq!(h1, h2, "WL hash should be deterministic");
+    }
+
+    #[test]
+    fn test_wl_node_hash_symmetric_nodes_same_hash() {
+        // Star graph: center + leaves. All leaves should have the same hash.
+        let g = make_star_graph(4);
+        let leaf_indices: Vec<_> = g
+            .graph
+            .node_indices()
+            .filter(|&i| g.graph[i].id != "center")
+            .collect();
+        let hashes: Vec<u64> = leaf_indices
+            .iter()
+            .map(|&i| wl_node_hash(&g, i, 2, 3))
+            .collect();
+        assert!(
+            hashes.windows(2).all(|w| w[0] == w[1]),
+            "Symmetric leaf nodes in star graph should have identical WL hashes"
+        );
+    }
+
+    #[test]
+    fn test_wl_node_hash_different_positions_differ() {
+        // In a chain A-B-C-D-E, endpoint A and center C should have different hashes
+        let g = make_chain_graph(5);
+        let indices: Vec<_> = g.graph.node_indices().collect();
+        let hash_first = wl_node_hash(&g, indices[0], 2, 3);
+        let hash_middle = wl_node_hash(&g, indices[2], 2, 3);
+        assert_ne!(
+            hash_first, hash_middle,
+            "Endpoint and center of a chain should have different WL hashes"
+        );
+    }
+
+    #[test]
+    fn test_wl_node_hash_radius_affects_result() {
+        let g = make_chain_graph(10);
+        let idx = g.graph.node_indices().nth(5).unwrap();
+        let h_r1 = wl_node_hash(&g, idx, 1, 3);
+        let h_r3 = wl_node_hash(&g, idx, 3, 3);
+        // Different radius = different neighborhood = different hash
+        // (unless the graph is trivially small, which 10 nodes is not)
+        assert_ne!(
+            h_r1, h_r3,
+            "Different radii should generally produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_wl_subgraph_hash_all_basic() {
+        let g = make_chain_graph(5);
+        let hashes = wl_subgraph_hash_all(&g, 2, 3).unwrap();
+        assert_eq!(hashes.len(), 5, "Should have a hash for every node");
+        for hash in hashes.values() {
+            assert_ne!(*hash, 0, "No hash should be zero");
+        }
+    }
+
+    #[test]
+    fn test_wl_subgraph_hash_all_empty_graph() {
+        let g = CodeGraph::new();
+        let hashes = wl_subgraph_hash_all(&g, 2, 3).unwrap();
+        assert!(hashes.is_empty(), "Empty graph should produce no hashes");
+    }
+
+    #[test]
+    fn test_wl_subgraph_hash_all_star_leaves_same() {
+        let g = make_star_graph(5);
+        // radius=1 so center sees all leaves but each leaf only sees center
+        let hashes = wl_subgraph_hash_all(&g, 1, 3).unwrap();
+        let leaf_hashes: Vec<u64> = hashes
+            .iter()
+            .filter(|(k, _)| *k != "center")
+            .map(|(_, &v)| v)
+            .collect();
+        assert!(
+            leaf_hashes.windows(2).all(|w| w[0] == w[1]),
+            "All leaf hashes in a star should be identical"
+        );
+        // Center should differ from leaves (different neighborhood structure at radius=1)
+        let center_hash = hashes["center"];
+        assert_ne!(
+            center_hash, leaf_hashes[0],
+            "Center hash should differ from leaf hash"
+        );
+    }
+
+    // ── find_isomorphic_groups tests ────────────────────────────────
+
+    #[test]
+    fn test_find_isomorphic_groups_basic() {
+        let mut hashes = HashMap::new();
+        hashes.insert("A".to_string(), 100u64);
+        hashes.insert("B".to_string(), 100u64);
+        hashes.insert("C".to_string(), 200u64);
+        hashes.insert("D".to_string(), 200u64);
+        hashes.insert("E".to_string(), 300u64);
+
+        let groups = find_isomorphic_groups(&hashes);
+        assert_eq!(
+            groups.len(),
+            2,
+            "Should have 2 groups (singletons excluded)"
+        );
+        assert_eq!(groups[&100].len(), 2);
+        assert_eq!(groups[&200].len(), 2);
+    }
+
+    #[test]
+    fn test_find_isomorphic_groups_no_duplicates() {
+        let mut hashes = HashMap::new();
+        hashes.insert("A".to_string(), 1u64);
+        hashes.insert("B".to_string(), 2u64);
+        hashes.insert("C".to_string(), 3u64);
+
+        let groups = find_isomorphic_groups(&hashes);
+        assert!(
+            groups.is_empty(),
+            "All unique hashes should produce no groups"
+        );
+    }
+
+    #[test]
+    fn test_find_isomorphic_groups_all_same() {
+        let mut hashes = HashMap::new();
+        for i in 0..5 {
+            hashes.insert(format!("node_{}", i), 42u64);
+        }
+        let groups = find_isomorphic_groups(&hashes);
+        assert_eq!(groups.len(), 1, "All same hash → one group");
+        assert_eq!(groups[&42].len(), 5);
+    }
+
+    #[test]
+    fn test_find_isomorphic_groups_empty() {
+        let hashes: HashMap<String, u64> = HashMap::new();
+        let groups = find_isomorphic_groups(&hashes);
+        assert!(groups.is_empty());
+    }
+
+    // ── double_radius_label tests ───────────────────────────────────
+
+    #[test]
+    fn test_double_radius_label_linear() {
+        // A → B → C, source=A, target=C
+        let paths: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
+        let edges = vec![
+            ("A".to_string(), "B".to_string()),
+            ("B".to_string(), "C".to_string()),
+        ];
+        let labels = double_radius_label(&paths, &edges, "A", "C");
+        assert_eq!(labels["A"], (0, 2)); // dist(A,A)=0, dist(A,C)=2
+        assert_eq!(labels["B"], (1, 1)); // dist(B,A)=1, dist(B,C)=1
+        assert_eq!(labels["C"], (2, 0)); // dist(C,A)=2, dist(C,C)=0
+    }
+
+    #[test]
+    fn test_double_radius_label_star() {
+        // Center connected to A, B, C. source=A, target=B
+        let paths: Vec<String> = vec!["center".into(), "A".into(), "B".into(), "C".into()];
+        let edges = vec![
+            ("center".to_string(), "A".to_string()),
+            ("center".to_string(), "B".to_string()),
+            ("center".to_string(), "C".to_string()),
+        ];
+        let labels = double_radius_label(&paths, &edges, "A", "B");
+        assert_eq!(labels["A"], (0, 2));
+        assert_eq!(labels["B"], (2, 0));
+        assert_eq!(labels["center"], (1, 1));
+        assert_eq!(labels["C"], (2, 2)); // equidistant
+    }
+
+    #[test]
+    fn test_double_radius_label_disconnected() {
+        // A-B and C (disconnected), source=A, target=C
+        let paths: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
+        let edges = vec![("A".to_string(), "B".to_string())];
+        let labels = double_radius_label(&paths, &edges, "A", "C");
+        assert_eq!(labels["A"].0, 0); // dist to source = 0
+        assert_eq!(labels["A"].1, u32::MAX); // unreachable to target
+        assert_eq!(labels["C"].0, u32::MAX); // unreachable from source
+        assert_eq!(labels["C"].1, 0); // dist to target = 0
+    }
+
+    // ── find_bottleneck_nodes tests ─────────────────────────────────
+
+    #[test]
+    fn test_bottleneck_chain() {
+        // A - B - C - D - E, source=A, target=E
+        let paths: Vec<String> = (0..5).map(|i| format!("n{}", i)).collect();
+        let edges: Vec<(String, String)> = (0..4)
+            .map(|i| (format!("n{}", i), format!("n{}", i + 1)))
+            .collect();
+        let bottlenecks = find_bottleneck_nodes(&paths, &edges, "n0", "n4", 3);
+        // Middle node n2 should be highest betweenness
+        assert!(
+            !bottlenecks.is_empty(),
+            "Chain should have bottleneck nodes"
+        );
+        assert_eq!(
+            bottlenecks[0], "n2",
+            "Center of chain should be top bottleneck"
+        );
+    }
+
+    #[test]
+    fn test_bottleneck_too_small() {
+        // Only 2 nodes: source + target, no intermediates
+        let paths = vec!["A".to_string(), "B".to_string()];
+        let edges = vec![("A".to_string(), "B".to_string())];
+        let bottlenecks = find_bottleneck_nodes(&paths, &edges, "A", "B", 5);
+        assert!(bottlenecks.is_empty(), "2 nodes = no intermediates");
+    }
+
+    #[test]
+    fn test_bottleneck_star_center() {
+        // Star: center - A, center - B, center - C, center - D
+        // source=A, target=B → center is the bottleneck
+        let paths: Vec<String> = vec![
+            "center".into(),
+            "A".into(),
+            "B".into(),
+            "C".into(),
+            "D".into(),
+        ];
+        let edges: Vec<(String, String)> = vec![
+            ("center".into(), "A".into()),
+            ("center".into(), "B".into()),
+            ("center".into(), "C".into()),
+            ("center".into(), "D".into()),
+        ];
+        let bottlenecks = find_bottleneck_nodes(&paths, &edges, "A", "B", 1);
+        assert_eq!(bottlenecks.len(), 1);
+        assert_eq!(bottlenecks[0], "center");
+    }
+
+    #[test]
+    fn test_bottleneck_excludes_source_target() {
+        let paths: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
+        let edges = vec![
+            ("A".to_string(), "B".to_string()),
+            ("B".to_string(), "C".to_string()),
+        ];
+        let bottlenecks = find_bottleneck_nodes(&paths, &edges, "A", "C", 10);
+        // Should not contain A or C
+        assert!(!bottlenecks.contains(&"A".to_string()));
+        assert!(!bottlenecks.contains(&"C".to_string()));
+    }
+
+    // ── find_distance_2_3_pairs tests ───────────────────────────────
+
+    #[test]
+    fn test_distance_2_3_pairs_chain() {
+        // Chain A-B-C-D: distance-2 pairs = (A,C) and (B,D)
+        let g = make_chain_graph(4);
+        let pairs = find_distance_2_3_pairs(&g);
+        assert!(!pairs.is_empty(), "Chain of 4 should have distance-2 pairs");
+        // A-C and B-D are at distance 2 (not directly connected)
+        // A-D is distance 3, NOT captured by 2-hop BFS
+        assert_eq!(pairs.len(), 2, "A-C and B-D at distance 2");
+    }
+
+    #[test]
+    fn test_distance_2_3_pairs_complete_graph() {
+        // In a complete graph (clique), every node is directly connected,
+        // so there are no distance-2 pairs
+        let g = make_two_cliques(3); // creates 2 cliques connected by a bridge
+        let pairs = find_distance_2_3_pairs(&g);
+        // Two cliques connected → there will be cross-clique distance-2 pairs
+        assert!(!pairs.is_empty());
+    }
+
+    #[test]
+    fn test_distance_2_3_pairs_empty() {
+        let g = CodeGraph::new();
+        let pairs = find_distance_2_3_pairs(&g);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn test_distance_2_3_pairs_star() {
+        // Star: center - L1, center - L2, center - L3
+        // All leaves are distance 2 from each other (through center)
+        let g = make_star_graph(4);
+        let pairs = find_distance_2_3_pairs(&g);
+        // 4 leaves → C(4,2) = 6 distance-2 pairs
+        assert_eq!(
+            pairs.len(),
+            6,
+            "Star with 4 leaves: 6 leaf-leaf pairs at distance 2"
+        );
     }
 }

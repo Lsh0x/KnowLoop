@@ -127,6 +127,16 @@ pub struct MockGraphStore {
     pub skills: RwLock<HashMap<Uuid, crate::skills::SkillNode>>,
     /// skill_id -> Vec<(entity_type, entity_id)>
     pub skill_members: RwLock<HashMap<Uuid, Vec<(String, Uuid)>>>,
+
+    // Analysis profiles (keyed by profile id String)
+    pub analysis_profiles: RwLock<HashMap<String, crate::graph::models::AnalysisProfile>>,
+
+    // Topology rules (keyed by rule id String)
+    pub topology_rules: RwLock<HashMap<String, crate::graph::models::TopologyRule>>,
+
+    // Test flags
+    /// Controls what `has_context_cards()` returns (default: false)
+    pub mock_has_context_cards: std::sync::atomic::AtomicBool,
 }
 
 #[allow(dead_code)]
@@ -201,6 +211,9 @@ impl MockGraphStore {
             function_embeddings: RwLock::new(HashMap::new()),
             skills: RwLock::new(HashMap::new()),
             skill_members: RwLock::new(HashMap::new()),
+            analysis_profiles: RwLock::new(HashMap::new()),
+            topology_rules: RwLock::new(HashMap::new()),
+            mock_has_context_cards: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1271,6 +1284,15 @@ impl GraphStore for MockGraphStore {
         Ok(pf.get(&project_id).map(|p| p.len() as i64).unwrap_or(0))
     }
 
+    async fn invalidate_computed_properties(
+        &self,
+        _project_id: Uuid,
+        paths: &[String],
+    ) -> Result<u64> {
+        // Mock: return the number of paths as stale count (simplified)
+        Ok(paths.len() as u64)
+    }
+
     // ========================================================================
     // Symbol operations
     // ========================================================================
@@ -2207,6 +2229,7 @@ impl GraphStore for MockGraphStore {
                     community_label: label,
                     file_count: paths.len(),
                     key_files,
+                    unique_fingerprints: 0,
                 }
             })
             .collect();
@@ -6723,6 +6746,31 @@ impl GraphStore for MockGraphStore {
         Ok(())
     }
 
+    async fn batch_update_structural_dna(
+        &self,
+        _updates: &[crate::graph::models::StructuralDnaUpdate],
+    ) -> anyhow::Result<()> {
+        // Mock: structural DNA not stored separately in tests
+        Ok(())
+    }
+
+    async fn write_predicted_links(
+        &self,
+        _project_id: &str,
+        _links: &[crate::graph::models::LinkPrediction],
+    ) -> anyhow::Result<()> {
+        // Mock: predicted links not stored in tests
+        Ok(())
+    }
+
+    async fn get_project_structural_dna(
+        &self,
+        _project_id: &str,
+    ) -> anyhow::Result<Vec<(String, Vec<f64>)>> {
+        // Mock: no structural DNA in tests by default
+        Ok(vec![])
+    }
+
     async fn get_project_synapse_edges(
         &self,
         _project_id: Uuid,
@@ -6824,8 +6872,256 @@ impl GraphStore for MockGraphStore {
         Ok(0)
     }
 
+    // ========================================================================
+    // Topology Firewall operations
+    // ========================================================================
+
+    async fn create_topology_rule(
+        &self,
+        rule: &crate::graph::models::TopologyRule,
+    ) -> anyhow::Result<()> {
+        let mut rules = self.topology_rules.write().await;
+        rules.insert(rule.id.clone(), rule.clone());
+        Ok(())
+    }
+
+    async fn list_topology_rules(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<crate::graph::models::TopologyRule>> {
+        let rules = self.topology_rules.read().await;
+        let mut result: Vec<_> = rules
+            .values()
+            .filter(|r| r.project_id == project_id)
+            .cloned()
+            .collect();
+        result.sort_by(|a, b| {
+            a.rule_type
+                .to_string()
+                .cmp(&b.rule_type.to_string())
+                .then(a.source_pattern.cmp(&b.source_pattern))
+        });
+        Ok(result)
+    }
+
+    async fn delete_topology_rule(&self, rule_id: &str) -> anyhow::Result<()> {
+        let mut rules = self.topology_rules.write().await;
+        rules.remove(rule_id);
+        Ok(())
+    }
+
+    async fn check_topology_rules(
+        &self,
+        _project_id: &str,
+    ) -> anyhow::Result<Vec<crate::graph::models::TopologyViolation>> {
+        // Mock: no graph traversal, return empty violations
+        Ok(Vec::new())
+    }
+
+    async fn check_file_topology(
+        &self,
+        project_id: &str,
+        file_path: &str,
+        new_imports: &[String],
+    ) -> anyhow::Result<Vec<crate::graph::models::TopologyViolation>> {
+        use crate::graph::models::{
+            glob_to_regex, TopologyRuleType, TopologySeverity, TopologyViolation,
+        };
+
+        if new_imports.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rules = self.topology_rules.read().await;
+        let mut violations = Vec::new();
+        let fallback_re = regex::Regex::new("^$").unwrap();
+
+        for rule in rules.values() {
+            if rule.project_id != project_id {
+                continue;
+            }
+            if !matches!(
+                rule.rule_type,
+                TopologyRuleType::MustNotImport | TopologyRuleType::MustNotCall
+            ) {
+                continue;
+            }
+
+            let source_re = regex::Regex::new(&glob_to_regex(&rule.source_pattern))
+                .unwrap_or_else(|_| fallback_re.clone());
+            if !source_re.is_match(file_path) {
+                continue;
+            }
+
+            let target_pattern = rule.target_pattern.as_deref().unwrap_or("**");
+            let target_re = regex::Regex::new(&glob_to_regex(target_pattern))
+                .unwrap_or_else(|_| fallback_re.clone());
+
+            for import_path in new_imports {
+                if target_re.is_match(import_path) {
+                    let severity_weight = match rule.severity {
+                        TopologySeverity::Error => 1.0,
+                        TopologySeverity::Warning => 0.5,
+                    };
+                    violations.push(TopologyViolation {
+                        rule_id: rule.id.clone(),
+                        rule_description: rule.description.clone(),
+                        rule_type: rule.rule_type.clone(),
+                        violator_path: file_path.to_string(),
+                        target_path: Some(import_path.clone()),
+                        severity: rule.severity.clone(),
+                        details: format!(
+                            "{} would import {} which violates rule: {}",
+                            file_path, import_path, rule.description
+                        ),
+                        violation_score: severity_weight,
+                    });
+                }
+            }
+        }
+
+        Ok(violations)
+    }
+
     async fn health_check(&self) -> anyhow::Result<bool> {
         Ok(true)
+    }
+
+    // ========================================================================
+    // Analysis Profile operations
+    // ========================================================================
+
+    async fn create_analysis_profile(
+        &self,
+        profile: &crate::graph::models::AnalysisProfile,
+    ) -> anyhow::Result<()> {
+        let mut profiles = self.analysis_profiles.write().await;
+        profiles.insert(profile.id.clone(), profile.clone());
+        Ok(())
+    }
+
+    async fn list_analysis_profiles(
+        &self,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::graph::models::AnalysisProfile>> {
+        let profiles = self.analysis_profiles.read().await;
+        let mut result: Vec<_> = profiles
+            .values()
+            .filter(|p| {
+                // Include global profiles (no project_id)
+                if p.project_id.is_none() {
+                    return true;
+                }
+                // Include project-specific profiles if matching
+                if let Some(pid) = project_id {
+                    if p.project_id.as_deref() == Some(pid) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .cloned()
+            .collect();
+        // Sort: built-in first, then by name
+        result.sort_by(|a, b| {
+            b.is_builtin
+                .cmp(&a.is_builtin)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(result)
+    }
+
+    async fn get_analysis_profile(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::graph::models::AnalysisProfile>> {
+        let profiles = self.analysis_profiles.read().await;
+        Ok(profiles.get(id).cloned())
+    }
+
+    async fn delete_analysis_profile(&self, id: &str) -> anyhow::Result<()> {
+        let mut profiles = self.analysis_profiles.write().await;
+        if let Some(profile) = profiles.get(id) {
+            if profile.is_builtin {
+                anyhow::bail!("Cannot delete built-in profile '{}'", profile.name);
+            }
+        }
+        profiles.remove(id);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Multi-signal impact queries
+    // ========================================================================
+
+    async fn get_knowledge_density(
+        &self,
+        file_path: &str,
+        _project_id: &str,
+    ) -> anyhow::Result<f64> {
+        // In mock: count notes linked to this file path via anchors
+        let notes = self.notes.read().await;
+        let count = notes
+            .values()
+            .filter(|n| {
+                n.anchors.iter().any(|a| {
+                    a.entity_type == crate::notes::EntityType::File && a.entity_id == file_path
+                })
+            })
+            .count();
+        // Simple normalization: max 10 => density 1.0
+        Ok((count as f64 / 10.0).min(1.0))
+    }
+
+    async fn get_node_pagerank(&self, _file_path: &str, _project_id: &str) -> anyhow::Result<f64> {
+        // Mock: return 0.0 (no GDS in tests)
+        Ok(0.0)
+    }
+
+    async fn get_bridge_proximity(
+        &self,
+        _file_path: &str,
+        _project_id: &str,
+    ) -> anyhow::Result<Vec<(String, f64)>> {
+        // Mock: return empty (no graph traversal in tests)
+        Ok(Vec::new())
+    }
+
+    async fn get_avg_multi_signal_score(&self, _project_id: Uuid) -> anyhow::Result<f64> {
+        // Mock: no GDS metrics in tests, return 0.0
+        Ok(0.0)
+    }
+
+    async fn find_bridge_subgraph(
+        &self,
+        source: &str,
+        target: &str,
+        _max_hops: u32,
+        _relation_types: &[String],
+        _project_id: &str,
+    ) -> anyhow::Result<(
+        Vec<crate::graph::models::BridgeRawNode>,
+        Vec<crate::graph::models::BridgeRawEdge>,
+    )> {
+        use crate::graph::models::{BridgeRawEdge, BridgeRawNode};
+
+        // Mock: return source and target as nodes with a direct IMPORTS edge
+        let nodes = vec![
+            BridgeRawNode {
+                path: source.to_string(),
+                node_type: "File".to_string(),
+            },
+            BridgeRawNode {
+                path: target.to_string(),
+                node_type: "File".to_string(),
+            },
+        ];
+        let edges = vec![BridgeRawEdge {
+            from_path: source.to_string(),
+            to_path: target.to_string(),
+            rel_type: "IMPORTS".to_string(),
+        }];
+        Ok((nodes, edges))
     }
 
     // ========================================================================
@@ -7140,6 +7436,60 @@ impl GraphStore for MockGraphStore {
     ) -> anyhow::Result<Vec<(String, String, f64)>> {
         // Mock: return empty synapse graph (no synapses in mock store)
         Ok(Vec::new())
+    }
+
+    // ========================================================================
+    // Context Cards persistence
+    // ========================================================================
+
+    async fn batch_save_context_cards(
+        &self,
+        _cards: &[crate::graph::models::ContextCard],
+    ) -> anyhow::Result<()> {
+        // Mock: no-op (context cards not persisted in mock store)
+        Ok(())
+    }
+
+    async fn invalidate_context_cards(
+        &self,
+        _paths: &[String],
+        _project_id: &str,
+    ) -> anyhow::Result<()> {
+        // Mock: no-op (no context cards to invalidate in mock store)
+        Ok(())
+    }
+
+    async fn get_context_card(
+        &self,
+        _path: &str,
+        _project_id: &str,
+    ) -> anyhow::Result<Option<crate::graph::models::ContextCard>> {
+        // Mock: no context cards stored
+        Ok(None)
+    }
+
+    async fn get_context_cards_batch(
+        &self,
+        _paths: &[String],
+        _project_id: &str,
+    ) -> anyhow::Result<Vec<crate::graph::models::ContextCard>> {
+        // Mock: no context cards stored
+        Ok(Vec::new())
+    }
+
+    async fn find_isomorphic_groups(
+        &self,
+        _project_id: &str,
+        _min_group_size: usize,
+    ) -> anyhow::Result<Vec<crate::graph::models::IsomorphicGroup>> {
+        // Mock: no isomorphic groups
+        Ok(Vec::new())
+    }
+
+    async fn has_context_cards(&self, _project_id: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .mock_has_context_cards
+            .load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 

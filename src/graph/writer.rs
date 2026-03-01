@@ -152,6 +152,53 @@ impl AnalyticsWriter {
 
         Ok(())
     }
+
+    /// Write structural DNA vectors to Neo4j.
+    ///
+    /// Converts the in-memory DNA HashMap (from `structural_dna()`) to
+    /// `StructuralDnaUpdate` payloads and persists via batch UNWIND.
+    /// Only writes DNA for File-type nodes.
+    pub async fn write_structural_dna(
+        &self,
+        dna_map: &std::collections::HashMap<String, Vec<f64>>,
+        graph: &CodeGraph,
+    ) -> Result<()> {
+        use super::models::StructuralDnaUpdate;
+
+        let updates: Vec<StructuralDnaUpdate> = dna_map
+            .iter()
+            .filter(|(id, _)| {
+                // Only persist DNA for File nodes (function DNA is less useful)
+                graph
+                    .get_node(id)
+                    .map(|n| n.node_type == CodeNodeType::File)
+                    .unwrap_or(false)
+            })
+            .map(|(path, dna)| StructuralDnaUpdate {
+                path: path.clone(),
+                dna: dna.clone(),
+            })
+            .collect();
+
+        if !updates.is_empty() {
+            self.store.batch_update_structural_dna(&updates).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Write predicted missing links to Neo4j.
+    ///
+    /// Persists top-N link predictions as PREDICTED_LINK relationships.
+    /// Old predictions are replaced on each call (idempotent).
+    pub async fn write_predicted_links(
+        &self,
+        project_id: &str,
+        links: &[super::models::LinkPrediction],
+    ) -> Result<()> {
+        self.store.write_predicted_links(project_id, links).await?;
+        Ok(())
+    }
 }
 
 // ============================================================================

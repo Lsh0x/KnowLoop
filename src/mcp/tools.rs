@@ -29,6 +29,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         chat_tool(),
         feature_graph_tool(),
         code_tool(),
+        analysis_profile_tool(),
         admin_tool(),
         skill_tool(),
     ]
@@ -240,6 +241,33 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "get_hotspots" => Some(("code", "get_hotspots")),
         "get_knowledge_gaps" => Some(("code", "get_knowledge_gaps")),
         "get_risk_assessment" => Some(("code", "get_risk_assessment")),
+        "get_structural_profile" => Some(("code", "get_structural_profile")),
+        "find_structural_twins" => Some(("code", "find_structural_twins")),
+        "cluster_dna" => Some(("code", "cluster_dna")),
+        "find_cross_project_twins" => Some(("code", "find_cross_project_twins")),
+        "predict_missing_links" => Some(("code", "predict_missing_links")),
+        "check_link_plausibility" => Some(("code", "check_link_plausibility")),
+        "stress_test_node" => Some(("code", "stress_test_node")),
+        "stress_test_edge" => Some(("code", "stress_test_edge")),
+        "stress_test_cascade" => Some(("code", "stress_test_cascade")),
+        "find_bridges" => Some(("code", "find_bridges")),
+        "get_context_card" => Some(("code", "get_context_card")),
+        "refresh_context_cards" => Some(("code", "refresh_context_cards")),
+        "get_fingerprint" => Some(("code", "get_fingerprint")),
+        "find_isomorphic" => Some(("code", "find_isomorphic")),
+        "suggest_structural_templates" => Some(("code", "suggest_structural_templates")),
+        "get_bridge" => Some(("code", "get_bridge")),
+        "check_topology" => Some(("code", "check_topology")),
+        "list_topology_rules" => Some(("code", "list_topology_rules")),
+        "create_topology_rule" => Some(("code", "create_topology_rule")),
+        "delete_topology_rule" => Some(("code", "delete_topology_rule")),
+        "check_file_topology" => Some(("code", "check_file_topology")),
+
+        // Analysis Profile
+        "list_analysis_profiles" => Some(("analysis_profile", "list")),
+        "create_analysis_profile" => Some(("analysis_profile", "create")),
+        "get_analysis_profile" => Some(("analysis_profile", "get")),
+        "delete_analysis_profile" => Some(("analysis_profile", "delete")),
 
         // Skill
         "list_skills" => Some(("skill", "list")),
@@ -752,19 +780,19 @@ fn feature_graph_tool() -> ToolDefinition {
 fn code_tool() -> ToolDefinition {
     ToolDefinition {
         name: "code".to_string(),
-        description: "Explore and analyze code. Actions: search, search_project, search_workspace, get_file_symbols, find_references, get_file_dependencies, get_call_graph, analyze_impact, get_architecture, find_similar, find_trait_implementations, find_type_traits, get_impl_blocks, get_communities, get_health, get_node_importance, plan_implementation, get_co_change_graph, get_file_co_changers, detect_processes, get_class_hierarchy, find_subclasses, find_interface_implementors, list_processes, get_process, get_entry_points, enrich_communities, get_hotspots, get_knowledge_gaps, get_risk_assessment".to_string(),
+        description: "Explore and analyze code. Actions: search, search_project, search_workspace, get_file_symbols, find_references, get_file_dependencies, get_call_graph, analyze_impact, get_architecture, find_similar, find_trait_implementations, find_type_traits, get_impl_blocks, get_communities, get_health, get_node_importance, plan_implementation, get_co_change_graph, get_file_co_changers, detect_processes, get_class_hierarchy, find_subclasses, find_interface_implementors, list_processes, get_process, get_entry_points, enrich_communities, get_hotspots, get_knowledge_gaps, get_risk_assessment, get_structural_profile, find_structural_twins, cluster_dna, find_cross_project_twins, predict_missing_links, check_link_plausibility, stress_test_node, stress_test_edge, stress_test_cascade, find_bridges, get_context_card, refresh_context_cards, get_fingerprint, find_isomorphic, suggest_structural_templates, get_bridge, check_topology, list_topology_rules, create_topology_rule, delete_topology_rule, check_file_topology".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["search", "search_project", "search_workspace", "get_file_symbols", "find_references", "get_file_dependencies", "get_call_graph", "analyze_impact", "get_architecture", "find_similar", "find_trait_implementations", "find_type_traits", "get_impl_blocks", "get_communities", "get_health", "get_node_importance", "plan_implementation", "get_co_change_graph", "get_file_co_changers", "detect_processes", "get_class_hierarchy", "find_subclasses", "find_interface_implementors", "list_processes", "get_process", "get_entry_points", "enrich_communities", "get_hotspots", "get_knowledge_gaps", "get_risk_assessment"],
+                    "enum": ["search", "search_project", "search_workspace", "get_file_symbols", "find_references", "get_file_dependencies", "get_call_graph", "analyze_impact", "get_architecture", "find_similar", "find_trait_implementations", "find_type_traits", "get_impl_blocks", "get_communities", "get_health", "get_node_importance", "plan_implementation", "get_co_change_graph", "get_file_co_changers", "detect_processes", "get_class_hierarchy", "find_subclasses", "find_interface_implementors", "list_processes", "get_process", "get_entry_points", "enrich_communities", "get_hotspots", "get_knowledge_gaps", "get_risk_assessment", "get_structural_profile", "find_structural_twins", "cluster_dna", "find_cross_project_twins", "predict_missing_links", "check_link_plausibility", "stress_test_node", "stress_test_edge", "stress_test_cascade", "find_bridges", "get_context_card", "refresh_context_cards", "get_fingerprint", "find_isomorphic", "suggest_structural_templates", "get_bridge", "check_topology", "list_topology_rules", "create_topology_rule", "delete_topology_rule", "check_file_topology"],
                     "description": "Operation to perform"
                 },
                 "query": {"type": "string", "description": "Search query (search/search_project/search_workspace)"},
-                "workspace_slug": {"type": "string", "description": "Workspace slug (search_workspace)"},
-                "project_slug": {"type": "string", "description": "Project slug (search_project/get_communities/get_health/get_node_importance/plan_implementation/get_architecture)"},
-                "file_path": {"type": "string", "description": "File path (get_file_symbols/get_file_dependencies)"},
+                "workspace_slug": {"type": "string", "description": "Workspace slug (search_workspace/find_cross_project_twins)"},
+                "project_slug": {"type": "string", "description": "Project slug (search_project/get_communities/get_health/get_node_importance/plan_implementation/get_architecture/get_context_card/get_fingerprint/find_isomorphic/get_structural_profile/find_structural_twins/cluster_dna/find_bridges/predict_missing_links/stress_test_node/stress_test_edge/stress_test_cascade/refresh_context_cards/get_bridge/check_topology/list_topology_rules/create_topology_rule/check_file_topology/check_link_plausibility/suggest_structural_templates)"},
+                "file_path": {"type": "string", "description": "File path (get_file_symbols/get_file_dependencies/get_context_card/get_fingerprint/get_structural_profile/find_structural_twins/find_cross_project_twins/check_file_topology)"},
                 "symbol": {"type": "string", "description": "Symbol name (find_references)"},
                 "function": {"type": "string", "description": "Function name (get_call_graph)"},
                 "target": {"type": "string", "description": "Target for impact analysis (analyze_impact)"},
@@ -783,7 +811,51 @@ fn code_tool() -> ToolDefinition {
                 "auto_create_plan": {"type": "boolean", "description": "Auto-create plan (plan_implementation)"},
                 "path_prefix": {"type": "string", "description": "Path prefix filter (search)"},
                 "min_size": {"type": "integer", "description": "Min community size (get_communities)"},
+                "top_n": {"type": "integer", "description": "Max twins to return (find_structural_twins/find_cross_project_twins, default 10)"},
+                "n_clusters": {"type": "integer", "description": "Number of clusters for K-means (cluster_dna, default 5)"},
+                "source_project_slug": {"type": "string", "description": "Source project slug (find_cross_project_twins)"},
+                "min_plausibility": {"type": "number", "description": "Minimum plausibility score (0-1) for predicted links"},
+                "source": {"type": "string", "description": "Source node path (check_link_plausibility/get_bridge)"},
+                "target": {"type": "string", "description": "Target node path (check_link_plausibility/get_bridge)"},
+                "target_id": {"type": "string", "description": "Target node ID (stress_test_node/stress_test_cascade)"},
+                "from_id": {"type": "string", "description": "Source node ID (stress_test_edge)"},
+                "to_id": {"type": "string", "description": "Target node ID (stress_test_edge)"},
+                "max_iterations": {"type": "integer", "description": "Max cascade iterations (stress_test_cascade, default 10)"},
+                "max_hops": {"type": "integer", "description": "Max hops for bridge subgraph (get_bridge, default 4)"},
+                "top_bottlenecks": {"type": "integer", "description": "Number of top bottleneck nodes to return (get_bridge, default 5)"},
+                "rule_id": {"type": "string", "description": "Topology rule UUID (delete_topology_rule)"},
+                "rule_type": {"type": "string", "description": "Topology rule type (create_topology_rule): must_not_import, must_not_call, max_distance, max_fan_out, no_circular"},
+                "source_pattern": {"type": "string", "description": "Source glob pattern (create_topology_rule)"},
+                "target_pattern": {"type": "string", "description": "Target glob pattern (create_topology_rule)"},
+                "threshold": {"type": "integer", "description": "Threshold value for max_distance/max_fan_out rules (create_topology_rule)"},
+                "severity": {"type": "string", "description": "Rule severity (create_topology_rule): error, warning"},
+                "new_imports": {"type": "array", "items": {"type": "string"}, "description": "New import paths to check against topology rules (check_file_topology)"},
                 "limit": {"type": "integer", "description": "Max results / depth (search/get_call_graph)"}
+            })),
+            required: Some(vec!["action".to_string()]),
+        },
+    }
+}
+
+fn analysis_profile_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "analysis_profile".to_string(),
+        description: "Manage analysis profiles (edge/fusion weight presets). Actions: list, create, get, delete".to_string(),
+        input_schema: InputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "create", "get", "delete"],
+                    "description": "Operation to perform"
+                },
+                "id": {"type": "string", "description": "Profile UUID (get/delete)"},
+                "name": {"type": "string", "description": "Profile name (create)"},
+                "description": {"type": "string", "description": "Profile description (create)"},
+                "project_slug": {"type": "string", "description": "Project slug (create — scopes the profile to a project)"},
+                "project_id": {"type": "string", "description": "Project UUID filter (list)"},
+                "edge_weights": {"type": "object", "description": "Edge type weights (create): {\"IMPORTS\": 0.7, \"CALLS\": 0.5, \"EXTENDS\": 0.9, ...}"},
+                "fusion_weights": {"type": "object", "description": "Fusion signal weights (create): {\"structural\": 0.3, \"co_change\": 0.25, \"knowledge\": 0.15, \"pagerank\": 0.15, \"bridge\": 0.15}"}
             })),
             required: Some(vec!["action".to_string()]),
         },
@@ -793,13 +865,13 @@ fn code_tool() -> ToolDefinition {
 fn admin_tool() -> ToolDefinition {
     ToolDefinition {
         name: "admin".to_string(),
-        description: "Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_builtin_calls, migrate_calls_confidence, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, reindex_decisions, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric, detect_skills, install_hooks".to_string(),
+        description: "Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_builtin_calls, migrate_calls_confidence, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, reindex_decisions, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric, reinforce_isomorphic, detect_skills, install_hooks".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["sync_directory", "start_watch", "stop_watch", "watch_status", "meilisearch_stats", "delete_meilisearch_orphans", "cleanup_cross_project_calls", "cleanup_builtin_calls", "migrate_calls_confidence", "cleanup_sync_data", "update_staleness_scores", "update_energy_scores", "search_neurons", "reinforce_neurons", "decay_synapses", "backfill_synapses", "reindex_decisions", "backfill_decision_embeddings", "backfill_touches", "backfill_discussed", "update_fabric_scores", "bootstrap_knowledge_fabric", "detect_skills", "maintain_skills", "auto_anchor_notes", "install_hooks"],
+                    "enum": ["sync_directory", "start_watch", "stop_watch", "watch_status", "meilisearch_stats", "delete_meilisearch_orphans", "cleanup_cross_project_calls", "cleanup_builtin_calls", "migrate_calls_confidence", "cleanup_sync_data", "update_staleness_scores", "update_energy_scores", "search_neurons", "reinforce_neurons", "decay_synapses", "backfill_synapses", "reindex_decisions", "backfill_decision_embeddings", "backfill_touches", "backfill_discussed", "update_fabric_scores", "bootstrap_knowledge_fabric", "reinforce_isomorphic", "detect_skills", "maintain_skills", "auto_anchor_notes", "install_hooks"],
                     "description": "Operation to perform"
                 },
                 "path": {"type": "string", "description": "Directory path (sync_directory/start_watch)"},
@@ -814,7 +886,8 @@ fn admin_tool() -> ToolDefinition {
                 "decay_amount": {"type": "number", "description": "Amount to subtract from each synapse weight (decay_synapses, default 0.01)"},
                 "prune_threshold": {"type": "number", "description": "Prune synapses below this weight (decay_synapses, default 0.1)"},
                 "limit": {"type": "integer", "description": "Max items (search_neurons)"},
-                "level": {"type": "string", "enum": ["hourly", "daily", "weekly", "full"], "description": "Maintenance level (maintain_skills, default: daily)"}
+                "level": {"type": "string", "enum": ["hourly", "daily", "weekly", "full"], "description": "Maintenance level (maintain_skills, default: daily)"},
+                "force": {"type": "boolean", "description": "Force re-detection from scratch, deleting all existing skills first (detect_skills, default: false)"}
             })),
             required: Some(vec!["action".to_string()]),
         },
@@ -870,8 +943,8 @@ mod tests {
         let tools = all_tools();
         assert_eq!(
             tools.len(),
-            19,
-            "Expected 19 mega-tools, got {}",
+            20,
+            "Expected 20 mega-tools, got {}",
             tools.len()
         );
     }
@@ -1105,6 +1178,16 @@ mod tests {
             "get_hotspots",
             "get_knowledge_gaps",
             "get_risk_assessment",
+            "get_structural_profile",
+            "find_structural_twins",
+            "cluster_dna",
+            "find_cross_project_twins",
+            "predict_missing_links",
+            "check_link_plausibility",
+            "stress_test_node",
+            "stress_test_edge",
+            "stress_test_cascade",
+            "find_bridges",
         ];
 
         for name in &old_names {

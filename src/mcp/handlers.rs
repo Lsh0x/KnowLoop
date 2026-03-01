@@ -62,6 +62,7 @@ impl ToolHandler {
             "code",
             "admin",
             "skill",
+            "analysis_profile",
         ];
 
         if !mega_tools.contains(&name) {
@@ -290,6 +291,27 @@ impl ToolHandler {
             ("code", "get_hotspots") => "get_hotspots",
             ("code", "get_knowledge_gaps") => "get_knowledge_gaps",
             ("code", "get_risk_assessment") => "get_risk_assessment",
+            ("code", "get_bridge") => "get_bridge",
+            ("code", "check_topology") => "check_topology",
+            ("code", "create_topology_rule") => "create_topology_rule",
+            ("code", "list_topology_rules") => "list_topology_rules",
+            ("code", "delete_topology_rule") => "delete_topology_rule",
+            ("code", "check_file_topology") => "check_file_topology",
+            ("code", "get_structural_profile") => "get_structural_profile",
+            ("code", "find_structural_twins") => "find_structural_twins",
+            ("code", "cluster_dna") => "cluster_dna",
+            ("code", "find_cross_project_twins") => "find_cross_project_twins",
+            ("code", "predict_missing_links") => "predict_missing_links",
+            ("code", "check_link_plausibility") => "check_link_plausibility",
+            ("code", "stress_test_node") => "stress_test_node",
+            ("code", "stress_test_edge") => "stress_test_edge",
+            ("code", "stress_test_cascade") => "stress_test_cascade",
+            ("code", "find_bridges") => "find_bridges",
+            ("code", "get_context_card") => "get_context_card",
+            ("code", "refresh_context_cards") => "refresh_context_cards",
+            ("code", "get_fingerprint") => "get_fingerprint",
+            ("code", "find_isomorphic") => "find_isomorphic",
+            ("code", "suggest_structural_templates") => "suggest_structural_templates",
 
             // Skill
             ("skill", "list") => "list_skills",
@@ -304,6 +326,12 @@ impl ToolHandler {
             ("skill", "export") => "export_skill",
             ("skill", "import") => "import_skill",
             ("skill", "get_health") => "get_skill_health",
+
+            // Analysis Profile
+            ("analysis_profile", "list") => "list_analysis_profiles",
+            ("analysis_profile", "create") => "create_analysis_profile",
+            ("analysis_profile", "get") => "get_analysis_profile",
+            ("analysis_profile", "delete") => "delete_analysis_profile",
 
             // Admin
             ("admin", "sync_directory") => "sync_directory",
@@ -328,6 +356,7 @@ impl ToolHandler {
             ("admin", "backfill_discussed") => "backfill_discussed",
             ("admin", "update_fabric_scores") => "update_fabric_scores",
             ("admin", "bootstrap_knowledge_fabric") => "bootstrap_knowledge_fabric",
+            ("admin", "reinforce_isomorphic") => "reinforce_isomorphic",
             ("admin", "detect_skills") => "detect_skills",
             ("admin", "maintain_skills") => "maintain_skills",
             ("admin", "auto_anchor_notes") => "auto_anchor_notes",
@@ -1880,10 +1909,24 @@ impl ToolHandler {
                 Ok(Some(result))
             }
 
+            "reinforce_isomorphic" => {
+                let mut body = serde_json::Map::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                let result = http
+                    .post("/api/admin/reinforce-isomorphic", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
             "detect_skills" => {
                 let mut body = serde_json::Map::new();
                 if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
                     body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                if let Some(force) = args.get("force").and_then(|v| v.as_bool()) {
+                    body.insert("force".to_string(), Value::Bool(force));
                 }
                 let result = http
                     .post("/api/admin/detect-skills", &Value::Object(body))
@@ -2433,7 +2476,7 @@ impl ToolHandler {
             "search_project_code" => {
                 let project_slug = extract_string(args, "project_slug")?;
                 let query_str = extract_string(args, "query")?;
-                let mut query = vec![("query".to_string(), query_str)];
+                let mut query = vec![("q".to_string(), query_str)];
                 if let Some(v) = args.get("limit").and_then(|v| v.as_i64()) {
                     query.push(("limit".to_string(), v.to_string()));
                 }
@@ -2519,15 +2562,35 @@ impl ToolHandler {
             // --- Analysis (3) ---
             "analyze_impact" => {
                 let target = extract_string(args, "target")?;
-                let mut query = vec![("target".to_string(), target)];
-                if let Some(v) = args.get("target_type").and_then(|v| v.as_str()) {
-                    query.push(("target_type".to_string(), v.to_string()));
+                // multi=true → use multi-signal fusion endpoint (Plan 4)
+                let use_multi = args.get("multi").and_then(|v| v.as_bool()).unwrap_or(false);
+                if use_multi {
+                    let mut query = vec![("target".to_string(), target)];
+                    // project_slug is required for multi-signal
+                    if let Some(v) = args.get("project_slug").and_then(|v| v.as_str()) {
+                        query.push(("project_slug".to_string(), v.to_string()));
+                    }
+                    if let Some(v) = args.get("profile").and_then(|v| v.as_str()) {
+                        query.push(("profile".to_string(), v.to_string()));
+                    }
+                    let result = http
+                        .get_with_query("/api/code/impact/multi", &query)
+                        .await?;
+                    Ok(Some(result))
+                } else {
+                    let mut query = vec![("target".to_string(), target)];
+                    if let Some(v) = args.get("target_type").and_then(|v| v.as_str()) {
+                        query.push(("target_type".to_string(), v.to_string()));
+                    }
+                    if let Some(v) = args.get("project_slug").and_then(|v| v.as_str()) {
+                        query.push(("project_slug".to_string(), v.to_string()));
+                    }
+                    if let Some(v) = args.get("profile").and_then(|v| v.as_str()) {
+                        query.push(("profile".to_string(), v.to_string()));
+                    }
+                    let result = http.get_with_query("/api/code/impact", &query).await?;
+                    Ok(Some(result))
                 }
-                if let Some(v) = args.get("project_slug").and_then(|v| v.as_str()) {
-                    query.push(("project_slug".to_string(), v.to_string()));
-                }
-                let result = http.get_with_query("/api/code/impact", &query).await?;
-                Ok(Some(result))
             }
 
             "get_architecture" => {
@@ -2974,6 +3037,201 @@ impl ToolHandler {
                 Ok(Some(result))
             }
 
+            "get_bridge" => {
+                let source = extract_string(args, "source")?;
+                let target = extract_string(args, "target")?;
+                let project_slug = extract_string(args, "project_slug")?;
+                let mut query = vec![
+                    ("source".to_string(), source),
+                    ("target".to_string(), target),
+                    ("project_slug".to_string(), project_slug),
+                ];
+                if let Some(v) = args.get("max_hops").and_then(|v| v.as_i64()) {
+                    query.push(("max_hops".to_string(), v.to_string()));
+                }
+                if let Some(v) = args.get("top_bottlenecks").and_then(|v| v.as_i64()) {
+                    query.push(("top_bottlenecks".to_string(), v.to_string()));
+                }
+                let result = http.get_with_query("/api/code/bridge", &query).await?;
+                Ok(Some(result))
+            }
+
+            // Topological Firewall (GraIL Plan 3)
+            "check_topology" => {
+                let project_slug = extract_string(args, "project_slug")?;
+                let query = vec![("project_slug".to_string(), project_slug)];
+                let result = http
+                    .get_with_query("/api/code/topology/check", &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "list_topology_rules" => {
+                let project_slug = extract_string(args, "project_slug")?;
+                let query = vec![("project_slug".to_string(), project_slug)];
+                let result = http
+                    .get_with_query("/api/code/topology/rules", &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "create_topology_rule" => {
+                let body = serde_json::json!({
+                    "project_slug": extract_string(args, "project_slug")?,
+                    "rule_type": extract_string(args, "rule_type")?,
+                    "source_pattern": extract_string(args, "source_pattern")?,
+                    "target_pattern": args.get("target_pattern").and_then(|v| v.as_str()),
+                    "threshold": args.get("threshold").and_then(|v| v.as_u64()).map(|v| v as u32),
+                    "severity": args.get("severity").and_then(|v| v.as_str()),
+                    "description": extract_string(args, "description")?,
+                });
+                let result = http.post("/api/code/topology/rules", &body).await?;
+                Ok(Some(result))
+            }
+
+            "delete_topology_rule" => {
+                let rule_id = extract_string(args, "rule_id")?;
+                let result = http
+                    .delete(&format!("/api/code/topology/rules/{}", rule_id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "check_file_topology" => {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "project_slug".to_string(),
+                    json!(extract_string(args, "project_slug")?),
+                );
+                body.insert(
+                    "file_path".to_string(),
+                    json!(extract_string(args, "file_path")?),
+                );
+                let new_imports = args
+                    .get("new_imports")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                body.insert("new_imports".to_string(), json!(new_imports));
+                let result = http
+                    .post("/api/code/topology/check-file", &json!(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            // --- Structural DNA (2) ---
+            "get_structural_profile" => {
+                let result = http.post("/api/code/structural-profile", args).await?;
+                Ok(Some(result))
+            }
+
+            "find_structural_twins" => {
+                let result = http.post("/api/code/structural-twins", args).await?;
+                Ok(Some(result))
+            }
+
+            "cluster_dna" => {
+                let result = http.post("/api/code/structural-clusters", args).await?;
+                Ok(Some(result))
+            }
+
+            "find_cross_project_twins" => {
+                let result = http
+                    .post("/api/code/structural-twins/cross-project", args)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "predict_missing_links" => {
+                let result = http.post("/api/code/predict-links", args).await?;
+                Ok(Some(result))
+            }
+
+            "check_link_plausibility" => {
+                let result = http.post("/api/code/link-plausibility", args).await?;
+                Ok(Some(result))
+            }
+
+            // ── P5: Stress Testing (4 tools) ──────────────────────────────
+            "stress_test_node" => {
+                let result = http.post("/api/code/stress-test-node", args).await?;
+                Ok(Some(result))
+            }
+
+            "stress_test_edge" => {
+                let result = http.post("/api/code/stress-test-edge", args).await?;
+                Ok(Some(result))
+            }
+
+            "stress_test_cascade" => {
+                let result = http.post("/api/code/stress-test-cascade", args).await?;
+                Ok(Some(result))
+            }
+
+            "find_bridges" => {
+                let result = http.post("/api/code/find-bridges", args).await?;
+                Ok(Some(result))
+            }
+
+            // ── P8: Context Cards (2 tools) ─────────────────────────────
+            "get_context_card" => {
+                let path = extract_string(args, "path")
+                    .or_else(|_| extract_string(args, "file_path"))
+                    .or_else(|_| extract_string(args, "node_path"))?;
+                let project_slug = extract_string(args, "project_slug")?;
+                let query = vec![
+                    ("path".to_string(), path),
+                    ("project_slug".to_string(), project_slug),
+                ];
+                let result = http
+                    .get_with_query("/api/code/context-card", &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "refresh_context_cards" => {
+                let project_slug = extract_string(args, "project_slug")?;
+                let body = serde_json::json!({"project_slug": project_slug});
+                let result = http.post("/api/code/context-cards/refresh", &body).await?;
+                Ok(Some(result))
+            }
+
+            // ── P7: WL Fingerprint & Isomorphic (2 tools) ──────────────
+            "get_fingerprint" => {
+                let path = extract_string(args, "path")
+                    .or_else(|_| extract_string(args, "file_path"))
+                    .or_else(|_| extract_string(args, "node_path"))?;
+                let project_slug = extract_string(args, "project_slug")?;
+                let query = vec![
+                    ("path".to_string(), path),
+                    ("project_slug".to_string(), project_slug),
+                ];
+                let result = http.get_with_query("/api/code/fingerprint", &query).await?;
+                Ok(Some(result))
+            }
+
+            "find_isomorphic" => {
+                let project_slug = extract_string(args, "project_slug")?;
+                let mut query = vec![("project_slug".to_string(), project_slug)];
+                if let Some(v) = args.get("min_group_size").and_then(|v| v.as_i64()) {
+                    query.push(("min_group_size".to_string(), v.to_string()));
+                }
+                let result = http.get_with_query("/api/code/isomorphic", &query).await?;
+                Ok(Some(result))
+            }
+
+            "suggest_structural_templates" => {
+                let project_slug = extract_string(args, "project_slug")?;
+                let mut query = vec![("project_slug".to_string(), project_slug)];
+                if let Some(v) = args.get("min_occurrences").and_then(|v| v.as_i64()) {
+                    query.push(("min_occurrences".to_string(), v.to_string()));
+                }
+                let result = http
+                    .get_with_query("/api/code/structural-templates", &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
             "get_meilisearch_stats" => {
                 let result = http.get("/api/meilisearch/stats").await?;
                 Ok(Some(result))
@@ -3047,6 +3305,44 @@ impl ToolHandler {
                     .post("/api/admin/migrate-calls-confidence", &json!({}))
                     .await?;
                 Ok(Some(result))
+            }
+
+            // ── Analysis Profiles (4 tools) ─────────────────────────────
+            "list_analysis_profiles" => {
+                let mut query = Vec::new();
+                if let Some(pid) = extract_optional_string(args, "project_id") {
+                    query.push(("project_id".to_string(), pid));
+                }
+                let result = if query.is_empty() {
+                    http.get("/api/analysis-profiles").await?
+                } else {
+                    http.get_with_query("/api/analysis-profiles", &query)
+                        .await?
+                };
+                Ok(Some(result))
+            }
+
+            "create_analysis_profile" => {
+                let result = http.post("/api/analysis-profiles", args).await?;
+                Ok(Some(result))
+            }
+
+            "get_analysis_profile" => {
+                let id = extract_string(args, "id")?;
+                let result = http.get(&format!("/api/analysis-profiles/{}", id)).await?;
+                Ok(Some(result))
+            }
+
+            "delete_analysis_profile" => {
+                let id = extract_string(args, "id")?;
+                let result = http
+                    .delete(&format!("/api/analysis-profiles/{}", id))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
             }
 
             // ── P10: Skills (9 tools) ──────────────────────────────────
@@ -5138,6 +5434,73 @@ mod tests {
         assert_eq!(result["method"], "POST");
     }
 
+    // -- Context Cards -----------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_http_get_context_card() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "get_context_card",
+                Some(json!({"path": "src/main.rs", "project_slug": "my-proj"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "GET");
+        assert!(result["path"]
+            .as_str()
+            .unwrap()
+            .contains("/code/context-card"));
+    }
+
+    #[tokio::test]
+    async fn test_http_refresh_context_cards() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "refresh_context_cards",
+                Some(json!({"project_slug": "my-proj"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "POST");
+        assert!(result["path"]
+            .as_str()
+            .unwrap()
+            .contains("/code/context-cards/refresh"));
+    }
+
+    #[tokio::test]
+    async fn test_http_get_fingerprint() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "get_fingerprint",
+                Some(json!({"path": "src/main.rs", "project_slug": "my-proj"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "GET");
+        assert!(result["path"]
+            .as_str()
+            .unwrap()
+            .contains("/code/fingerprint"));
+    }
+
+    #[tokio::test]
+    async fn test_http_find_isomorphic() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle("find_isomorphic", Some(json!({"project_slug": "my-proj"})))
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "GET");
+        assert!(result["path"]
+            .as_str()
+            .unwrap()
+            .contains("/code/isomorphic"));
+    }
+
     #[tokio::test]
     async fn test_http_get_meilisearch_stats() {
         let (handler, _) = make_http_handler().await;
@@ -6212,6 +6575,117 @@ mod tests {
             .unwrap();
         assert_eq!(result["method"], "GET");
         assert!(result["path"].as_str().unwrap().ends_with("/discussed"));
+    }
+
+    // -- Structural DNA -------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_http_get_structural_profile() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "get_structural_profile",
+                Some(json!({"project_slug": "my-project", "file_path": "src/main.rs"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "POST");
+        assert_eq!(result["path"], "/api/code/structural-profile");
+    }
+
+    #[tokio::test]
+    async fn test_http_find_structural_twins() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "find_structural_twins",
+                Some(json!({"project_slug": "my-project", "file_path": "src/main.rs", "top_n": 5})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "POST");
+        assert_eq!(result["path"], "/api/code/structural-twins");
+    }
+
+    #[tokio::test]
+    async fn test_http_cluster_dna() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "cluster_dna",
+                Some(json!({"project_slug": "my-project", "n_clusters": 5})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "POST");
+        assert_eq!(result["path"], "/api/code/structural-clusters");
+    }
+
+    #[tokio::test]
+    async fn test_http_find_cross_project_twins() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "find_cross_project_twins",
+                Some(json!({
+                    "workspace_slug": "main",
+                    "source_project_slug": "my-project",
+                    "file_path": "src/main.rs",
+                    "top_n": 5
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "POST");
+        assert_eq!(result["path"], "/api/code/structural-twins/cross-project");
+    }
+
+    #[tokio::test]
+    async fn test_http_predict_missing_links() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "predict_missing_links",
+                Some(json!({"project_slug": "my-project", "top_n": 10, "min_plausibility": 0.3})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "POST");
+        assert_eq!(result["path"], "/api/code/predict-links");
+    }
+
+    #[tokio::test]
+    async fn test_http_check_link_plausibility() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "check_link_plausibility",
+                Some(json!({
+                    "project_slug": "my-project",
+                    "source": "src/main.rs",
+                    "target": "src/lib.rs"
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "POST");
+        assert_eq!(result["path"], "/api/code/link-plausibility");
+    }
+
+    // -- Stress testing -----------------------------------------------------
+
+    #[tokio::test]
+    async fn test_http_stress_test_node() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle(
+                "stress_test_node",
+                Some(json!({"project_slug": "my-project", "target_id": "src/main.rs"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "POST");
+        assert_eq!(result["path"], "/api/code/stress-test-node");
     }
 
     // -- Feature graphs -----------------------------------------------------

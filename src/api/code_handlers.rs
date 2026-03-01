@@ -10,6 +10,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::handlers::{AppError, OrchestratorState};
+use crate::graph::algorithms::into_ranked;
+use crate::graph::models::{FusionWeights, MultiSignalImpact, MultiSignalScore, RankedList};
 use crate::neo4j::models::{ConnectedFileNode, DecisionNode};
 
 // ============================================================================
@@ -30,20 +32,39 @@ pub struct CodeSearchQuery {
     pub workspace_slug: Option<String>,
 }
 
+/// Search response with both legacy hits and ranked view (Plan 10).
+#[derive(Serialize)]
+pub struct CodeSearchResult {
+    /// Legacy: flat list of SearchHit (retro-compatible)
+    pub hits:
+        Vec<crate::meilisearch::indexes::SearchHit<crate::meilisearch::indexes::CodeDocument>>,
+    /// Ranked view with margins and natural clusters.
+    /// Uses CodeDocument directly (Meilisearch score as ranking score).
+    pub ranked: RankedList<crate::meilisearch::indexes::CodeDocument>,
+}
+
+/// Build a CodeSearchResult from raw Meilisearch hits
+fn build_search_result(
+    hits: Vec<crate::meilisearch::indexes::SearchHit<crate::meilisearch::indexes::CodeDocument>>,
+) -> CodeSearchResult {
+    let scored: Vec<(crate::meilisearch::indexes::CodeDocument, f64)> =
+        hits.iter().map(|h| (h.document.clone(), h.score)).collect();
+    let total = scored.len();
+    let ranked = into_ranked(scored, total);
+    CodeSearchResult { hits, ranked }
+}
+
 /// Search code semantically across the codebase
 ///
-/// Returns `SearchHit<CodeDocument>` directly so the frontend gets
-/// the `{ document, score }` shape it expects.
+/// Returns a `CodeSearchResult` with both legacy `hits` array and
+/// `ranked` view with margins and clusters (Plan 10).
 ///
 /// When `workspace_slug` is provided (and `project_slug` is not), searches all
 /// projects in the workspace, merges results by score, and truncates to `limit`.
 pub async fn search_code(
     State(state): State<OrchestratorState>,
     Query(params): Query<CodeSearchQuery>,
-) -> Result<
-    Json<Vec<crate::meilisearch::indexes::SearchHit<crate::meilisearch::indexes::CodeDocument>>>,
-    AppError,
-> {
+) -> Result<Json<CodeSearchResult>, AppError> {
     let limit = params.limit.unwrap_or(10);
 
     // If project_slug is given, use it directly (backward compat)
@@ -59,7 +80,7 @@ pub async fn search_code(
                 None,
             )
             .await?;
-        return Ok(Json(hits));
+        return Ok(Json(build_search_result(hits)));
     }
 
     // If workspace_slug is given, resolve to project slugs and merge results
@@ -102,7 +123,7 @@ pub async fn search_code(
         });
         all_hits.truncate(limit);
 
-        return Ok(Json(all_hits));
+        return Ok(Json(build_search_result(all_hits)));
     }
 
     // No filter — global search
@@ -112,7 +133,7 @@ pub async fn search_code(
         .search_code_with_scores(&params.query, limit, params.language.as_deref(), None, None)
         .await?;
 
-    Ok(Json(hits))
+    Ok(Json(build_search_result(hits)))
 }
 
 // ============================================================================
@@ -227,7 +248,7 @@ pub struct FindReferencesQuery {
     pub project_slug: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolReference {
     pub file_path: String,
     pub line: u32,
@@ -235,11 +256,21 @@ pub struct SymbolReference {
     pub reference_type: String, // "call", "import", "type_usage"
 }
 
+/// Response for find_references with both legacy array and ranked view.
+#[derive(Serialize)]
+pub struct FindReferencesResult {
+    /// Legacy: flat list of references (retro-compatible)
+    pub references: Vec<SymbolReference>,
+    /// Ranked view with margins and clusters (Plan 10).
+    /// Calls scored 1.0, imports 0.7, type_usage 0.5.
+    pub ranked: RankedList<SymbolReference>,
+}
+
 /// Find all references to a symbol across the codebase
 pub async fn find_references(
     State(state): State<OrchestratorState>,
     Query(query): Query<FindReferencesQuery>,
-) -> Result<Json<Vec<SymbolReference>>, AppError> {
+) -> Result<Json<FindReferencesResult>, AppError> {
     let limit = query.limit.unwrap_or(20);
 
     let project_id = if let Some(ref slug) = query.project_slug {
@@ -272,7 +303,23 @@ pub async fn find_references(
         })
         .collect();
 
-    Ok(Json(references))
+    // Score references by type: calls are most important, then imports, then type_usage
+    let scored: Vec<(SymbolReference, f64)> = references
+        .iter()
+        .map(|r| {
+            let type_score = match r.reference_type.as_str() {
+                "call" => 1.0,
+                "import" => 0.7,
+                "type_usage" => 0.5,
+                _ => 0.3,
+            };
+            (r.clone(), type_score)
+        })
+        .collect();
+    let total = scored.len();
+    let ranked = into_ranked(scored, total);
+
+    Ok(Json(FindReferencesResult { references, ranked }))
 }
 
 // ============================================================================
@@ -480,6 +527,16 @@ pub struct ImpactQuery {
     pub target_type: Option<String>,
     /// Filter by project slug
     pub project_slug: Option<String>,
+    /// Analysis profile name or id (e.g. "default", "security", "refactoring")
+    /// Used to weight edges differently in impact analysis.
+    pub profile: Option<String>,
+}
+
+/// A single affected file with its path — used as the item type for `RankedList`.
+/// The `#[serde(flatten)]` on `RankedResult<AffectedFile>` puts `path` at top level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AffectedFile {
+    pub path: String,
 }
 
 #[derive(Serialize)]
@@ -491,6 +548,9 @@ pub struct ImpactAnalysis {
     pub caller_count: i64,
     pub risk_level: String, // "low", "medium", "high"
     pub suggestion: String,
+    /// Analysis profile used for risk weighting (None = default hardcoded weights)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
     /// Community labels affected by this change (from graph analytics)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub affected_communities: Vec<String>,
@@ -503,6 +563,13 @@ pub struct ImpactAnalysis {
     /// Architectural decisions that AFFECT the target or its impacted files
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub affecting_decisions: Vec<DecisionNode>,
+    /// Ranked view of all affected files with margins and natural clusters (Plan 10).
+    /// Direct files score 1.0, transitive-only files score 0.33.
+    pub ranked_affected: RankedList<AffectedFile>,
+    /// Pre-computed context cards for directly affected files (Plan 8).
+    /// Each card contains PageRank, betweenness, DNA, WL hash, co-changers, etc.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context_cards: Vec<crate::graph::models::ContextCard>,
 }
 
 /// Analyze impact of changing a file or function
@@ -522,6 +589,29 @@ pub async fn analyze_impact(
         (Some(project.id), Some(project.root_path))
     } else {
         (None, None)
+    };
+
+    // Resolve analysis profile (by name or id, optional)
+    let profile = if let Some(ref profile_ref) = query.profile {
+        // Try to find by name among built-in profiles first
+        let builtins = crate::graph::models::builtin_profiles();
+        let found = builtins
+            .into_iter()
+            .find(|p| p.name == *profile_ref || p.id == *profile_ref);
+        match found {
+            Some(p) => Some(p),
+            None => {
+                // Try Neo4j lookup by id
+                state
+                    .orchestrator
+                    .neo4j()
+                    .get_analysis_profile(profile_ref)
+                    .await
+                    .unwrap_or(None)
+            }
+        }
+    } else {
+        None
     };
 
     // Resolve relative file paths to absolute using project root_path
@@ -621,19 +711,39 @@ pub async fn analyze_impact(
         .unwrap_or_default();
 
     // Compute risk level using composite formula when GDS data is available
+    // Profile fusion weights adjust the relative importance of each factor:
+    //   bridge     → betweenness weight
+    //   co_change  → community spread weight
+    //   structural → degree/caller weight
+    let (w_betweenness, w_community, w_degree) = if let Some(ref p) = profile {
+        let fw = &p.fusion_weights;
+        let total = fw.bridge + fw.co_change + fw.structural;
+        if total > 0.0 {
+            (
+                fw.bridge / total,
+                fw.co_change / total,
+                fw.structural / total,
+            )
+        } else {
+            (0.5, 0.3, 0.2)
+        }
+    } else {
+        (0.5, 0.3, 0.2)
+    };
+
     let (risk_level, betweenness_score, risk_formula) = if let Some(ref analytics) = node_analytics
     {
         if let Some(betweenness) = analytics.betweenness {
-            // Composite risk formula:
+            // Composite risk formula with profile-weighted coefficients:
             // betweenness_score = clamp(betweenness * 3.0, 0, 1)
             // community_spread = affected_communities / total (use 5 as reasonable estimate)
             // degree_score = clamp(caller_count / 20.0, 0, 1)
-            // risk = betweenness_score * 0.5 + community_spread * 0.3 + degree_score * 0.2
+            // risk = betweenness_score * w_b + community_spread * w_c + degree_score * w_d
             let bs = (betweenness * 3.0).clamp(0.0, 1.0);
             let total_communities = 5.0_f64; // reasonable default
             let cs = (affected_communities.len() as f64 / total_communities).clamp(0.0, 1.0);
             let ds = (caller_count as f64 / 20.0).clamp(0.0, 1.0);
-            let risk_score = bs * 0.5 + cs * 0.3 + ds * 0.2;
+            let risk_score = bs * w_betweenness + cs * w_community + ds * w_degree;
 
             let level = if risk_score > 0.7 {
                 "high"
@@ -727,6 +837,36 @@ pub async fn analyze_impact(
         decisions
     };
 
+    // Batch-read context cards for directly affected files (best-effort)
+    let context_cards = if let Some(ref pid) = project_id {
+        state
+            .orchestrator
+            .neo4j()
+            .get_context_cards_batch(&directly_affected, &pid.to_string())
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Build ranked view: direct files score 1.0, transitive-only score 0.33
+    let ranked_affected = {
+        let mut scored: Vec<(AffectedFile, f64)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for path in &directly_affected {
+            if seen.insert(path.clone()) {
+                scored.push((AffectedFile { path: path.clone() }, 1.0));
+            }
+        }
+        for path in &transitively_affected {
+            if seen.insert(path.clone()) {
+                scored.push((AffectedFile { path: path.clone() }, 0.33));
+            }
+        }
+        let total = scored.len();
+        into_ranked(scored, total)
+    };
+
     Ok(Json(ImpactAnalysis {
         target,
         directly_affected,
@@ -735,10 +875,201 @@ pub async fn analyze_impact(
         caller_count,
         risk_level,
         suggestion,
+        profile_name: profile.as_ref().map(|p| p.name.clone()),
         affected_communities,
         betweenness_score,
         risk_formula,
         affecting_decisions,
+        ranked_affected,
+        context_cards,
+    }))
+}
+
+// ============================================================================
+// Multi-signal Impact Fusion (Plan 4)
+// ============================================================================
+
+/// Query parameters for analyze_impact_v2 (same as ImpactQuery but reused)
+#[derive(Deserialize)]
+pub struct MultiImpactQuery {
+    /// File path to analyze
+    pub target: String,
+    /// Filter by project slug (required for multi-signal)
+    pub project_slug: String,
+    /// Analysis profile name or id (defaults to "default")
+    pub profile: Option<String>,
+}
+
+/// Multi-signal impact analysis: 5 signals fused with configurable weights.
+/// All 5 signals are queried in parallel via tokio::join!
+pub async fn analyze_impact_v2(
+    State(state): State<OrchestratorState>,
+    Query(query): Query<MultiImpactQuery>,
+) -> Result<Json<MultiSignalImpact>, AppError> {
+    let start = std::time::Instant::now();
+    let neo4j = state.orchestrator.neo4j();
+
+    // Resolve project
+    let project = neo4j
+        .get_project_by_slug(&query.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", query.project_slug)))?;
+    let project_id = project.id;
+    let project_id_str = project_id.to_string();
+
+    // Resolve target path (relative → absolute)
+    let target = if !query.target.starts_with('/') {
+        let expanded = crate::expand_tilde(&project.root_path);
+        format!("{}/{}", expanded.trim_end_matches('/'), &query.target)
+    } else {
+        query.target.clone()
+    };
+
+    // Resolve analysis profile (built-in first, then Neo4j)
+    let profile = if let Some(ref profile_ref) = query.profile {
+        let builtins = crate::graph::models::builtin_profiles();
+        // TODO: fallback to async Neo4j profile lookup when not found in builtins
+        builtins
+            .into_iter()
+            .find(|p| p.name == *profile_ref || p.id == *profile_ref)
+    } else {
+        None
+    };
+
+    let weights = profile
+        .as_ref()
+        .map(|p| p.fusion_weights.clone())
+        .unwrap_or_else(|| FusionWeights {
+            structural: 0.35,
+            co_change: 0.25,
+            knowledge: 0.15,
+            pagerank: 0.10,
+            bridge: 0.15,
+        });
+    let profile_name = profile
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "default".to_string());
+
+    // ===== 5 signals in parallel via tokio::join! =====
+    let (structural_res, co_change_res, knowledge_res, pagerank_res, bridge_res) = tokio::join!(
+        // Signal 1: Structural impact (IMPORTS + CALLS traversal)
+        neo4j.find_impacted_files(&target, 3, Some(project_id)),
+        // Signal 2: Co-change (temporal coupling)
+        neo4j.get_file_co_changers(&target, 1, 20),
+        // Signal 3: Knowledge density (notes + decisions linked)
+        neo4j.get_knowledge_density(&target, &project_id_str),
+        // Signal 4: PageRank (structural importance)
+        neo4j.get_node_pagerank(&target, &project_id_str),
+        // Signal 5: Bridge proximity (shortest path to co-changers)
+        neo4j.get_bridge_proximity(&target, &project_id_str),
+    );
+
+    // Collect results (best-effort: log errors, use defaults)
+    let structural = structural_res.unwrap_or_default();
+    let co_changers = co_change_res.unwrap_or_default();
+    let target_knowledge = knowledge_res.unwrap_or(0.0);
+    let target_pagerank = pagerank_res.unwrap_or(0.0);
+    let bridge_scores = bridge_res.unwrap_or_default();
+
+    // ===== Merge into HashMap<path, MultiSignalScore> =====
+    let mut scores: std::collections::HashMap<String, MultiSignalScore> =
+        std::collections::HashMap::new();
+
+    // Signal 1: Structural (1.0 for direct, 0.33 for transitive)
+    for (i, path) in structural.iter().enumerate() {
+        let entry = scores
+            .entry(path.clone())
+            .or_insert_with(|| MultiSignalScore {
+                path: path.clone(),
+                ..Default::default()
+            });
+        // First file is direct (1.0), rest attenuated by position
+        entry.structural_score = if i < 5 { 1.0 } else { 0.33 };
+        entry.signals.push("structural".to_string());
+    }
+
+    // Signal 2: Co-change (normalize by max count)
+    let max_co_change = co_changers
+        .iter()
+        .map(|c| c.count)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+    for co in &co_changers {
+        let entry = scores
+            .entry(co.path.clone())
+            .or_insert_with(|| MultiSignalScore {
+                path: co.path.clone(),
+                ..Default::default()
+            });
+        entry.co_change_score = co.count as f64 / max_co_change;
+        entry.signals.push("co_change".to_string());
+    }
+
+    // Signal 3: Knowledge density (target score propagated to all entries)
+    // Each file gets the target's knowledge density as a proxy
+    // (querying per-file would be too slow for the 500ms budget)
+    if target_knowledge > 0.0 {
+        for score in scores.values_mut() {
+            score.knowledge_score = target_knowledge;
+            if !score.signals.contains(&"knowledge".to_string()) {
+                score.signals.push("knowledge".to_string());
+            }
+        }
+    }
+
+    // Signal 4: PageRank (target score as global importance proxy)
+    if target_pagerank > 0.0 {
+        for score in scores.values_mut() {
+            score.pagerank_score = target_pagerank;
+            if !score.signals.contains(&"pagerank".to_string()) {
+                score.signals.push("pagerank".to_string());
+            }
+        }
+    }
+
+    // Signal 5: Bridge proximity (per-file score from co-changer distance)
+    for (path, proximity) in &bridge_scores {
+        let entry = scores
+            .entry(path.clone())
+            .or_insert_with(|| MultiSignalScore {
+                path: path.clone(),
+                ..Default::default()
+            });
+        entry.bridge_score = *proximity;
+        entry.signals.push("bridge".to_string());
+    }
+
+    // ===== Compute combined score with fusion weights =====
+    for score in scores.values_mut() {
+        score.combined_score = weights.structural * score.structural_score
+            + weights.co_change * score.co_change_score
+            + weights.knowledge * score.knowledge_score
+            + weights.pagerank * score.pagerank_score
+            + weights.bridge * score.bridge_score;
+    }
+
+    // ===== Build ranked list =====
+    let mut scored_items: Vec<(MultiSignalScore, f64)> = scores
+        .into_values()
+        .map(|s| {
+            let combined = s.combined_score;
+            (s, combined)
+        })
+        .collect();
+    scored_items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let total = scored_items.len();
+    let ranked = into_ranked(scored_items, total);
+
+    let timing_ms = start.elapsed().as_millis() as u64;
+
+    Ok(Json(MultiSignalImpact {
+        target,
+        profile_used: profile_name,
+        weights,
+        ranked,
+        timing_ms,
     }))
 }
 
@@ -1440,6 +1771,7 @@ pub async fn get_code_communities(
                 "label": c.community_label,
                 "size": c.file_count,
                 "key_files": c.key_files,
+                "unique_fingerprints": c.unique_fingerprints,
             })
         })
         .collect();
@@ -1544,6 +1876,36 @@ pub async fn get_code_health(
         Err(_) => serde_json::json!(null),
     };
 
+    // Multi-signal impact score (average combined score of top-10 files by PageRank)
+    let avg_impact_score = state
+        .orchestrator
+        .neo4j()
+        .get_avg_multi_signal_score(project.id)
+        .await
+        .unwrap_or(0.0);
+
+    // Topology violations (best-effort — returns null if no rules defined)
+    let topology_violations = match state
+        .orchestrator
+        .neo4j()
+        .check_topology_rules(&project.id.to_string())
+        .await
+    {
+        Ok(violations) => {
+            let errors = violations
+                .iter()
+                .filter(|v| v.severity == crate::graph::models::TopologySeverity::Error)
+                .count();
+            let warnings = violations.len() - errors;
+            serde_json::json!({
+                "errors": errors,
+                "warnings": warnings,
+                "total": violations.len(),
+            })
+        }
+        Err(_) => serde_json::json!(null),
+    };
+
     Ok(Json(serde_json::json!({
         "god_functions": god_functions_json,
         "god_function_count": god_functions_json.len(),
@@ -1557,6 +1919,8 @@ pub async fn get_code_health(
         "knowledge_gaps": knowledge_gaps,
         "risk_assessment": risk_assessment,
         "neural_metrics": neural_metrics,
+        "avg_impact_score": avg_impact_score,
+        "topology_violations": topology_violations,
     })))
 }
 
@@ -2145,6 +2509,1340 @@ pub async fn enrich_communities(
     })))
 }
 
+// ============================================================================
+// Bridge Subgraph (Plan 1 — GraIL)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct BridgeQuery {
+    /// Source node path (file or function)
+    pub source: String,
+    /// Target node path (file or function)
+    pub target: String,
+    /// Project slug (required for scoping)
+    pub project_slug: String,
+    /// Max BFS hops (default 3, clamped 1-5)
+    pub max_hops: Option<u32>,
+    /// Number of bottleneck nodes to return (default 3)
+    pub top_bottlenecks: Option<usize>,
+}
+
+/// GET /api/code/bridge — Extract the GraIL-style bridge subgraph between two nodes.
+///
+/// Returns an enriched `BridgeSubgraph` with double-radius labeling,
+/// density, and bottleneck detection (Brandes' betweenness centrality).
+pub async fn get_bridge(
+    State(state): State<OrchestratorState>,
+    Query(params): Query<BridgeQuery>,
+) -> Result<Json<crate::graph::models::BridgeSubgraph>, AppError> {
+    let neo4j = state.orchestrator.neo4j();
+
+    // Resolve project
+    let project = neo4j
+        .get_project_by_slug(&params.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", params.project_slug)))?;
+    let project_id_str = project.id.to_string();
+
+    // Resolve paths (relative → absolute)
+    let root = crate::expand_tilde(&project.root_path);
+    let root = root.trim_end_matches('/');
+    let source = if !params.source.starts_with('/') {
+        format!("{}/{}", root, &params.source)
+    } else {
+        params.source.clone()
+    };
+    let target = if !params.target.starts_with('/') {
+        format!("{}/{}", root, &params.target)
+    } else {
+        params.target.clone()
+    };
+
+    let max_hops = params.max_hops.unwrap_or(3).clamp(1, 5);
+    let top_n = params.top_bottlenecks.unwrap_or(3);
+
+    // Default relation types for bridge extraction
+    let relation_types: Vec<String> = vec![
+        "IMPORTS".to_string(),
+        "CALLS".to_string(),
+        "CO_CHANGED".to_string(),
+        "EXTENDS".to_string(),
+        "IMPLEMENTS".to_string(),
+    ];
+
+    // Phase 1: Extract raw bridge subgraph from Neo4j
+    let (raw_nodes, raw_edges) = neo4j
+        .find_bridge_subgraph(&source, &target, max_hops, &relation_types, &project_id_str)
+        .await?;
+
+    if raw_nodes.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "No bridge subgraph found between '{}' and '{}' within {} hops",
+            source, target, max_hops
+        )));
+    }
+
+    // Phase 2: Enrich with algorithms (double-radius labeling + bottleneck detection)
+    let node_paths: Vec<String> = raw_nodes.iter().map(|n| n.path.clone()).collect();
+    let edge_tuples: Vec<(String, String)> = raw_edges
+        .iter()
+        .map(|e| (e.from_path.clone(), e.to_path.clone()))
+        .collect();
+
+    let labels =
+        crate::graph::algorithms::double_radius_label(&node_paths, &edge_tuples, &source, &target);
+    let bottleneck_nodes = crate::graph::algorithms::find_bottleneck_nodes(
+        &node_paths,
+        &edge_tuples,
+        &source,
+        &target,
+        top_n,
+    );
+    let density =
+        crate::graph::algorithms::compute_bridge_density(raw_nodes.len(), raw_edges.len());
+
+    // Phase 3: Assemble enriched BridgeSubgraph
+    let nodes: Vec<crate::graph::models::BridgeNode> = raw_nodes
+        .iter()
+        .map(|n| {
+            let (d_s, d_t) = labels.get(&n.path).copied().unwrap_or((u32::MAX, u32::MAX));
+            crate::graph::models::BridgeNode {
+                path: n.path.clone(),
+                node_type: n.node_type.clone(),
+                distance_to_source: d_s,
+                distance_to_target: d_t,
+            }
+        })
+        .collect();
+
+    let edges: Vec<crate::graph::models::BridgeEdge> = raw_edges
+        .iter()
+        .map(|e| crate::graph::models::BridgeEdge {
+            from_path: e.from_path.clone(),
+            to_path: e.to_path.clone(),
+            rel_type: e.rel_type.clone(),
+        })
+        .collect();
+
+    let result = crate::graph::models::BridgeSubgraph {
+        source,
+        target,
+        nodes,
+        edges,
+        density,
+        bottleneck_nodes,
+    };
+
+    // Phase 4: Hebbian synapse reinforcement (fire-and-forget)
+    // "Notes that bridge together, wire together"
+    // Collect notes linked to bridge nodes and reinforce synapses between them.
+    let bridge_node_paths: Vec<String> = node_paths;
+    let neo4j_bg = state.orchestrator.neo4j_arc();
+    tokio::spawn(async move {
+        let mut all_note_ids: Vec<uuid::Uuid> = Vec::new();
+        for path in &bridge_node_paths {
+            if let Ok(notes) = neo4j_bg
+                .get_notes_for_entity(&crate::notes::EntityType::File, path)
+                .await
+            {
+                for note in &notes {
+                    all_note_ids.push(note.id);
+                }
+            }
+        }
+        all_note_ids.sort();
+        all_note_ids.dedup();
+        if all_note_ids.len() >= 2 {
+            match neo4j_bg.reinforce_synapses(&all_note_ids, 0.05).await {
+                Ok(count) => {
+                    tracing::debug!(
+                        reinforced = count,
+                        bridge_nodes = bridge_node_paths.len(),
+                        notes = all_note_ids.len(),
+                        "Bridge subgraph: Hebbian synapse reinforcement completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Bridge subgraph: Hebbian synapse reinforcement failed"
+                    );
+                }
+            }
+        }
+    });
+
+    Ok(Json(result))
+}
+
+// ============================================================================
+// Topological Firewall (Plan 3 — GraIL)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct TopologyCheckQuery {
+    /// Project slug (required for scoping)
+    pub project_slug: String,
+}
+
+/// GET /api/code/topology/check — Check all topology rules for violations.
+///
+/// Returns a `TopologyCheckResult` with all violations found, sorted by
+/// violation_score descending (most dangerous first).
+pub async fn check_topology(
+    State(state): State<OrchestratorState>,
+    Query(params): Query<TopologyCheckQuery>,
+) -> Result<Json<crate::graph::models::TopologyCheckResult>, AppError> {
+    let start = std::time::Instant::now();
+    let neo4j = state.orchestrator.neo4j();
+
+    // Resolve project
+    let project = neo4j
+        .get_project_by_slug(&params.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", params.project_slug)))?;
+    let project_id_str = project.id.to_string();
+
+    // Count rules
+    let rules = neo4j.list_topology_rules(&project_id_str).await?;
+    let rules_checked = rules.len();
+
+    // Check all rules
+    let violations = neo4j.check_topology_rules(&project_id_str).await?;
+
+    let error_count = violations
+        .iter()
+        .filter(|v| v.severity == crate::graph::models::TopologySeverity::Error)
+        .count();
+    let warning_count = violations
+        .iter()
+        .filter(|v| v.severity == crate::graph::models::TopologySeverity::Warning)
+        .count();
+
+    let timing_ms = start.elapsed().as_millis() as u64;
+
+    Ok(Json(crate::graph::models::TopologyCheckResult {
+        project_id: project_id_str,
+        rules_checked,
+        violations,
+        error_count,
+        warning_count,
+        timing_ms,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct TopologyRulesQuery {
+    /// Project slug (required for scoping)
+    pub project_slug: String,
+}
+
+/// GET /api/code/topology/rules — List all topology rules for a project.
+pub async fn list_topology_rules(
+    State(state): State<OrchestratorState>,
+    Query(params): Query<TopologyRulesQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let neo4j = state.orchestrator.neo4j();
+
+    let project = neo4j
+        .get_project_by_slug(&params.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", params.project_slug)))?;
+
+    let rules = neo4j.list_topology_rules(&project.id.to_string()).await?;
+
+    Ok(Json(serde_json::json!({
+        "rules": rules,
+        "total": rules.len(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateTopologyRuleBody {
+    /// Project slug
+    pub project_slug: String,
+    /// Rule type: must_not_import, must_not_call, max_distance, max_fan_out, no_circular
+    pub rule_type: String,
+    /// Glob pattern for source files (e.g. "src/neo4j/**")
+    pub source_pattern: String,
+    /// Glob pattern for target files (e.g. "src/api/**") — optional for MaxFanOut, NoCircular
+    pub target_pattern: Option<String>,
+    /// Numeric threshold (for MaxDistance, MaxFanOut)
+    pub threshold: Option<u32>,
+    /// Severity: "error" or "warning" (default: "error")
+    pub severity: Option<String>,
+    /// Human-readable description
+    pub description: String,
+}
+
+/// POST /api/code/topology/rules — Create a new topology rule.
+pub async fn create_topology_rule(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<CreateTopologyRuleBody>,
+) -> Result<Json<crate::graph::models::TopologyRule>, AppError> {
+    let neo4j = state.orchestrator.neo4j();
+
+    let project = neo4j
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", body.project_slug)))?;
+
+    let rule_type = crate::graph::models::TopologyRuleType::from_str_loose(&body.rule_type)
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Invalid rule_type: {}. Valid: must_not_import, must_not_call, max_distance, max_fan_out, no_circular",
+                body.rule_type
+            ))
+        })?;
+
+    let severity = body
+        .severity
+        .as_deref()
+        .map(crate::graph::models::TopologySeverity::from_str_loose)
+        .unwrap_or(Some(crate::graph::models::TopologySeverity::Error))
+        .ok_or_else(|| {
+            AppError::BadRequest("Invalid severity. Valid: error, warning".to_string())
+        })?;
+
+    let rule = crate::graph::models::TopologyRule {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_id: project.id.to_string(),
+        rule_type,
+        source_pattern: body.source_pattern,
+        target_pattern: body.target_pattern,
+        threshold: body.threshold,
+        severity,
+        description: body.description,
+    };
+
+    neo4j.create_topology_rule(&rule).await?;
+
+    Ok(Json(rule))
+}
+
+/// DELETE /api/code/topology/rules/:rule_id — Delete a topology rule.
+pub async fn delete_topology_rule(
+    State(state): State<OrchestratorState>,
+    Path(rule_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let neo4j = state.orchestrator.neo4j();
+    neo4j.delete_topology_rule(&rule_id).await?;
+    Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+// ============================================================================
+// Topology: Single-file check (real-time pre-write validation)
+// ============================================================================
+
+/// Request body for checking a single file's imports against topology rules.
+#[derive(Deserialize)]
+pub struct CheckFileTopologyBody {
+    pub project_slug: String,
+    pub file_path: String,
+    pub new_imports: Vec<String>,
+}
+
+/// POST /api/code/topology/check-file
+///
+/// Real-time pre-write validation: checks if the given `new_imports` for
+/// `file_path` would violate any MustNotImport/MustNotCall topology rules.
+/// Designed for <50ms response time (in-memory regex matching after 1 Neo4j query).
+pub async fn check_file_topology(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<CheckFileTopologyBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    let violations = state
+        .orchestrator
+        .neo4j()
+        .check_file_topology(&project.id.to_string(), &body.file_path, &body.new_imports)
+        .await?;
+
+    Ok(Json(serde_json::json!({
+        "file_path": body.file_path,
+        "violations": violations,
+        "violation_count": violations.len(),
+        "has_violations": !violations.is_empty(),
+    })))
+}
+
+// ============================================================================
+// Structural DNA: Profile & Twins
+// ============================================================================
+
+/// Request body for structural DNA endpoints.
+#[derive(Deserialize)]
+pub struct StructuralDnaBody {
+    pub project_slug: String,
+    pub file_path: String,
+    /// Max results for find_structural_twins (default 10)
+    pub top_n: Option<usize>,
+}
+
+/// POST /api/code/structural-profile
+///
+/// Returns the structural DNA vector for a single file within a project.
+/// The DNA is a K-dimensional distance vector from the file node to K anchor
+/// nodes (highest PageRank), normalized to [0,1]. Requires prior analytics run.
+pub async fn get_structural_profile(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<StructuralDnaBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    // Resolve relative path to absolute
+    let resolved_path = if !body.file_path.starts_with('/') {
+        let expanded = crate::expand_tilde(&project.root_path);
+        format!("{}/{}", expanded.trim_end_matches('/'), &body.file_path)
+    } else {
+        body.file_path.clone()
+    };
+
+    let all_dna = state
+        .orchestrator
+        .neo4j()
+        .get_project_structural_dna(&project.id.to_string())
+        .await?;
+
+    // Find the target file's DNA
+    let target_dna = all_dna
+        .iter()
+        .find(|(path, _)| path == &resolved_path)
+        .map(|(_, dna)| dna.clone());
+
+    match target_dna {
+        Some(dna) => Ok(Json(serde_json::json!({
+            "file_path": body.file_path,
+            "dna": dna,
+            "dimensions": dna.len(),
+            "has_dna": true,
+        }))),
+        None => Ok(Json(serde_json::json!({
+            "file_path": body.file_path,
+            "dna": null,
+            "dimensions": 0,
+            "has_dna": false,
+            "hint": "Run project sync + analytics first to compute structural DNA",
+        }))),
+    }
+}
+
+/// POST /api/code/structural-twins
+///
+/// Finds files structurally similar to a target file using cosine similarity
+/// on their structural DNA vectors. Returns ranked results sorted by
+/// descending similarity.
+pub async fn find_structural_twins(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<StructuralDnaBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::cosine_similarity;
+
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    // Resolve relative path to absolute
+    let resolved_path = if !body.file_path.starts_with('/') {
+        let expanded = crate::expand_tilde(&project.root_path);
+        format!("{}/{}", expanded.trim_end_matches('/'), &body.file_path)
+    } else {
+        body.file_path.clone()
+    };
+
+    let all_dna = state
+        .orchestrator
+        .neo4j()
+        .get_project_structural_dna(&project.id.to_string())
+        .await?;
+
+    if all_dna.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "file_path": body.file_path,
+            "twins": [],
+            "total": 0,
+            "hint": "No structural DNA found. Run project sync + analytics first.",
+        })));
+    }
+
+    // Build HashMap for find_structural_twins
+    let dna_map: std::collections::HashMap<String, Vec<f64>> = all_dna.into_iter().collect();
+
+    let target_dna = match dna_map.get(&resolved_path) {
+        Some(dna) => dna,
+        None => {
+            return Ok(Json(serde_json::json!({
+                "file_path": body.file_path,
+                "twins": [],
+                "total": 0,
+                "hint": format!("File '{}' has no structural DNA", body.file_path),
+            })));
+        }
+    };
+
+    let top_n = body.top_n.unwrap_or(10);
+
+    // Compute similarities (skip self)
+    let mut twins: Vec<serde_json::Value> = dna_map
+        .iter()
+        .filter(|(path, _)| path.as_str() != body.file_path)
+        .map(|(path, dna)| {
+            let similarity = cosine_similarity(target_dna, dna);
+            serde_json::json!({
+                "file_path": path,
+                "similarity": similarity,
+            })
+        })
+        .collect();
+
+    // Sort by descending similarity
+    twins.sort_by(|a, b| {
+        let sa = a["similarity"].as_f64().unwrap_or(0.0);
+        let sb = b["similarity"].as_f64().unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total = twins.len();
+    twins.truncate(top_n);
+
+    Ok(Json(serde_json::json!({
+        "file_path": body.file_path,
+        "twins": twins,
+        "total": total,
+        "returned": twins.len(),
+    })))
+}
+
+/// Request body for DNA clustering endpoint.
+#[derive(Deserialize)]
+pub struct ClusterDnaBody {
+    pub project_slug: String,
+    /// Number of clusters (default 5)
+    pub n_clusters: Option<usize>,
+}
+
+/// POST /api/code/structural-clusters
+///
+/// Performs K-means clustering on structural DNA vectors to discover
+/// architectural roles (handlers, models, services, etc.) within a project.
+pub async fn cluster_dna(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<ClusterDnaBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::cluster_dna_vectors;
+
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    let all_dna = state
+        .orchestrator
+        .neo4j()
+        .get_project_structural_dna(&project.id.to_string())
+        .await?;
+
+    if all_dna.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "clusters": [],
+            "total_files": 0,
+            "hint": "No structural DNA found. Run project sync + analytics first.",
+        })));
+    }
+
+    let dna_map: std::collections::HashMap<String, Vec<f64>> = all_dna.into_iter().collect();
+
+    let n_clusters = body.n_clusters.unwrap_or(5).min(dna_map.len());
+    let clusters = cluster_dna_vectors(&dna_map, n_clusters);
+
+    let total_files: usize = clusters.iter().map(|c| c.members.len()).sum();
+
+    Ok(Json(serde_json::json!({
+        "clusters": clusters,
+        "total_files": total_files,
+        "n_clusters": clusters.len(),
+    })))
+}
+
+/// Request body for cross-project structural twins.
+#[derive(Deserialize)]
+pub struct CrossProjectTwinsBody {
+    pub workspace_slug: String,
+    pub source_project_slug: String,
+    pub file_path: String,
+    /// Max results (default 10)
+    pub top_n: Option<usize>,
+}
+
+/// POST /api/code/structural-twins/cross-project
+///
+/// Finds structurally similar files across other projects in the same workspace.
+/// Enables knowledge transfer: notes from a twin file in project B can be
+/// suggested for the source file in project A.
+pub async fn find_cross_project_twins(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<CrossProjectTwinsBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::cosine_similarity;
+
+    let neo4j = state.orchestrator.neo4j();
+
+    // Resolve workspace
+    let workspace = neo4j
+        .get_workspace_by_slug(&body.workspace_slug)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Workspace '{}' not found", body.workspace_slug))
+        })?;
+
+    // Get all projects in workspace
+    let projects = neo4j.list_workspace_projects(workspace.id).await?;
+
+    // Resolve source project
+    let source_project = neo4j
+        .get_project_by_slug(&body.source_project_slug)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Project '{}' not found", body.source_project_slug))
+        })?;
+
+    // Resolve relative path to absolute
+    let resolved_path = if !body.file_path.starts_with('/') {
+        let expanded = crate::expand_tilde(&source_project.root_path);
+        format!("{}/{}", expanded.trim_end_matches('/'), &body.file_path)
+    } else {
+        body.file_path.clone()
+    };
+
+    // Get source file DNA
+    let source_dna_all = neo4j
+        .get_project_structural_dna(&source_project.id.to_string())
+        .await?;
+
+    let source_dna_map: std::collections::HashMap<String, Vec<f64>> =
+        source_dna_all.into_iter().collect();
+
+    let source_dna = match source_dna_map.get(&resolved_path) {
+        Some(dna) => dna,
+        None => {
+            return Ok(Json(serde_json::json!({
+                "file_path": body.file_path,
+                "twins": [],
+                "total": 0,
+                "hint": format!("File '{}' has no structural DNA in project '{}'", body.file_path, body.source_project_slug),
+            })));
+        }
+    };
+
+    let top_n = body.top_n.unwrap_or(10);
+    let mut all_twins: Vec<serde_json::Value> = Vec::new();
+
+    // Search DNA in all other projects
+    for project in &projects {
+        if project.id == source_project.id {
+            continue; // Skip source project
+        }
+
+        let other_dna = neo4j
+            .get_project_structural_dna(&project.id.to_string())
+            .await?;
+
+        for (path, dna) in &other_dna {
+            // DNA dimensions must match
+            if dna.len() != source_dna.len() {
+                continue;
+            }
+            let sim = cosine_similarity(source_dna, dna);
+            all_twins.push(serde_json::json!({
+                "file_path": path,
+                "project_slug": project.slug,
+                "project_name": project.name,
+                "similarity": sim,
+            }));
+        }
+    }
+
+    // Sort by descending similarity
+    all_twins.sort_by(|a, b| {
+        let sa = a["similarity"].as_f64().unwrap_or(0.0);
+        let sb = b["similarity"].as_f64().unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total = all_twins.len();
+    all_twins.truncate(top_n);
+
+    Ok(Json(serde_json::json!({
+        "file_path": body.file_path,
+        "source_project": body.source_project_slug,
+        "twins": all_twins,
+        "total": total,
+        "returned": all_twins.len(),
+    })))
+}
+
+// ============================================================================
+// Link Prediction
+// ============================================================================
+
+/// Request body for predict_missing_links endpoint.
+#[derive(Debug, Deserialize)]
+pub struct PredictMissingLinksBody {
+    pub project_slug: String,
+    pub top_n: Option<usize>,
+    pub min_plausibility: Option<f64>,
+}
+
+/// POST /api/code/predict-links
+///
+/// Suggests the top-N most plausible missing links in the project's file graph.
+/// Uses 5 signals (Jaccard, co-change, proximity, Adamic-Adar, DNA similarity)
+/// to score candidate pairs at distance 2-3 that are not directly connected.
+pub async fn predict_missing_links(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<PredictMissingLinksBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::{extract_co_change_data, suggest_missing_links};
+    use crate::graph::extraction::GraphExtractor;
+
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    let project_id = project.id.to_string();
+
+    // Get structural DNA (optional, used as signal if available)
+    let all_dna = state
+        .orchestrator
+        .neo4j()
+        .get_project_structural_dna(&project_id)
+        .await?;
+
+    let dna_map: std::collections::HashMap<String, Vec<f64>> = all_dna.into_iter().collect();
+    let dna_ref = if dna_map.is_empty() {
+        None
+    } else {
+        Some(&dna_map)
+    };
+
+    // Extract file graph
+    let extractor = GraphExtractor::new(state.orchestrator.neo4j_arc());
+    let graph = extractor.extract_file_graph(project.id).await?;
+
+    // Extract co-change data from CoChanged edges
+    let co_change = extract_co_change_data(&graph);
+
+    let top_n = body.top_n.unwrap_or(20);
+    let min_plausibility = body.min_plausibility.unwrap_or(0.0);
+
+    let predictions = suggest_missing_links(&graph, &co_change, dna_ref, top_n, min_plausibility);
+
+    Ok(Json(serde_json::json!({
+        "predictions": predictions,
+        "total": predictions.len(),
+        "top_n": top_n,
+        "min_plausibility": min_plausibility,
+    })))
+}
+
+/// Request body for check_link_plausibility endpoint.
+#[derive(Debug, Deserialize)]
+pub struct CheckLinkPlausibilityBody {
+    pub project_slug: String,
+    pub source: String,
+    pub target: String,
+}
+
+/// POST /api/code/link-plausibility
+///
+/// Checks how plausible a specific link between two nodes would be.
+/// Returns a single LinkPrediction with the combined score and individual
+/// signal values (Jaccard, co-change, proximity, Adamic-Adar, DNA similarity).
+pub async fn check_link_plausibility(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<CheckLinkPlausibilityBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::{extract_co_change_data, link_plausibility};
+    use crate::graph::extraction::GraphExtractor;
+
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    let project_id = project.id.to_string();
+
+    // Get structural DNA (optional)
+    let all_dna = state
+        .orchestrator
+        .neo4j()
+        .get_project_structural_dna(&project_id)
+        .await?;
+
+    let dna_map: std::collections::HashMap<String, Vec<f64>> = all_dna.into_iter().collect();
+    let dna_ref = if dna_map.is_empty() {
+        None
+    } else {
+        Some(&dna_map)
+    };
+
+    // Extract file graph
+    let extractor = GraphExtractor::new(state.orchestrator.neo4j_arc());
+    let graph = extractor.extract_file_graph(project.id).await?;
+
+    // Look up source and target in the graph
+    let source_idx = graph.id_to_index.get(&body.source).ok_or_else(|| {
+        AppError::NotFound(format!("Source node '{}' not found in graph", body.source))
+    })?;
+    let target_idx = graph.id_to_index.get(&body.target).ok_or_else(|| {
+        AppError::NotFound(format!("Target node '{}' not found in graph", body.target))
+    })?;
+
+    // Extract co-change data
+    let co_change = extract_co_change_data(&graph);
+
+    let prediction = link_plausibility(&graph, *source_idx, *target_idx, &co_change, dna_ref);
+
+    Ok(Json(serde_json::json!(prediction)))
+}
+
+// ============================================================================
+// Stress Testing (Plan 5)
+// ============================================================================
+
+/// Request body for stress_test_node endpoint.
+#[derive(Debug, Deserialize)]
+pub struct StressTestNodeBody {
+    pub project_slug: String,
+    pub target_id: String,
+}
+
+/// POST /api/code/stress-test-node
+///
+/// Simulates removing a node from the project's file graph and measures the
+/// impact: orphaned nodes, blast radius, resilience score, etc.
+pub async fn stress_test_node(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<StressTestNodeBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::stress_test_node_removal;
+    use crate::graph::extraction::GraphExtractor;
+
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    let extractor = GraphExtractor::new(state.orchestrator.neo4j_arc());
+    let graph = extractor.extract_file_graph(project.id).await?;
+
+    let result = stress_test_node_removal(&graph, &body.target_id).ok_or_else(|| {
+        AppError::NotFound(format!(
+            "Target node '{}' not found in graph",
+            body.target_id
+        ))
+    })?;
+
+    Ok(Json(serde_json::json!(result)))
+}
+
+/// Request body for stress_test_edge endpoint.
+#[derive(Debug, Deserialize)]
+pub struct StressTestEdgeBody {
+    pub project_slug: String,
+    pub from_id: String,
+    pub to_id: String,
+}
+
+/// POST /api/code/stress-test-edge
+///
+/// Simulates removing an edge from the project's file graph and measures
+/// whether it is a bridge (increases connected components).
+pub async fn stress_test_edge(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<StressTestEdgeBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::stress_test_edge_removal;
+    use crate::graph::extraction::GraphExtractor;
+
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    let extractor = GraphExtractor::new(state.orchestrator.neo4j_arc());
+    let graph = extractor.extract_file_graph(project.id).await?;
+
+    let result = stress_test_edge_removal(&graph, &body.from_id, &body.to_id).ok_or_else(|| {
+        AppError::NotFound(format!(
+            "Edge '{}' -> '{}' not found in graph",
+            body.from_id, body.to_id
+        ))
+    })?;
+
+    Ok(Json(serde_json::json!(result)))
+}
+
+/// Request body for stress_test_cascade endpoint.
+#[derive(Debug, Deserialize)]
+pub struct StressTestCascadeBody {
+    pub project_slug: String,
+    pub target_id: String,
+    pub max_iterations: Option<usize>,
+}
+
+/// POST /api/code/stress-test-cascade
+///
+/// Simulates a cascading removal starting from a target node: removes the node,
+/// then iteratively removes nodes whose incoming dependencies are all removed,
+/// until no new orphans appear or max_iterations is reached.
+pub async fn stress_test_cascade(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<StressTestCascadeBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::stress_test_cascade;
+    use crate::graph::extraction::GraphExtractor;
+
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    let extractor = GraphExtractor::new(state.orchestrator.neo4j_arc());
+    let graph = extractor.extract_file_graph(project.id).await?;
+
+    let max_iterations = body.max_iterations.unwrap_or(10);
+
+    let result = stress_test_cascade(&graph, &body.target_id, max_iterations).ok_or_else(|| {
+        AppError::NotFound(format!(
+            "Target node '{}' not found in graph",
+            body.target_id
+        ))
+    })?;
+
+    Ok(Json(serde_json::json!(result)))
+}
+
+/// Request body for find_bridges endpoint.
+#[derive(Debug, Deserialize)]
+pub struct FindBridgesBody {
+    pub project_slug: String,
+}
+
+/// POST /api/code/find-bridges
+///
+/// Finds all bridge edges in the project's file graph. A bridge is an edge
+/// whose removal increases the number of connected components.
+pub async fn find_bridges(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<FindBridgesBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::graph::algorithms::find_bridges;
+    use crate::graph::extraction::GraphExtractor;
+
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&body.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project '{}' not found", body.project_slug)))?;
+
+    let extractor = GraphExtractor::new(state.orchestrator.neo4j_arc());
+    let graph = extractor.extract_file_graph(project.id).await?;
+
+    let bridges = find_bridges(&graph);
+
+    Ok(Json(serde_json::json!({
+        "bridges": bridges,
+        "total": bridges.len(),
+    })))
+}
+
+// ============================================================================
+// Context Cards (GraIL Plan 8)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct ContextCardQuery {
+    /// File path (absolute or relative — resolved with project root)
+    pub path: String,
+    /// Project slug (required for scoping)
+    pub project_slug: String,
+}
+
+/// Get pre-computed context card for a single file.
+///
+/// Returns the cached cc_* properties from Neo4j. If `cc_version == -1`,
+/// the card is stale and should be refreshed via analytics re-run.
+pub async fn get_context_card(
+    State(state): State<OrchestratorState>,
+    Query(query): Query<ContextCardQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&query.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", query.project_slug)))?;
+
+    // Resolve relative path to absolute
+    let path = if !query.path.starts_with('/') {
+        let expanded = crate::expand_tilde(&project.root_path);
+        format!("{}/{}", expanded.trim_end_matches('/'), &query.path)
+    } else {
+        query.path.clone()
+    };
+
+    let card = state
+        .orchestrator
+        .neo4j()
+        .get_context_card(&path, &project.id.to_string())
+        .await?;
+
+    match card {
+        Some(c) => Ok(Json(serde_json::to_value(c).unwrap_or_default())),
+        None => Ok(Json(serde_json::json!({
+            "path": path,
+            "error": "no_context_card",
+            "message": "No context card found. Run analytics (sync project) to compute context cards."
+        }))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RefreshContextCardsBody {
+    /// Project slug (required)
+    pub project_slug: String,
+}
+
+/// Force refresh of all context cards for a project by triggering analytics.
+///
+/// This triggers the analytics debouncer which will re-run compute_all
+/// and persist updated context cards.
+pub async fn refresh_context_cards(
+    State(state): State<OrchestratorState>,
+    Json(query): Json<RefreshContextCardsBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&query.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", query.project_slug)))?;
+
+    // Trigger analytics debouncer (will recompute all cards)
+    state.orchestrator.analytics_debouncer().trigger(project.id);
+
+    Ok(Json(serde_json::json!({
+        "status": "triggered",
+        "project_slug": query.project_slug,
+        "message": "Analytics refresh triggered. Context cards will be recomputed shortly."
+    })))
+}
+
+// ============================================================================
+// WL Fingerprint & Isomorphic Groups (Plan 7)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct FingerprintQuery {
+    /// File path (required)
+    pub path: String,
+    /// Project slug (required)
+    pub project_slug: String,
+}
+
+/// Get the WL subgraph fingerprint (hash) for a single file.
+/// Reads from the pre-computed cc_wl_hash stored via context cards.
+pub async fn get_fingerprint(
+    State(state): State<OrchestratorState>,
+    Query(query): Query<FingerprintQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&query.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", query.project_slug)))?;
+
+    // Resolve relative path
+    let path = if !query.path.starts_with('/') {
+        let expanded = crate::expand_tilde(&project.root_path);
+        format!("{}/{}", expanded.trim_end_matches('/'), &query.path)
+    } else {
+        query.path.clone()
+    };
+
+    let card = state
+        .orchestrator
+        .neo4j()
+        .get_context_card(&path, &project.id.to_string())
+        .await?;
+
+    match card {
+        Some(c) => Ok(Json(serde_json::json!({
+            "path": c.path,
+            "wl_hash": c.cc_wl_hash,
+            "structural_dna": c.cc_structural_dna,
+            "project_slug": query.project_slug,
+        }))),
+        None => Ok(Json(serde_json::json!({
+            "path": path,
+            "wl_hash": null,
+            "message": "No fingerprint computed yet. Run analytics or refresh context cards.",
+            "project_slug": query.project_slug,
+        }))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct IsomorphicQuery {
+    /// Project slug (required)
+    pub project_slug: String,
+    /// Minimum group size (default: 2)
+    pub min_group_size: Option<usize>,
+}
+
+/// Find groups of files with identical WL subgraph hash (isomorphic neighborhoods).
+pub async fn find_isomorphic(
+    State(state): State<OrchestratorState>,
+    Query(query): Query<IsomorphicQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&query.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", query.project_slug)))?;
+
+    let min_size = query.min_group_size.unwrap_or(2);
+    let groups = state
+        .orchestrator
+        .neo4j()
+        .find_isomorphic_groups(&project.id.to_string(), min_size)
+        .await?;
+
+    Ok(Json(serde_json::json!({
+        "project_slug": query.project_slug,
+        "min_group_size": min_size,
+        "groups_count": groups.len(),
+        "groups": groups,
+    })))
+}
+
+// ============================================================================
+// Structural Templates
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct StructuralTemplateQuery {
+    pub project_slug: String,
+    /// Minimum number of files sharing the same WL hash to form a template (default: 3)
+    pub min_occurrences: Option<usize>,
+}
+
+/// GET /api/code/structural-templates — Suggest reusable structural templates
+/// from isomorphic groups (files sharing the same WL hash fingerprint).
+pub async fn suggest_structural_templates(
+    State(state): State<OrchestratorState>,
+    Query(query): Query<StructuralTemplateQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project_by_slug(&query.project_slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", query.project_slug)))?;
+
+    let min_occ = query.min_occurrences.unwrap_or(3);
+
+    // Get isomorphic groups with min_size = min_occurrences
+    let groups = state
+        .orchestrator
+        .neo4j()
+        .find_isomorphic_groups(&project.id.to_string(), min_occ)
+        .await?;
+
+    // For each group, try to derive a description from common path patterns and structural DNA
+    let mut templates: Vec<crate::graph::models::StructuralTemplate> = Vec::new();
+
+    for group in groups {
+        // Derive description from common path pattern
+        let description = derive_pattern_description(&group.members);
+
+        // Find common DNA prefix from context cards
+        let exemplars: Vec<String> = group.members.iter().take(5).cloned().collect();
+
+        // Try to get context cards for DNA info — convert Vec<f64> to string for comparison
+        let mut dna_strings: Vec<String> = Vec::new();
+        for path in exemplars.iter().take(3) {
+            if let Ok(Some(card)) = state
+                .orchestrator
+                .neo4j()
+                .get_context_card(path, &project.id.to_string())
+                .await
+            {
+                if !card.cc_structural_dna.is_empty() {
+                    // Format DNA as compact string: "0.12,0.45,0.78,..."
+                    let dna_str: String = card
+                        .cc_structural_dna
+                        .iter()
+                        .map(|v| format!("{:.2}", v))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    dna_strings.push(dna_str);
+                }
+            }
+        }
+
+        let common_dna_prefix = if dna_strings.len() >= 2 {
+            find_common_prefix(&dna_strings)
+        } else {
+            None
+        };
+
+        templates.push(crate::graph::models::StructuralTemplate {
+            wl_hash: group.wl_hash,
+            occurrences: group.size,
+            exemplars,
+            description,
+            common_dna_prefix,
+        });
+    }
+
+    // Sort by occurrences descending
+    templates.sort_by(|a, b| b.occurrences.cmp(&a.occurrences));
+
+    Ok(Json(serde_json::json!({
+        "project_slug": query.project_slug,
+        "min_occurrences": min_occ,
+        "template_count": templates.len(),
+        "templates": templates,
+    })))
+}
+
+/// Derive a human-readable description from file path patterns
+fn derive_pattern_description(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return "Unknown pattern".to_string();
+    }
+
+    // Find common directory
+    let parts: Vec<Vec<&str>> = paths.iter().map(|p| p.split('/').collect()).collect();
+
+    // Find common prefix length
+    let min_len = parts.iter().map(|p| p.len()).min().unwrap_or(0);
+    let mut common_depth = 0;
+    for i in 0..min_len {
+        if parts.iter().all(|p| p[i] == parts[0][i]) {
+            common_depth = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Find common file suffixes (e.g., all end in "_handler.rs", "_test.rs")
+    let filenames: Vec<&str> = paths.iter().filter_map(|p| p.rsplit('/').next()).collect();
+    let common_suffix = find_common_filename_suffix(&filenames);
+
+    let dir_prefix = if common_depth > 0 {
+        parts[0][..common_depth].join("/")
+    } else {
+        String::new()
+    };
+
+    match (dir_prefix.is_empty(), common_suffix.is_empty()) {
+        (false, false) => format!(
+            "Files in {dir_prefix}/ matching *{common_suffix} ({} files)",
+            paths.len()
+        ),
+        (false, true) => format!(
+            "Files in {dir_prefix}/ with identical topology ({} files)",
+            paths.len()
+        ),
+        (true, false) => format!(
+            "Files matching *{common_suffix} with identical topology ({} files)",
+            paths.len()
+        ),
+        (true, true) => format!("Structurally identical files ({} files)", paths.len()),
+    }
+}
+
+/// Find common suffix in filenames (e.g., "_handler.rs", "_test.rs")
+fn find_common_filename_suffix(names: &[&str]) -> String {
+    if names.len() < 2 {
+        return String::new();
+    }
+    let first: Vec<char> = names[0].chars().rev().collect();
+    let mut common_len = 0;
+    for i in 0..first.len() {
+        if names.iter().all(|n| {
+            let chars: Vec<char> = n.chars().rev().collect();
+            chars.len() > i && chars[i] == first[i]
+        }) {
+            common_len = i + 1;
+        } else {
+            break;
+        }
+    }
+    if common_len > 3 {
+        // Only return if meaningful
+        first[..common_len].iter().rev().collect()
+    } else {
+        String::new()
+    }
+}
+
+/// Find common prefix among DNA strings
+fn find_common_prefix(values: &[String]) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+    let first = &values[0];
+    let mut prefix_len = first.len();
+    for v in &values[1..] {
+        prefix_len = prefix_len.min(v.len());
+        for (i, (a, b)) in first.chars().zip(v.chars()).enumerate() {
+            if a != b {
+                prefix_len = prefix_len.min(i);
+                break;
+            }
+        }
+    }
+    if prefix_len > 5 {
+        Some(first[..prefix_len].to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2270,8 +3968,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.is_array());
-        assert_eq!(json.as_array().unwrap().len(), 0);
+        // Response is now a CodeSearchResult wrapper (Plan 10)
+        assert!(json.is_object());
+        assert!(json["hits"].is_array());
+        assert_eq!(json["hits"].as_array().unwrap().len(), 0);
+        assert!(json["ranked"]["items"].is_array());
     }
 
     #[tokio::test]
@@ -2287,14 +3988,16 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.is_array());
-        let results = json.as_array().unwrap();
+        // Response is now a CodeSearchResult wrapper (Plan 10)
+        let results = json["hits"].as_array().unwrap();
         assert!(!results.is_empty());
         // Verify SearchHit<CodeDocument> shape: { document, score }
         let first = &results[0];
         assert!(first["document"].is_object());
         assert!(first["score"].is_number());
         assert_eq!(first["document"]["path"], "src/main.rs");
+        // Verify ranked view is present
+        assert!(json["ranked"]["items"].is_array());
     }
 
     #[tokio::test]
@@ -2312,7 +4015,7 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let results = json.as_array().unwrap();
+        let results = json["hits"].as_array().unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0]["document"]["language"], "rust");
     }
@@ -2332,7 +4035,7 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json.as_array().unwrap().len(), 0);
+        assert_eq!(json["hits"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -2533,7 +4236,7 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let results = json.as_array().unwrap();
+        let results = json["hits"].as_array().unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0]["document"]["path"], "src/main.rs");
     }
@@ -3563,8 +5266,12 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.is_array());
-        assert_eq!(json.as_array().unwrap().len(), 0);
+        // Response is now a FindReferencesResult wrapper (Plan 10)
+        assert!(json.is_object());
+        assert!(json["references"].is_array());
+        assert_eq!(json["references"].as_array().unwrap().len(), 0);
+        assert!(json["ranked"]["items"].is_array());
+        assert_eq!(json["ranked"]["items"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -3634,11 +5341,18 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let refs = json.as_array().unwrap();
+        // Response is now a FindReferencesResult wrapper (Plan 10)
+        let refs = json["references"].as_array().unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0]["file_path"], "src/caller.rs");
         assert_eq!(refs[0]["reference_type"], "call");
         assert_eq!(refs[0]["line"], 5);
+        // Verify ranked view is also present
+        let ranked_items = json["ranked"]["items"].as_array().unwrap();
+        assert_eq!(ranked_items.len(), 1);
+        assert_eq!(ranked_items[0]["file_path"], "src/caller.rs");
+        assert_eq!(ranked_items[0]["rank"], 1);
+        assert_eq!(ranked_items[0]["score"], 1.0); // call type → 1.0
     }
 
     #[tokio::test]

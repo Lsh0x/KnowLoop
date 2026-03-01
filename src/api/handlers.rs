@@ -964,6 +964,7 @@ pub async fn sync_directory(
 
         // Spawn auto-anchor in background: link notes to newly synced files
         let neo4j = state.orchestrator.neo4j_arc();
+        let neo4j_topo = neo4j.clone();
         tokio::spawn(async move {
             match crate::skills::activation::auto_anchor_notes_for_project(neo4j.as_ref(), pid)
                 .await
@@ -979,6 +980,37 @@ pub async fn sync_directory(
                 Ok(_) => {} // no new anchors needed
                 Err(e) => {
                     tracing::warn!(%pid, "Post-sync auto-anchor failed: {}", e);
+                }
+            }
+        });
+
+        // Spawn topology firewall check in background: detect violations and create gotcha notes
+        tokio::spawn(async move {
+            match crate::orchestrator::topology_hook::check_topology_post_sync(neo4j_topo, pid)
+                .await
+            {
+                Ok(r) if r.notes_created > 0 => {
+                    tracing::info!(
+                        %pid,
+                        violations = r.violations_found,
+                        new_notes = r.notes_created,
+                        skipped = r.already_captured,
+                        "Post-sync topology check: {} violations, {} new gotcha notes",
+                        r.violations_found,
+                        r.notes_created,
+                    );
+                }
+                Ok(r) if r.violations_found > 0 => {
+                    tracing::debug!(
+                        %pid,
+                        violations = r.violations_found,
+                        "Post-sync topology check: {} violations (all already captured)",
+                        r.violations_found,
+                    );
+                }
+                Ok(_) => {} // no violations
+                Err(e) => {
+                    tracing::warn!(%pid, "Post-sync topology check failed: {}", e);
                 }
             }
         });
@@ -1526,6 +1558,23 @@ pub async fn create_commit(
         let file_paths: Vec<String> = files_changed.iter().map(|f| f.path.clone()).collect();
         let paths_for_boost = file_paths.clone();
 
+        // Side-effect 0: Invalidate context cards for changed files + 1-hop neighbors
+        let paths_for_invalidate = file_paths.clone();
+        let orch_invalidate = orchestrator.clone();
+        let pid_str = pid.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = orch_invalidate
+                .neo4j()
+                .invalidate_context_cards(&paths_for_invalidate, &pid_str)
+                .await
+            {
+                tracing::warn!(
+                    project_id = %pid,
+                    "Failed to invalidate context cards: {}", e
+                );
+            }
+        });
+
         // Side-effect 1 & 2: Incremental sync + analytics debounce
         let orch2 = orchestrator.clone();
         tokio::spawn(async move {
@@ -2071,6 +2120,84 @@ pub async fn bootstrap_knowledge_fabric(
 }
 
 // ============================================================================
+// Isomorphic Synapse Reinforcement
+// ============================================================================
+
+/// POST /api/admin/reinforce-isomorphic — Reinforce synapses between notes linked to
+/// structurally isomorphic files (same WL hash).
+pub async fn reinforce_isomorphic_synapses(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<FabricProjectRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project_id = body.project_id;
+
+    // Verify project exists
+    let _project = state
+        .orchestrator
+        .neo4j()
+        .get_project(project_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", project_id)))?;
+
+    let neo4j = state.orchestrator.neo4j();
+
+    // Find isomorphic groups (files sharing same WL hash)
+    let groups = neo4j
+        .find_isomorphic_groups(&project_id.to_string(), 2)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let mut total_groups = 0usize;
+    let mut total_synapses_reinforced = 0u64;
+    let synapse_boost = 0.05;
+
+    for group in &groups {
+        // Collect note IDs linked to files in this group
+        let mut note_ids: Vec<uuid::Uuid> = Vec::new();
+        let entity_type = crate::notes::models::EntityType::File;
+        for file_path in &group.members {
+            if let Ok(notes) = neo4j.get_notes_for_entity(&entity_type, file_path).await {
+                for note in notes {
+                    if !note_ids.contains(&note.id) {
+                        note_ids.push(note.id);
+                    }
+                }
+            }
+        }
+
+        // Reinforce synapses if >= 2 notes
+        if note_ids.len() >= 2 {
+            // Boost energy for each note
+            for nid in &note_ids {
+                let _ = neo4j.boost_energy(*nid, 0.1).await;
+            }
+            // Reinforce synapses between all note pairs
+            match neo4j.reinforce_synapses(&note_ids, synapse_boost).await {
+                Ok(count) => {
+                    total_synapses_reinforced += count as u64;
+                    total_groups += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        wl_hash = group.wl_hash,
+                        error = %e,
+                        "Failed to reinforce synapses for isomorphic group"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "isomorphic_groups_found": groups.len(),
+        "groups_with_notes": total_groups,
+        "synapses_reinforced": total_synapses_reinforced,
+        "synapse_boost": synapse_boost,
+    })))
+}
+
+// ============================================================================
 // Skill Detection
 // ============================================================================
 
@@ -2078,6 +2205,10 @@ pub async fn bootstrap_knowledge_fabric(
 #[derive(Deserialize)]
 pub struct DetectSkillsRequest {
     pub project_id: Uuid,
+    /// When true, delete all existing skills before re-detecting from scratch.
+    /// Default: false (incremental deduplication via Jaccard overlap).
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Run the full skill detection pipeline for a project
@@ -2095,6 +2226,25 @@ pub async fn detect_skills(
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", project_id)))?;
+
+    // Force mode: delete all existing skills before re-detecting from scratch
+    if body.force {
+        let existing_skills = state
+            .orchestrator
+            .neo4j()
+            .get_skills_for_project(project_id)
+            .await
+            .map_err(AppError::Internal)?;
+        for skill in &existing_skills {
+            let _ = state.orchestrator.neo4j().delete_skill(skill.id).await;
+        }
+        tracing::info!(
+            %project_id,
+            deleted = existing_skills.len(),
+            "Force mode: deleted {} existing skills before re-detection",
+            existing_skills.len()
+        );
+    }
 
     let config = crate::skills::SkillDetectionConfig::default();
     let start = std::time::Instant::now();

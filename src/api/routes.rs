@@ -9,6 +9,7 @@ use super::code_handlers;
 use super::handlers::{self, OrchestratorState};
 use super::hook_handlers;
 use super::note_handlers;
+use super::profile_handlers;
 use super::project_handlers;
 use super::skill_handlers;
 use super::workspace_handlers;
@@ -477,6 +478,11 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route("/api/code/callgraph", get(code_handlers::get_call_graph))
         // Analyze impact of changes
         .route("/api/code/impact", get(code_handlers::analyze_impact))
+        // Multi-signal impact fusion (Plan 4)
+        .route(
+            "/api/code/impact/multi",
+            get(code_handlers::analyze_impact_v2),
+        )
         // Get architecture overview
         .route(
             "/api/code/architecture",
@@ -572,6 +578,95 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/code/communities/enrich",
             post(code_handlers::enrich_communities),
+        )
+        // ================================================================
+        // Bridge Subgraph (GraIL)
+        // ================================================================
+        .route("/api/code/bridge", get(code_handlers::get_bridge))
+        // ================================================================
+        // Topological Firewall (GraIL Plan 3)
+        // ================================================================
+        .route(
+            "/api/code/topology/check",
+            get(code_handlers::check_topology),
+        )
+        .route(
+            "/api/code/topology/rules",
+            get(code_handlers::list_topology_rules).post(code_handlers::create_topology_rule),
+        )
+        .route(
+            "/api/code/topology/rules/{rule_id}",
+            delete(code_handlers::delete_topology_rule),
+        )
+        .route(
+            "/api/code/topology/check-file",
+            post(code_handlers::check_file_topology),
+        )
+        // ================================================================
+        // Structural DNA
+        // ================================================================
+        .route(
+            "/api/code/structural-profile",
+            post(code_handlers::get_structural_profile),
+        )
+        .route(
+            "/api/code/structural-twins",
+            post(code_handlers::find_structural_twins),
+        )
+        .route(
+            "/api/code/structural-clusters",
+            post(code_handlers::cluster_dna),
+        )
+        .route(
+            "/api/code/structural-twins/cross-project",
+            post(code_handlers::find_cross_project_twins),
+        )
+        // ================================================================
+        // Link Prediction
+        // ================================================================
+        .route(
+            "/api/code/predict-links",
+            post(code_handlers::predict_missing_links),
+        )
+        .route(
+            "/api/code/link-plausibility",
+            post(code_handlers::check_link_plausibility),
+        )
+        // ================================================================
+        // Stress Testing
+        // ================================================================
+        .route(
+            "/api/code/stress-test-node",
+            post(code_handlers::stress_test_node),
+        )
+        .route(
+            "/api/code/stress-test-edge",
+            post(code_handlers::stress_test_edge),
+        )
+        .route(
+            "/api/code/stress-test-cascade",
+            post(code_handlers::stress_test_cascade),
+        )
+        .route("/api/code/find-bridges", post(code_handlers::find_bridges))
+        // ================================================================
+        // Context Cards (GraIL Plan 8)
+        // ================================================================
+        .route(
+            "/api/code/context-card",
+            get(code_handlers::get_context_card),
+        )
+        .route(
+            "/api/code/context-cards/refresh",
+            post(code_handlers::refresh_context_cards),
+        )
+        // ================================================================
+        // WL Fingerprint & Isomorphic Groups (GraIL Plan 7)
+        // ================================================================
+        .route("/api/code/fingerprint", get(code_handlers::get_fingerprint))
+        .route("/api/code/isomorphic", get(code_handlers::find_isomorphic))
+        .route(
+            "/api/code/structural-templates",
+            get(code_handlers::suggest_structural_templates),
         )
         // ================================================================
         // Implementation Planner
@@ -674,6 +769,19 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/entities/{entity_type}/{entity_id}/notes",
             get(note_handlers::get_entity_notes),
+        )
+        // ================================================================
+        // Analysis Profiles
+        // ================================================================
+        .route(
+            "/api/analysis-profiles",
+            get(profile_handlers::list_analysis_profiles)
+                .post(profile_handlers::create_analysis_profile),
+        )
+        .route(
+            "/api/analysis-profiles/{profile_id}",
+            get(profile_handlers::get_analysis_profile)
+                .delete(profile_handlers::delete_analysis_profile),
         )
         // ================================================================
         // Skills (Neural Skills)
@@ -792,6 +900,10 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/admin/bootstrap-knowledge-fabric",
             post(handlers::bootstrap_knowledge_fabric),
+        )
+        .route(
+            "/api/admin/reinforce-isomorphic",
+            post(handlers::reinforce_isomorphic_synapses),
         )
         .route("/api/admin/detect-skills", post(handlers::detect_skills))
         .route(

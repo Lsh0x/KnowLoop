@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::algorithms::compute_all;
+use super::algorithms::{compute_all, compute_context_cards, structural_dna, wl_subgraph_hash_all};
 use super::enrichment::{CommunityEnricher, NoopCommunityEnricher};
 use super::extraction::GraphExtractor;
 use super::models::{AnalyticsConfig, FabricWeights, GraphAnalytics};
@@ -159,8 +159,77 @@ impl AnalyticsEngine for GraphAnalyticsEngine {
             );
         }
 
-        // 3. Persist
+        // 3. Persist base analytics
         self.writer.write_analytics(&analytics, &graph).await?;
+
+        // 4. Compute and persist Structural DNA (depends on PageRank scores)
+        let pr_scores: std::collections::HashMap<String, f64> = analytics
+            .metrics
+            .iter()
+            .map(|(id, m)| (id.clone(), m.pagerank))
+            .collect();
+
+        let mut dna_map_for_cards = std::collections::HashMap::new();
+
+        match structural_dna(&graph, &pr_scores, 10) {
+            Ok(dna_map) if !dna_map.is_empty() => {
+                if let Err(e) = self.writer.write_structural_dna(&dna_map, &graph).await {
+                    tracing::warn!(
+                        "Failed to persist structural DNA for project {}: {}",
+                        project_id,
+                        e
+                    );
+                } else {
+                    tracing::debug!(
+                        project_id = %project_id,
+                        dna_count = dna_map.len(),
+                        "Structural DNA computed and persisted"
+                    );
+                }
+                dna_map_for_cards = dna_map;
+            }
+            Ok(_) => {
+                tracing::debug!("Structural DNA: empty graph, skipping");
+            }
+            Err(e) => {
+                tracing::warn!("Structural DNA computation failed: {}", e);
+            }
+        }
+
+        // 5. Compute WL subgraph hashes (Plan 7)
+        let wl_hashes = match wl_subgraph_hash_all(&graph, 2, 3) {
+            Ok(hashes) => {
+                tracing::debug!(
+                    project_id = %project_id,
+                    wl_count = hashes.len(),
+                    "WL subgraph hashes computed (R=2, iterations=3)"
+                );
+                hashes
+            }
+            Err(e) => {
+                tracing::warn!("WL subgraph hash computation failed: {}", e);
+                std::collections::HashMap::new()
+            }
+        };
+
+        // 6. Compute and persist Context Cards (aggregates analytics + DNA + WL hash)
+        let context_cards =
+            compute_context_cards(&graph, &analytics, &dna_map_for_cards, &wl_hashes);
+        if !context_cards.is_empty() {
+            if let Err(e) = self.store.batch_save_context_cards(&context_cards).await {
+                tracing::warn!(
+                    "Failed to persist context cards for project {}: {}",
+                    project_id,
+                    e
+                );
+            } else {
+                tracing::debug!(
+                    project_id = %project_id,
+                    cards_count = context_cards.len(),
+                    "Context cards computed and persisted"
+                );
+            }
+        }
 
         Ok(analytics)
     }

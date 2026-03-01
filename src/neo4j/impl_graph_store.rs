@@ -430,6 +430,14 @@ impl GraphStore for Neo4jClient {
         self.count_project_files(project_id).await
     }
 
+    async fn invalidate_computed_properties(
+        &self,
+        project_id: Uuid,
+        paths: &[String],
+    ) -> anyhow::Result<u64> {
+        self.invalidate_computed_properties(project_id, paths).await
+    }
+
     // ========================================================================
     // Symbol operations
     // ========================================================================
@@ -2199,6 +2207,28 @@ impl GraphStore for Neo4jClient {
         self.batch_update_fabric_file_analytics(updates).await
     }
 
+    async fn batch_update_structural_dna(
+        &self,
+        updates: &[crate::graph::models::StructuralDnaUpdate],
+    ) -> anyhow::Result<()> {
+        self.batch_update_structural_dna(updates).await
+    }
+
+    async fn write_predicted_links(
+        &self,
+        project_id: &str,
+        links: &[crate::graph::models::LinkPrediction],
+    ) -> anyhow::Result<()> {
+        self.write_predicted_links(project_id, links).await
+    }
+
+    async fn get_project_structural_dna(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<(String, Vec<f64>)>> {
+        self.get_project_structural_dna(project_id).await
+    }
+
     async fn get_project_synapse_edges(
         &self,
         project_id: Uuid,
@@ -2291,6 +2321,113 @@ impl GraphStore for Neo4jClient {
 
     async fn delete_project_processes(&self, project_id: Uuid) -> anyhow::Result<u64> {
         self.delete_project_processes(project_id).await
+    }
+
+    // ========================================================================
+    // Analysis Profile operations (delegates to neo4j/profile.rs)
+    // ========================================================================
+
+    async fn create_analysis_profile(
+        &self,
+        profile: &crate::graph::models::AnalysisProfile,
+    ) -> anyhow::Result<()> {
+        self.create_analysis_profile(profile).await
+    }
+
+    async fn list_analysis_profiles(
+        &self,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::graph::models::AnalysisProfile>> {
+        self.list_analysis_profiles(project_id).await
+    }
+
+    async fn get_analysis_profile(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::graph::models::AnalysisProfile>> {
+        self.get_analysis_profile(id).await
+    }
+
+    async fn delete_analysis_profile(&self, id: &str) -> anyhow::Result<()> {
+        self.delete_analysis_profile(id).await
+    }
+
+    async fn get_knowledge_density(
+        &self,
+        file_path: &str,
+        project_id: &str,
+    ) -> anyhow::Result<f64> {
+        self.get_knowledge_density(file_path, project_id).await
+    }
+
+    async fn get_node_pagerank(&self, file_path: &str, project_id: &str) -> anyhow::Result<f64> {
+        self.get_node_pagerank(file_path, project_id).await
+    }
+
+    async fn get_bridge_proximity(
+        &self,
+        file_path: &str,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<(String, f64)>> {
+        self.get_bridge_proximity(file_path, project_id).await
+    }
+
+    async fn find_bridge_subgraph(
+        &self,
+        source: &str,
+        target: &str,
+        max_hops: u32,
+        relation_types: &[String],
+        project_id: &str,
+    ) -> anyhow::Result<(
+        Vec<crate::graph::models::BridgeRawNode>,
+        Vec<crate::graph::models::BridgeRawEdge>,
+    )> {
+        self.find_bridge_subgraph(source, target, max_hops, relation_types, project_id)
+            .await
+    }
+
+    async fn get_avg_multi_signal_score(&self, project_id: Uuid) -> anyhow::Result<f64> {
+        self.get_avg_multi_signal_score(project_id).await
+    }
+
+    // ========================================================================
+    // Topology Firewall (delegates to neo4j/topology.rs)
+    // ========================================================================
+
+    async fn create_topology_rule(
+        &self,
+        rule: &crate::graph::models::TopologyRule,
+    ) -> anyhow::Result<()> {
+        self.create_topology_rule(rule).await
+    }
+
+    async fn list_topology_rules(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<crate::graph::models::TopologyRule>> {
+        self.list_topology_rules(project_id).await
+    }
+
+    async fn delete_topology_rule(&self, rule_id: &str) -> anyhow::Result<()> {
+        self.delete_topology_rule(rule_id).await
+    }
+
+    async fn check_topology_rules(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<crate::graph::models::TopologyViolation>> {
+        self.check_topology_rules(project_id).await
+    }
+
+    async fn check_file_topology(
+        &self,
+        project_id: &str,
+        file_path: &str,
+        new_imports: &[String],
+    ) -> anyhow::Result<Vec<crate::graph::models::TopologyViolation>> {
+        self.check_file_topology(project_id, file_path, new_imports)
+            .await
     }
 
     async fn health_check(&self) -> anyhow::Result<bool> {
@@ -2404,5 +2541,49 @@ impl GraphStore for Neo4jClient {
         min_weight: f64,
     ) -> anyhow::Result<Vec<(String, String, f64)>> {
         self.get_synapse_graph(project_id, min_weight).await
+    }
+
+    async fn batch_save_context_cards(
+        &self,
+        cards: &[crate::graph::models::ContextCard],
+    ) -> anyhow::Result<()> {
+        self.batch_save_context_cards(cards).await
+    }
+
+    async fn invalidate_context_cards(
+        &self,
+        paths: &[String],
+        project_id: &str,
+    ) -> anyhow::Result<()> {
+        self.invalidate_context_cards(paths, project_id).await
+    }
+
+    async fn get_context_card(
+        &self,
+        path: &str,
+        project_id: &str,
+    ) -> anyhow::Result<Option<crate::graph::models::ContextCard>> {
+        self.get_context_card(path, project_id).await
+    }
+
+    async fn get_context_cards_batch(
+        &self,
+        paths: &[String],
+        project_id: &str,
+    ) -> anyhow::Result<Vec<crate::graph::models::ContextCard>> {
+        self.get_context_cards_batch(paths, project_id).await
+    }
+
+    async fn find_isomorphic_groups(
+        &self,
+        project_id: &str,
+        min_group_size: usize,
+    ) -> anyhow::Result<Vec<crate::graph::models::IsomorphicGroup>> {
+        self.find_isomorphic_groups(project_id, min_group_size)
+            .await
+    }
+
+    async fn has_context_cards(&self, project_id: &str) -> anyhow::Result<bool> {
+        self.has_context_cards(project_id).await
     }
 }

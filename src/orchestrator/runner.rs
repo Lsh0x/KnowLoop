@@ -703,7 +703,7 @@ impl Orchestrator {
         let analytics_computed_at = project.analytics_computed_at;
         let last_synced = project.last_synced;
 
-        let is_stale = match (analytics_computed_at, last_synced) {
+        let mut is_stale = match (analytics_computed_at, last_synced) {
             // Never computed → stale
             (None, _) => true,
             // Computed but never synced → not stale (edge case, analytics exist but no code)
@@ -711,6 +711,34 @@ impl Orchestrator {
             // Both exist → stale if synced after analytics
             (Some(analytics), Some(synced)) => synced > analytics,
         };
+
+        // Even if timestamps say "fresh", check if GraIL analytics (context cards,
+        // structural DNA, WL hash) have ever been computed. Projects that were
+        // last analyzed before GraIL was deployed will have analytics_computed_at
+        // set but no cc_version on any file.
+        if !is_stale {
+            match self
+                .neo4j()
+                .has_context_cards(&project_id.to_string())
+                .await
+            {
+                Ok(false) => {
+                    tracing::info!(
+                        project_id = %project_id,
+                        "Analytics timestamps fresh but no GraIL context cards found — marking stale"
+                    );
+                    is_stale = true;
+                }
+                Ok(true) => {} // GraIL analytics present, truly fresh
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to check context cards for {}: {}, assuming fresh",
+                        project_id,
+                        e
+                    );
+                }
+            }
+        }
 
         let analytics_age = analytics_computed_at.map(|at| {
             let now = chrono::Utc::now();
@@ -6718,7 +6746,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_staleness_computed_after_sync_is_fresh() {
-        let orch = Orchestrator::new(mock_app_state()).await.unwrap();
+        use crate::neo4j::mock::MockGraphStore;
+        let mock_store = Arc::new(MockGraphStore::new());
+        // Simulate that GraIL context cards have been computed
+        mock_store
+            .mock_has_context_cards
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let state = mock_app_state_with_graph(mock_store);
+        let orch = Orchestrator::new(state).await.unwrap();
         let mut project = test_project();
         project.last_synced = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
         orch.create_project(&project).await.unwrap();
@@ -6756,6 +6791,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_staleness_fresh_timestamps_but_no_context_cards_is_stale() {
+        // Simulates a pre-GraIL project: analytics_computed_at is set (from before
+        // GraIL was deployed) but no files have cc_version — should be stale.
+        let orch = Orchestrator::new(mock_app_state()).await.unwrap();
+        let mut project = test_project();
+        project.last_synced = Some(chrono::Utc::now() - chrono::Duration::seconds(60));
+        project.analytics_computed_at = Some(chrono::Utc::now()); // set AFTER sync → timestamps say fresh
+        orch.create_project(&project).await.unwrap();
+
+        // MockGraphStore.has_context_cards() always returns false → should detect as stale
+        let report = orch.check_analytics_staleness(project.id).await.unwrap();
+        assert!(
+            report.is_stale,
+            "Fresh timestamps but no context cards (pre-GraIL) should be stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_staleness_never_computed_remains_stale() {
+        // analytics_computed_at = None → stale regardless of context cards check
+        let orch = Orchestrator::new(mock_app_state()).await.unwrap();
+        let mut project = test_project();
+        project.last_synced = Some(chrono::Utc::now());
+        orch.create_project(&project).await.unwrap();
+
+        let report = orch.check_analytics_staleness(project.id).await.unwrap();
+        assert!(
+            report.is_stale,
+            "Never computed should be stale (context cards check not even needed)"
+        );
+        assert!(report.analytics_computed_at.is_none());
+    }
+
+    #[tokio::test]
     async fn test_staleness_nonexistent_project_errors() {
         let orch = Orchestrator::new(mock_app_state()).await.unwrap();
         let result = orch.check_analytics_staleness(Uuid::new_v4()).await;
@@ -6764,7 +6833,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_stale_projects_returns_only_stale() {
-        let orch = Orchestrator::new(mock_app_state()).await.unwrap();
+        use crate::neo4j::mock::MockGraphStore;
+        let mock_store = Arc::new(MockGraphStore::new());
+        // The "fresh" project needs context cards to pass the GraIL check
+        mock_store
+            .mock_has_context_cards
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let state = mock_app_state_with_graph(mock_store);
+        let orch = Orchestrator::new(state).await.unwrap();
 
         // Project 1: never computed → stale
         let p1 = test_project_named("stale-project");

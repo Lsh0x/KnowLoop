@@ -162,6 +162,40 @@ impl Neo4jClient {
         Ok(client)
     }
 
+    // ========================================================================
+    // Query performance monitoring
+    // ========================================================================
+
+    /// Log a warning if a Neo4j query exceeded the slow query threshold.
+    ///
+    /// Usage:
+    /// ```rust,ignore
+    /// let start = std::time::Instant::now();
+    /// let mut result = self.graph.execute(q).await?;
+    /// self.log_slow_query("my_query_label", start);
+    /// ```
+    ///
+    /// Threshold is configurable via env `NEO4J_SLOW_QUERY_THRESHOLD_MS` (default 100ms).
+    pub fn log_slow_query(&self, label: &str, start: std::time::Instant) {
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+
+        let threshold: u64 = std::env::var("NEO4J_SLOW_QUERY_THRESHOLD_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+
+        if elapsed_ms > threshold {
+            tracing::warn!(
+                query_ms = elapsed_ms,
+                threshold_ms = threshold,
+                label,
+                "Slow Neo4j query detected"
+            );
+        } else {
+            tracing::trace!(query_ms = elapsed_ms, label, "Neo4j query completed");
+        }
+    }
+
     /// Initialize the graph schema with constraints and indexes
     async fn init_schema(&self) -> Result<()> {
         let constraints = vec![
@@ -207,6 +241,12 @@ impl Neo4jClient {
             "CREATE CONSTRAINT user_id IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
             // RefreshToken constraint
             "CREATE CONSTRAINT refresh_token_hash IF NOT EXISTS FOR (rt:RefreshToken) REQUIRE rt.token_hash IS UNIQUE",
+            // GraIL — TopologyRule constraint
+            "CREATE CONSTRAINT topology_rule_id IF NOT EXISTS FOR (r:TopologyRule) REQUIRE r.id IS UNIQUE",
+            // GraIL — PredictedLink constraint
+            "CREATE CONSTRAINT predicted_link_id IF NOT EXISTS FOR (l:PredictedLink) REQUIRE l.id IS UNIQUE",
+            // GraIL — AnalysisProfile constraint
+            "CREATE CONSTRAINT analysis_profile_id IF NOT EXISTS FOR (p:AnalysisProfile) REQUIRE p.id IS UNIQUE",
         ];
 
         let indexes = vec![
@@ -295,6 +335,21 @@ impl Neo4jClient {
             "CREATE INDEX skill_status IF NOT EXISTS FOR (s:Skill) ON (s.status)",
             "CREATE INDEX skill_project_status IF NOT EXISTS FOR (s:Skill) ON (s.project_id, s.status)",
             "CREATE INDEX skill_energy IF NOT EXISTS FOR (s:Skill) ON (s.energy)",
+            // GraIL — File computed properties (Plans 2, 7, 8)
+            "CREATE INDEX file_wl_hash IF NOT EXISTS FOR (f:File) ON (f.wl_hash)",
+            "CREATE INDEX file_cc_version IF NOT EXISTS FOR (f:File) ON (f.cc_version)",
+            "CREATE INDEX file_cc_pagerank IF NOT EXISTS FOR (f:File) ON (f.cc_pagerank)",
+            "CREATE INDEX file_cc_risk_score IF NOT EXISTS FOR (f:File) ON (f.cc_risk_score)",
+            // GraIL — TopologyRule indexes (Plan 3)
+            "CREATE INDEX topology_rule_project IF NOT EXISTS FOR (r:TopologyRule) ON (r.project_id)",
+            "CREATE INDEX topology_rule_project_type IF NOT EXISTS FOR (r:TopologyRule) ON (r.project_id, r.rule_type)",
+            // GraIL — PredictedLink indexes (Plan 9)
+            "CREATE INDEX predicted_link_project IF NOT EXISTS FOR (l:PredictedLink) ON (l.project_id)",
+            "CREATE INDEX predicted_link_plausibility IF NOT EXISTS FOR (l:PredictedLink) ON (l.project_id, l.plausibility)",
+            // GraIL — AnalysisProfile indexes (Plan 6)
+            "CREATE INDEX analysis_profile_project IF NOT EXISTS FOR (p:AnalysisProfile) ON (p.project_id)",
+            // GraIL — PREDICTED_LINK relationship index (Plan 9)
+            "CREATE INDEX predicted_link_rel_idx IF NOT EXISTS FOR ()-[r:PREDICTED_LINK]->() ON (r.plausibility)",
         ];
 
         // Vector indexes (require Neo4j 5.13+ — gracefully skip if not supported)
@@ -371,6 +426,46 @@ impl Neo4jClient {
             }
         }
 
+        // Seed built-in analysis profiles (idempotent via MERGE on id)
+        {
+            use crate::graph::models::builtin_profiles;
+            let profiles = builtin_profiles();
+            for profile in &profiles {
+                let edge_weights_json =
+                    serde_json::to_string(&profile.edge_weights).unwrap_or_default();
+                let fusion_weights_json =
+                    serde_json::to_string(&profile.fusion_weights).unwrap_or_default();
+                let q = neo4rs::query(
+                    r#"
+                    MERGE (ap:AnalysisProfile {id: $id})
+                    SET ap.name = $name,
+                        ap.description = $description,
+                        ap.project_id = "",
+                        ap.edge_weights_json = $edge_weights_json,
+                        ap.fusion_weights_json = $fusion_weights_json,
+                        ap.is_builtin = true
+                    "#,
+                )
+                .param("id", profile.id.clone())
+                .param("name", profile.name.clone())
+                .param(
+                    "description",
+                    profile.description.clone().unwrap_or_default(),
+                )
+                .param("edge_weights_json", edge_weights_json)
+                .param("fusion_weights_json", fusion_weights_json);
+
+                if let Err(e) = self.graph.run(q).await {
+                    tracing::warn!(
+                        name = %profile.name,
+                        "Failed to seed built-in profile (non-fatal): {}",
+                        e
+                    );
+                }
+            }
+            tracing::info!(count = profiles.len(), "Seeded built-in analysis profiles");
+        }
+
         // Vector indexes — optional, don't fail startup if Neo4j doesn't support them
         for vi in vector_indexes {
             if let Err(e) = self.graph.run(query(vi)).await {
@@ -412,6 +507,10 @@ impl Neo4jClient {
             "feature_graph_id",
             "user_id",
             "refresh_token_hash",
+            // GraIL node labels
+            "topology_rule_id",
+            "predicted_link_id",
+            "analysis_profile_id",
         ];
         match self
             .graph

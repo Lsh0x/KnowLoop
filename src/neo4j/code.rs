@@ -3748,4 +3748,396 @@ impl Neo4jClient {
             Ok(0)
         }
     }
+
+    // ========================================================================
+    // GraIL — Computed property invalidation
+    // ========================================================================
+
+    /// Invalidate pre-computed GraIL properties on changed files and their neighbors.
+    ///
+    /// Two-phase invalidation:
+    /// 1. Direct files: mark all 3 versions as stale (cc, DNA, WL)
+    /// 2. Neighbors: 1-hop gets cc_version=-1, up to 2-hop gets wl_hash_version=-1
+    ///
+    /// Returns total number of File nodes marked as stale.
+    pub async fn invalidate_computed_properties(
+        &self,
+        project_id: Uuid,
+        paths: &[String],
+    ) -> anyhow::Result<u64> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+
+        let pid = project_id.to_string();
+        let path_list: Vec<String> = paths.to_vec();
+
+        // Phase 1: Mark directly changed files — all 3 versions stale
+        let q1 = neo4rs::query(
+            r#"
+            UNWIND $paths AS p
+            MATCH (f:File {path: p, project_id: $pid})
+            SET f.cc_version = -1,
+                f.structural_dna_version = -1,
+                f.wl_hash_version = -1,
+                f.invalidated_at = datetime()
+            RETURN count(f) AS updated
+            "#,
+        )
+        .param("paths", path_list.clone())
+        .param("pid", pid.clone());
+
+        let start1 = std::time::Instant::now();
+        let mut result1 = self.graph.execute(q1).await?;
+        self.log_slow_query("invalidate_direct", start1);
+        let direct_count: i64 = if let Some(row) = result1.next().await? {
+            row.get("updated")?
+        } else {
+            0
+        };
+
+        // Phase 2: Mark 1-hop neighbors — cc_version + wl_hash_version stale
+        let q2 = neo4rs::query(
+            r#"
+            UNWIND $paths AS p
+            MATCH (f:File {path: p, project_id: $pid})-[*1]-(neighbor:File)
+            WHERE neighbor.project_id = $pid AND NOT neighbor.path IN $paths
+            SET neighbor.cc_version = -1,
+                neighbor.wl_hash_version = -1,
+                neighbor.invalidated_at = datetime()
+            RETURN count(DISTINCT neighbor) AS updated
+            "#,
+        )
+        .param("paths", path_list.clone())
+        .param("pid", pid.clone());
+
+        let start2 = std::time::Instant::now();
+        let mut result2 = self.graph.execute(q2).await?;
+        self.log_slow_query("invalidate_1hop", start2);
+        let hop1_count: i64 = if let Some(row) = result2.next().await? {
+            row.get("updated")?
+        } else {
+            0
+        };
+
+        // Phase 3: Mark 2-hop only neighbors — wl_hash_version stale only
+        let q3 = neo4rs::query(
+            r#"
+            UNWIND $paths AS p
+            MATCH (f:File {path: p, project_id: $pid})-[*2]-(neighbor:File)
+            WHERE neighbor.project_id = $pid
+              AND NOT neighbor.path IN $paths
+              AND neighbor.cc_version <> -1
+            SET neighbor.wl_hash_version = -1,
+                neighbor.invalidated_at = datetime()
+            RETURN count(DISTINCT neighbor) AS updated
+            "#,
+        )
+        .param("paths", path_list)
+        .param("pid", pid);
+
+        let start3 = std::time::Instant::now();
+        let mut result3 = self.graph.execute(q3).await?;
+        self.log_slow_query("invalidate_2hop", start3);
+        let hop2_count: i64 = if let Some(row) = result3.next().await? {
+            row.get("updated")?
+        } else {
+            0
+        };
+
+        let total = (direct_count + hop1_count + hop2_count) as u64;
+        tracing::info!(
+            direct = direct_count,
+            hop1 = hop1_count,
+            hop2 = hop2_count,
+            total = total,
+            "Invalidated GraIL computed properties"
+        );
+
+        Ok(total)
+    }
+
+    // ========================================================================
+    // Multi-signal impact queries
+    // ========================================================================
+
+    /// Knowledge density for a file: (notes LINKED_TO + decisions AFFECTS) / max across project.
+    /// Returns f64 in [0, 1]. 0.0 if no knowledge exists in the project.
+    pub async fn get_knowledge_density(&self, file_path: &str, project_id: &str) -> Result<f64> {
+        let q = query(
+            r#"
+            // Count notes + decisions linked to the target file
+            MATCH (f:File {path: $path})<-[:CONTAINS]-(p:Project {id: $project_id})
+            OPTIONAL MATCH (n:Note)-[:LINKED_TO]->(f)
+            WHERE n.status IN ['active', 'needs_review']
+            WITH f, p, count(DISTINCT n) AS note_count
+            OPTIONAL MATCH (d:Decision)-[:AFFECTS]->(f)
+            WHERE d.status IN ['proposed', 'accepted']
+            WITH f, p, note_count + count(DISTINCT d) AS target_count
+
+            // Find max knowledge count across all files in the project
+            OPTIONAL MATCH (p)-[:CONTAINS]->(af:File)
+            OPTIONAL MATCH (an:Note)-[:LINKED_TO]->(af)
+            WHERE an.status IN ['active', 'needs_review']
+            WITH f, target_count, af, count(DISTINCT an) AS af_note_count
+            OPTIONAL MATCH (ad:Decision)-[:AFFECTS]->(af)
+            WHERE ad.status IN ['proposed', 'accepted']
+            WITH target_count, af_note_count + count(DISTINCT ad) AS af_total
+            WITH target_count, max(af_total) AS max_count
+
+            RETURN target_count,
+                   CASE WHEN max_count > 0 THEN toFloat(target_count) / max_count ELSE 0.0 END AS density
+            "#,
+        )
+        .param("path", file_path)
+        .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            let density: f64 = row.get("density").unwrap_or(0.0);
+            Ok(density)
+        } else {
+            Ok(0.0)
+        }
+    }
+
+    /// Read the PageRank score (cc_pagerank) from a File node.
+    /// Falls back to 0.0 if the property is absent or the file doesn't exist.
+    pub async fn get_node_pagerank(&self, file_path: &str, project_id: &str) -> Result<f64> {
+        let q = query(
+            r#"
+            MATCH (f:File {path: $path})<-[:CONTAINS]-(p:Project {id: $project_id})
+            RETURN coalesce(f.cc_pagerank, 0.0) AS pagerank
+            "#,
+        )
+        .param("path", file_path)
+        .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            let pr: f64 = row.get("pagerank").unwrap_or(0.0);
+            Ok(pr)
+        } else {
+            Ok(0.0)
+        }
+    }
+
+    /// Bridge proximity: for the top-10 co-changers of a file, compute
+    /// 1.0 / shortestPath_length as a proximity score.
+    /// Returns Vec<(path, score)> sorted by score descending.
+    pub async fn get_bridge_proximity(
+        &self,
+        file_path: &str,
+        project_id: &str,
+    ) -> Result<Vec<(String, f64)>> {
+        let q = query(
+            r#"
+            // Get top-10 co-changers
+            MATCH (f:File {path: $path})<-[:CONTAINS]-(p:Project {id: $project_id})
+            MATCH (f)-[r:CO_CHANGED]-(co:File)
+            WHERE EXISTS { MATCH (co)<-[:CONTAINS]-(p) }
+            WITH f, co ORDER BY r.count DESC LIMIT 10
+
+            // For each co-changer, find shortest structural path (IMPORTS|CALLS between files)
+            OPTIONAL MATCH sp = shortestPath((f)-[:IMPORTS|CALLS*1..5]-(co))
+            WITH co.path AS co_path,
+                 CASE WHEN sp IS NOT NULL THEN 1.0 / length(sp) ELSE 0.0 END AS proximity
+            RETURN co_path, proximity
+            ORDER BY proximity DESC
+            "#,
+        )
+        .param("path", file_path)
+        .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+        let mut scores = Vec::new();
+
+        while let Some(row) = result.next().await? {
+            let path: String = row.get("co_path")?;
+            let score: f64 = row.get("proximity").unwrap_or(0.0);
+            scores.push((path, score));
+        }
+
+        Ok(scores)
+    }
+
+    /// Extract the enclosing bridge subgraph between two nodes via bidirectional
+    /// BFS intersection (GraIL-inspired).
+    ///
+    /// Phase 1: BFS from source and target, intersect neighborhoods.
+    /// Phase 2: Get edges between bridge nodes.
+    /// `max_hops` controls BFS radius (1..=5). `relation_types` filters edge types.
+    pub async fn find_bridge_subgraph(
+        &self,
+        source: &str,
+        target: &str,
+        max_hops: u32,
+        relation_types: &[String],
+        project_id: &str,
+    ) -> Result<(
+        Vec<crate::graph::models::BridgeRawNode>,
+        Vec<crate::graph::models::BridgeRawEdge>,
+    )> {
+        use crate::graph::models::{BridgeRawEdge, BridgeRawNode};
+        use std::collections::HashSet;
+
+        // Build relationship pattern from whitelisted types
+        let allowed = ["IMPORTS", "CALLS", "CO_CHANGED", "EXTENDS", "IMPLEMENTS"];
+        let rel_pattern = if relation_types.is_empty() {
+            "IMPORTS".to_string()
+        } else {
+            let filtered: Vec<&str> = relation_types
+                .iter()
+                .filter_map(|t| {
+                    let upper = t.to_uppercase();
+                    allowed.iter().find(|a| **a == upper).copied()
+                })
+                .collect();
+            if filtered.is_empty() {
+                "IMPORTS".to_string()
+            } else {
+                filtered.join("|")
+            }
+        };
+
+        // max_hops is a validated u32 (1..=5), safe for format!
+        // Relationship types are whitelisted above, no injection risk
+        let hops = max_hops.clamp(1, 5);
+
+        // Phase 1: BFS intersection to find bridge node paths
+        let node_cypher = format!(
+            r#"
+            MATCH (s:File {{path: $source}})<-[:CONTAINS]-(p:Project {{id: $project_id}})
+            MATCH (t:File {{path: $target}})<-[:CONTAINS]-(p)
+            CALL {{
+              WITH s, p
+              MATCH (s)-[:{rel}*1..{hops}]-(n)
+              WHERE (n:File OR n:Function)
+                AND EXISTS {{ MATCH (n)<-[:CONTAINS*1..2]-(p) }}
+              RETURN collect(DISTINCT n) AS src_nbrs
+            }}
+            CALL {{
+              WITH t, p
+              MATCH (t)-[:{rel}*1..{hops}]-(n)
+              WHERE (n:File OR n:Function)
+                AND EXISTS {{ MATCH (n)<-[:CONTAINS*1..2]-(p) }}
+              RETURN collect(DISTINCT n) AS tgt_nbrs
+            }}
+            WITH s, t, [x IN src_nbrs WHERE x IN tgt_nbrs] + [s, t] AS bridge_list
+            UNWIND bridge_list AS bn
+            WITH DISTINCT bn
+            RETURN bn.path AS path,
+                   CASE WHEN 'Function' IN labels(bn) THEN 'Function' ELSE 'File' END AS node_type
+            "#,
+            rel = rel_pattern,
+            hops = hops
+        );
+
+        let q = neo4rs::query(&node_cypher)
+            .param("source", source)
+            .param("target", target)
+            .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+        let mut nodes = Vec::new();
+        let mut node_paths = HashSet::new();
+
+        while let Some(row) = result.next().await? {
+            let path: String = row.get("path").unwrap_or_default();
+            let node_type: String = row.get("node_type").unwrap_or_else(|_| "File".to_string());
+            if node_paths.insert(path.clone()) {
+                nodes.push(BridgeRawNode { path, node_type });
+            }
+        }
+
+        // Phase 2: Get edges between bridge nodes
+        if nodes.len() < 2 {
+            return Ok((nodes, Vec::new()));
+        }
+
+        let paths_list: Vec<&str> = node_paths.iter().map(|s| s.as_str()).collect();
+
+        let edge_cypher = format!(
+            r#"
+            UNWIND $paths AS p1
+            MATCH (n1 {{path: p1}})-[r:{rel}]->(n2)
+            WHERE n2.path IN $paths
+            RETURN DISTINCT n1.path AS from_path, type(r) AS rel_type, n2.path AS to_path
+            "#,
+            rel = rel_pattern
+        );
+
+        let eq = neo4rs::query(&edge_cypher).param("paths", paths_list);
+
+        let mut edge_result = self.graph.execute(eq).await?;
+        let mut edges = Vec::new();
+
+        while let Some(row) = edge_result.next().await? {
+            let from_path: String = row.get("from_path").unwrap_or_default();
+            let to_path: String = row.get("to_path").unwrap_or_default();
+            let rel_type: String = row.get("rel_type").unwrap_or_default();
+            edges.push(BridgeRawEdge {
+                from_path,
+                to_path,
+                rel_type,
+            });
+        }
+
+        Ok((nodes, edges))
+    }
+
+    /// Compute average multi-signal impact score for top-10 files by PageRank.
+    /// Single Cypher query that approximates the 5-signal fusion:
+    ///   structural (normalized degree), co_change (churn_score), knowledge (knowledge_density),
+    ///   pagerank (cc_pagerank normalized), bridge (cc_betweenness normalized).
+    /// Default weights: structural=0.35, co_change=0.25, knowledge=0.15, pagerank=0.10, bridge=0.15
+    pub async fn get_avg_multi_signal_score(&self, project_id: impl Into<String>) -> Result<f64> {
+        let project_id = project_id.into();
+        let q = query(
+            r#"
+            MATCH (p:Project {id: $project_id})-[:CONTAINS]->(f:File)
+            WHERE f.cc_pagerank IS NOT NULL
+            WITH collect(f) AS all_files,
+                 max(f.cc_pagerank) AS max_pr,
+                 max(f.cc_betweenness) AS max_bt
+            // No GDS data → return 0
+            WITH all_files, max_pr, max_bt
+            WHERE size(all_files) > 0
+            UNWIND all_files AS f
+            WITH f, max_pr, max_bt
+            ORDER BY f.cc_pagerank DESC LIMIT 10
+
+            // Count structural connections (IMPORTS in/out)
+            OPTIONAL MATCH (f)-[:IMPORTS]->(imp_out:File)
+            WITH f, max_pr, max_bt, count(DISTINCT imp_out) AS out_deg
+            OPTIONAL MATCH (imp_in:File)-[:IMPORTS]->(f)
+            WITH f, max_pr, max_bt, out_deg + count(DISTINCT imp_in) AS total_degree
+
+            // Normalize each signal to 0-1
+            WITH f, max_pr, max_bt,
+                 CASE WHEN total_degree >= 20 THEN 1.0
+                      ELSE toFloat(total_degree) / 20.0 END AS structural,
+                 coalesce(f.churn_score, 0.0) AS co_change,
+                 coalesce(f.knowledge_density, 0.0) AS knowledge,
+                 CASE WHEN max_pr > 0 THEN toFloat(f.cc_pagerank) / max_pr ELSE 0.0 END AS pagerank,
+                 CASE WHEN max_bt > 0 THEN toFloat(f.cc_betweenness) / max_bt ELSE 0.0 END AS bridge
+
+            // Weighted fusion (default profile weights)
+            WITH (0.35 * structural + 0.25 * co_change + 0.15 * knowledge
+                  + 0.10 * pagerank + 0.15 * bridge) AS combined
+
+            RETURN avg(combined) AS avg_score
+            "#,
+        )
+        .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+
+        if let Some(row) = result.next().await? {
+            let score: f64 = row.get("avg_score").unwrap_or(0.0);
+            Ok(score)
+        } else {
+            Ok(0.0)
+        }
+    }
 }

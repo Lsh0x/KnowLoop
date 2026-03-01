@@ -16,10 +16,12 @@ impl Neo4jClient {
             WHERE f.community_id IS NOT NULL
             WITH f.community_id AS cid, f.community_label AS label,
                  count(f) AS file_count,
-                 collect(f.path) AS all_paths
+                 collect(f.path) AS all_paths,
+                 size([x IN collect(DISTINCT f.cc_wl_hash) WHERE x IS NOT NULL AND x <> 0]) AS unique_fps
             ORDER BY file_count DESC
             RETURN cid, label, file_count,
-                   [p IN all_paths | p][..3] AS key_files
+                   [p IN all_paths | p][..3] AS key_files,
+                   unique_fps
             "#,
         )
         .param("pid", project_id.to_string());
@@ -35,11 +37,14 @@ impl Neo4jClient {
             let file_count = row.get::<i64>("file_count").unwrap_or(0) as usize;
             let key_files: Vec<String> = row.get::<Vec<String>>("key_files").unwrap_or_default();
 
+            let unique_fingerprints = row.get::<i64>("unique_fps").unwrap_or(0) as usize;
+
             communities.push(CommunityRow {
                 community_id,
                 community_label,
                 file_count,
                 key_files,
+                unique_fingerprints,
             });
         }
 
@@ -671,6 +676,146 @@ impl Neo4jClient {
         Ok(())
     }
 
+    /// Batch-update structural DNA vectors on File nodes.
+    ///
+    /// Uses UNWIND in chunks of 1000 to write `structural_dna` as a list of floats.
+    /// DNA = K-dimensional distance vector to PageRank anchor nodes, normalized [0,1].
+    pub async fn batch_update_structural_dna(
+        &self,
+        updates: &[crate::graph::models::StructuralDnaUpdate],
+    ) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        const CHUNK_SIZE: usize = 1000;
+
+        for chunk in updates.chunks(CHUNK_SIZE) {
+            let items: Vec<std::collections::HashMap<String, neo4rs::BoltType>> = chunk
+                .iter()
+                .map(|u| {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("path".into(), u.path.clone().into());
+                    // Convert Vec<f64> to BoltType list
+                    let dna_list: Vec<neo4rs::BoltType> = u.dna.iter().map(|&v| v.into()).collect();
+                    m.insert(
+                        "dna".into(),
+                        neo4rs::BoltType::List(neo4rs::BoltList::from(dna_list)),
+                    );
+                    m
+                })
+                .collect();
+
+            let q = query(
+                r#"
+                UNWIND $items AS u
+                MATCH (f:File {path: u.path})
+                SET f.structural_dna = u.dna,
+                    f.structural_dna_updated_at = datetime()
+                "#,
+            )
+            .param("items", items);
+
+            self.graph.run(q).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Write predicted missing links for a project.
+    ///
+    /// First removes old PREDICTED_LINK edges for this project, then creates new ones.
+    /// Each prediction becomes a relationship: (source)-[:PREDICTED_LINK]->(target)
+    /// with properties: plausibility, suggested_relation, signals (as JSON string), computed_at.
+    pub async fn write_predicted_links(
+        &self,
+        project_id: &str,
+        links: &[crate::graph::models::LinkPrediction],
+    ) -> Result<()> {
+        // 1. Remove old predicted links for this project
+        let delete_q = query(
+            r#"
+            MATCH (p:Project {id: $project_id})-[:CONTAINS]->(f:File)-[r:PREDICTED_LINK]->()
+            DELETE r
+            "#,
+        )
+        .param("project_id", project_id.to_string());
+        self.graph.run(delete_q).await?;
+
+        if links.is_empty() {
+            return Ok(());
+        }
+
+        // 2. Create new predicted links in batch
+        let items: Vec<std::collections::HashMap<String, neo4rs::BoltType>> = links
+            .iter()
+            .map(|l| {
+                let mut m = std::collections::HashMap::new();
+                m.insert("source".into(), l.source.clone().into());
+                m.insert("target".into(), l.target.clone().into());
+                m.insert("plausibility".into(), l.plausibility.into());
+                m.insert(
+                    "suggested_relation".into(),
+                    l.suggested_relation.clone().into(),
+                );
+                // Store signals as a JSON string for simplicity
+                let signals_str: String = l
+                    .signals
+                    .iter()
+                    .map(|(name, val)| format!("{}={:.4}", name, val))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                m.insert("signals".into(), signals_str.into());
+                m
+            })
+            .collect();
+
+        let create_q = query(
+            r#"
+            UNWIND $items AS item
+            MATCH (s {path: item.source}), (t {path: item.target})
+            MERGE (s)-[r:PREDICTED_LINK]->(t)
+            SET r.plausibility = item.plausibility,
+                r.suggested_relation = item.suggested_relation,
+                r.signals = item.signals,
+                r.computed_at = datetime()
+            "#,
+        )
+        .param("items", items);
+
+        self.graph.run(create_q).await?;
+
+        Ok(())
+    }
+
+    /// Read structural DNA vectors for all File nodes in a project.
+    ///
+    /// Returns (file_path, dna_vector) pairs for files that have DNA computed.
+    pub async fn get_project_structural_dna(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<(String, Vec<f64>)>> {
+        let q = query(
+            r#"
+            MATCH (p:Project {id: $project_id})-[:CONTAINS]->(f:File)
+            WHERE f.structural_dna IS NOT NULL
+            RETURN f.path AS path, f.structural_dna AS dna
+            "#,
+        )
+        .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+        let mut dna_list = Vec::new();
+
+        while let Some(row) = result.next().await? {
+            if let (Ok(path), Ok(dna)) = (row.get::<String>("path"), row.get::<Vec<f64>>("dna")) {
+                dna_list.push((path, dna));
+            }
+        }
+
+        Ok(dna_list)
+    }
+
     /// Get SYNAPSE edges bridged from Note-level to File-level for the GDS graph.
     ///
     /// Bridges the neural SYNAPSE connections between Notes to the Files they are
@@ -1194,6 +1339,296 @@ impl Neo4jClient {
             }))
         } else {
             Ok(serde_json::json!(null))
+        }
+    }
+
+    /// Batch-write context cards as cc_* properties on File nodes.
+    ///
+    /// Uses UNWIND with chunks of 1000 for efficient batch writes.
+    /// DNA vectors and co_changers are stored as serialized JSON strings
+    /// since Neo4j doesn't support nested arrays in UNWIND.
+    pub async fn batch_save_context_cards(
+        &self,
+        cards: &[crate::graph::models::ContextCard],
+    ) -> Result<()> {
+        if cards.is_empty() {
+            return Ok(());
+        }
+
+        const CHUNK_SIZE: usize = 1000;
+
+        for chunk in cards.chunks(CHUNK_SIZE) {
+            let items: Vec<std::collections::HashMap<String, neo4rs::BoltType>> = chunk
+                .iter()
+                .map(|c| {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("path".into(), c.path.clone().into());
+                    m.insert("cc_pagerank".into(), c.cc_pagerank.into());
+                    m.insert("cc_betweenness".into(), c.cc_betweenness.into());
+                    m.insert("cc_clustering".into(), c.cc_clustering.into());
+                    m.insert("cc_community_id".into(), (c.cc_community_id as i64).into());
+                    m.insert(
+                        "cc_community_label".into(),
+                        c.cc_community_label.clone().into(),
+                    );
+                    m.insert("cc_imports_out".into(), (c.cc_imports_out as i64).into());
+                    m.insert("cc_imports_in".into(), (c.cc_imports_in as i64).into());
+                    m.insert("cc_calls_out".into(), (c.cc_calls_out as i64).into());
+                    m.insert("cc_calls_in".into(), (c.cc_calls_in as i64).into());
+                    // DNA vector stored as JSON string (nested arrays not supported in UNWIND)
+                    let dna_json = serde_json::to_string(&c.cc_structural_dna).unwrap_or_default();
+                    m.insert("cc_structural_dna".into(), dna_json.into());
+                    m.insert("cc_wl_hash".into(), (c.cc_wl_hash as i64).into());
+                    // co_changers stored as JSON string
+                    let co_changers_json =
+                        serde_json::to_string(&c.cc_co_changers_top5).unwrap_or_default();
+                    m.insert("cc_co_changers_top5".into(), co_changers_json.into());
+                    m.insert("cc_version".into(), (c.cc_version as i64).into());
+                    m.insert("cc_computed_at".into(), c.cc_computed_at.clone().into());
+                    m
+                })
+                .collect();
+
+            let q = query(
+                r#"
+                UNWIND $items AS row
+                MATCH (f:File {path: row.path})
+                SET f.cc_pagerank = row.cc_pagerank,
+                    f.cc_betweenness = row.cc_betweenness,
+                    f.cc_clustering = row.cc_clustering,
+                    f.cc_community_id = row.cc_community_id,
+                    f.cc_community_label = row.cc_community_label,
+                    f.cc_imports_out = row.cc_imports_out,
+                    f.cc_imports_in = row.cc_imports_in,
+                    f.cc_calls_out = row.cc_calls_out,
+                    f.cc_calls_in = row.cc_calls_in,
+                    f.cc_structural_dna = row.cc_structural_dna,
+                    f.cc_wl_hash = row.cc_wl_hash,
+                    f.cc_co_changers_top5 = row.cc_co_changers_top5,
+                    f.cc_version = row.cc_version,
+                    f.cc_computed_at = row.cc_computed_at
+                "#,
+            )
+            .param("items", items);
+
+            self.graph.run(q).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Invalidate context cards for given file paths and their 1-hop neighbors.
+    ///
+    /// Sets `cc_version = -1` on the target files and any direct neighbor
+    /// connected via IMPORTS or CALLS relationships. This ensures stale cards
+    /// are recomputed on next analytics run.
+    pub async fn invalidate_context_cards(&self, paths: &[String], project_id: &str) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        let path_list: Vec<neo4rs::BoltType> = paths.iter().map(|p| p.clone().into()).collect();
+
+        let q = query(
+            r#"
+            UNWIND $paths AS path
+            MATCH (f:File {path: path, project_id: $project_id})
+            SET f.cc_version = -1
+            WITH f
+            OPTIONAL MATCH (f)-[:IMPORTS|CALLS]-(neighbor:File)
+            SET neighbor.cc_version = -1
+            "#,
+        )
+        .param("paths", path_list)
+        .param("project_id", project_id);
+
+        self.graph.run(q).await?;
+
+        Ok(())
+    }
+
+    /// Read a context card from Neo4j cc_* properties for a single file.
+    ///
+    /// Returns `None` if the file doesn't exist or has no cc_* properties.
+    /// The caller should check `cc_version`: if -1, the card is stale.
+    pub async fn get_context_card(
+        &self,
+        path: &str,
+        project_id: &str,
+    ) -> Result<Option<crate::graph::models::ContextCard>> {
+        let q = query(
+            r#"
+            MATCH (f:File {path: $path, project_id: $project_id})
+            WHERE f.cc_version IS NOT NULL
+            RETURN f.path AS path,
+                   COALESCE(f.cc_pagerank, 0.0) AS cc_pagerank,
+                   COALESCE(f.cc_betweenness, 0.0) AS cc_betweenness,
+                   COALESCE(f.cc_clustering, 0.0) AS cc_clustering,
+                   COALESCE(f.cc_community_id, 0) AS cc_community_id,
+                   COALESCE(f.cc_community_label, '') AS cc_community_label,
+                   COALESCE(f.cc_imports_out, 0) AS cc_imports_out,
+                   COALESCE(f.cc_imports_in, 0) AS cc_imports_in,
+                   COALESCE(f.cc_calls_out, 0) AS cc_calls_out,
+                   COALESCE(f.cc_calls_in, 0) AS cc_calls_in,
+                   COALESCE(f.cc_structural_dna, '[]') AS cc_structural_dna,
+                   COALESCE(f.cc_wl_hash, 0) AS cc_wl_hash,
+                   COALESCE(f.cc_co_changers_top5, '[]') AS cc_co_changers_top5,
+                   COALESCE(f.cc_version, 0) AS cc_version,
+                   COALESCE(f.cc_computed_at, '') AS cc_computed_at
+            "#,
+        )
+        .param("path", path)
+        .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            let dna_json: String = row.get("cc_structural_dna").unwrap_or_default();
+            let co_changers_json: String = row.get("cc_co_changers_top5").unwrap_or_default();
+
+            Ok(Some(crate::graph::models::ContextCard {
+                path: row.get("path").unwrap_or_default(),
+                cc_pagerank: row.get("cc_pagerank").unwrap_or(0.0),
+                cc_betweenness: row.get("cc_betweenness").unwrap_or(0.0),
+                cc_clustering: row.get("cc_clustering").unwrap_or(0.0),
+                cc_community_id: row.get::<i64>("cc_community_id").unwrap_or(0) as u32,
+                cc_community_label: row.get("cc_community_label").unwrap_or_default(),
+                cc_imports_out: row.get::<i64>("cc_imports_out").unwrap_or(0) as usize,
+                cc_imports_in: row.get::<i64>("cc_imports_in").unwrap_or(0) as usize,
+                cc_calls_out: row.get::<i64>("cc_calls_out").unwrap_or(0) as usize,
+                cc_calls_in: row.get::<i64>("cc_calls_in").unwrap_or(0) as usize,
+                cc_structural_dna: serde_json::from_str(&dna_json).unwrap_or_default(),
+                cc_wl_hash: row.get::<i64>("cc_wl_hash").unwrap_or(0) as u64,
+                cc_co_changers_top5: serde_json::from_str(&co_changers_json).unwrap_or_default(),
+                cc_version: row.get::<i64>("cc_version").unwrap_or(0) as i32,
+                cc_computed_at: row.get("cc_computed_at").unwrap_or_default(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Batch-read context cards for multiple files in one query.
+    pub async fn get_context_cards_batch(
+        &self,
+        paths: &[String],
+        project_id: &str,
+    ) -> Result<Vec<crate::graph::models::ContextCard>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let path_list: Vec<neo4rs::BoltType> = paths.iter().map(|p| p.clone().into()).collect();
+
+        let q = query(
+            r#"
+            UNWIND $paths AS path
+            MATCH (f:File {path: path, project_id: $project_id})
+            WHERE f.cc_version IS NOT NULL
+            RETURN f.path AS path,
+                   COALESCE(f.cc_pagerank, 0.0) AS cc_pagerank,
+                   COALESCE(f.cc_betweenness, 0.0) AS cc_betweenness,
+                   COALESCE(f.cc_clustering, 0.0) AS cc_clustering,
+                   COALESCE(f.cc_community_id, 0) AS cc_community_id,
+                   COALESCE(f.cc_community_label, '') AS cc_community_label,
+                   COALESCE(f.cc_imports_out, 0) AS cc_imports_out,
+                   COALESCE(f.cc_imports_in, 0) AS cc_imports_in,
+                   COALESCE(f.cc_calls_out, 0) AS cc_calls_out,
+                   COALESCE(f.cc_calls_in, 0) AS cc_calls_in,
+                   COALESCE(f.cc_structural_dna, '[]') AS cc_structural_dna,
+                   COALESCE(f.cc_wl_hash, 0) AS cc_wl_hash,
+                   COALESCE(f.cc_co_changers_top5, '[]') AS cc_co_changers_top5,
+                   COALESCE(f.cc_version, 0) AS cc_version,
+                   COALESCE(f.cc_computed_at, '') AS cc_computed_at
+            "#,
+        )
+        .param("paths", path_list)
+        .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+        let mut cards = Vec::new();
+
+        while let Some(row) = result.next().await? {
+            let dna_json: String = row.get("cc_structural_dna").unwrap_or_default();
+            let co_changers_json: String = row.get("cc_co_changers_top5").unwrap_or_default();
+
+            cards.push(crate::graph::models::ContextCard {
+                path: row.get("path").unwrap_or_default(),
+                cc_pagerank: row.get("cc_pagerank").unwrap_or(0.0),
+                cc_betweenness: row.get("cc_betweenness").unwrap_or(0.0),
+                cc_clustering: row.get("cc_clustering").unwrap_or(0.0),
+                cc_community_id: row.get::<i64>("cc_community_id").unwrap_or(0) as u32,
+                cc_community_label: row.get("cc_community_label").unwrap_or_default(),
+                cc_imports_out: row.get::<i64>("cc_imports_out").unwrap_or(0) as usize,
+                cc_imports_in: row.get::<i64>("cc_imports_in").unwrap_or(0) as usize,
+                cc_calls_out: row.get::<i64>("cc_calls_out").unwrap_or(0) as usize,
+                cc_calls_in: row.get::<i64>("cc_calls_in").unwrap_or(0) as usize,
+                cc_structural_dna: serde_json::from_str(&dna_json).unwrap_or_default(),
+                cc_wl_hash: row.get::<i64>("cc_wl_hash").unwrap_or(0) as u64,
+                cc_co_changers_top5: serde_json::from_str(&co_changers_json).unwrap_or_default(),
+                cc_version: row.get::<i64>("cc_version").unwrap_or(0) as i32,
+                cc_computed_at: row.get("cc_computed_at").unwrap_or_default(),
+            });
+        }
+
+        Ok(cards)
+    }
+
+    /// Find groups of files with identical WL hash (isomorphic neighborhoods).
+    /// Groups cc_wl_hash values, filtering to groups with at least `min_group_size` members.
+    pub async fn find_isomorphic_groups(
+        &self,
+        project_id: &str,
+        min_group_size: usize,
+    ) -> Result<Vec<crate::graph::models::IsomorphicGroup>> {
+        let q = query(
+            r#"
+            MATCH (f:File {project_id: $project_id})
+            WHERE f.cc_wl_hash IS NOT NULL AND f.cc_wl_hash <> 0
+            WITH f.cc_wl_hash AS wl_hash, COLLECT(f.path) AS members
+            WHERE SIZE(members) >= $min_size
+            RETURN wl_hash, members
+            ORDER BY SIZE(members) DESC
+            "#,
+        )
+        .param("project_id", project_id)
+        .param("min_size", min_group_size as i64);
+
+        let mut result = self.graph.execute(q).await?;
+        let mut groups = Vec::new();
+
+        while let Some(row) = result.next().await? {
+            let wl_hash = row.get::<i64>("wl_hash").unwrap_or(0) as u64;
+            let members: Vec<String> = row.get::<Vec<String>>("members").unwrap_or_default();
+            let size = members.len();
+            groups.push(crate::graph::models::IsomorphicGroup {
+                wl_hash,
+                members,
+                size,
+            });
+        }
+
+        Ok(groups)
+    }
+
+    /// Check if any file in the project has GraIL analytics computed (cc_version).
+    /// Returns `true` if at least one file has context cards, `false` otherwise.
+    /// Used by staleness check to detect projects that were synced before GraIL
+    /// was deployed and need their first analytics computation.
+    pub async fn has_context_cards(&self, project_id: &str) -> Result<bool> {
+        let q = query(
+            r#"
+            MATCH (f:File {project_id: $project_id})
+            WHERE f.cc_version IS NOT NULL AND f.cc_version > 0
+            RETURN count(f) > 0 AS has_cards
+            "#,
+        )
+        .param("project_id", project_id);
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            Ok(row.get::<bool>("has_cards").unwrap_or(false))
+        } else {
+            Ok(false)
         }
     }
 }
