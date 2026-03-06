@@ -2,6 +2,7 @@
 
 use super::handlers::{AppError, OrchestratorState};
 use super::{PaginatedResponse, PaginationParams, SearchFilter};
+use crate::events::graph::GraphEvent;
 use crate::notes::{
     BackfillProgress, CreateAnchorRequest, CreateNoteRequest, EntityType, LinkNoteRequest, Note,
     NoteContextResponse, NoteFilters, NoteImportance, NoteScope, NoteSearchHit, NoteStatus,
@@ -1107,6 +1108,20 @@ pub async fn reinforce_neurons(
         .await
         .map_err(AppError::Internal)?;
 
+    // Emit graph events for reinforcement (fire-and-forget, best-effort per note)
+    for note_id in &body.note_ids {
+        // Resolve project_id for graph event scoping
+        if let Ok(Some(note)) = neo4j.get_note(*note_id).await {
+            if let Some(pid) = note.project_id {
+                state.event_bus.emit_graph(GraphEvent::reinforcement(
+                    note_id.to_string(),
+                    energy_boost,
+                    pid.to_string(),
+                ));
+            }
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "neurons_boosted": neurons_boosted,
         "synapses_reinforced": synapses_reinforced,
@@ -1136,6 +1151,26 @@ pub async fn decay_synapses(
         .decay_synapses(decay_amount, prune_threshold)
         .await
         .map_err(AppError::Internal)?;
+
+    // Emit graph events for pruned synapses (batch signal for frontend)
+    if pruned > 0 {
+        // We don't have individual synapse IDs at this level, but the frontend
+        // can use this event to trigger a full refresh of the neural layer.
+        state.event_bus.emit_graph(
+            GraphEvent::node(
+                crate::events::graph::GraphEventType::CommunityChanged,
+                crate::events::graph::GraphLayer::Neural,
+                "decay_synapses",
+                "global",
+            )
+            .with_delta(serde_json::json!({
+                "synapses_pruned": pruned,
+                "synapses_decayed": decayed,
+                "decay_amount": decay_amount,
+                "prune_threshold": prune_threshold,
+            })),
+        );
+    }
 
     Ok(Json(serde_json::json!({
         "synapses_decayed": decayed,

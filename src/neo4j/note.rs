@@ -955,6 +955,63 @@ impl Neo4jClient {
         }
     }
 
+    /// Get all note embeddings for a project in a single batch query.
+    ///
+    /// Returns notes that have embeddings, with their vector, metadata, and a content preview.
+    /// Used for UMAP 2D projection in the visualization API.
+    pub async fn get_note_embeddings_for_project(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<super::models::NoteEmbeddingPoint>> {
+        let q = query(
+            r#"
+            MATCH (n:Note {project_id: $project_id})
+            WHERE n.embedding IS NOT NULL
+              AND n.status IN ['active', 'needs_review']
+            RETURN n.id AS id,
+                   n.embedding AS embedding,
+                   n.note_type AS note_type,
+                   n.importance AS importance,
+                   coalesce(n.energy, 0.5) AS energy,
+                   coalesce(n.tags, []) AS tags,
+                   left(n.content, 120) AS content_preview
+            "#,
+        )
+        .param("project_id", project_id.to_string());
+
+        let mut result = self.graph.execute(q).await?;
+        let mut points = Vec::new();
+
+        while let Some(row) = result.next().await? {
+            let id_str: String = row.get("id")?;
+            let id = Uuid::parse_str(&id_str).unwrap_or_default();
+            let embedding_f64: Vec<f64> = row.get("embedding")?;
+            let embedding: Vec<f32> = embedding_f64.iter().map(|&x| x as f32).collect();
+            let note_type: String = row
+                .get("note_type")
+                .unwrap_or_else(|_| "context".to_string());
+            let importance: String = row
+                .get("importance")
+                .unwrap_or_else(|_| "medium".to_string());
+            let energy: f64 = row.get("energy").unwrap_or(0.5);
+            let tags: Vec<String> = row.get("tags").unwrap_or_default();
+            let content_preview: String =
+                row.get("content_preview").unwrap_or_else(|_| String::new());
+
+            points.push(super::models::NoteEmbeddingPoint {
+                id,
+                embedding,
+                note_type,
+                importance,
+                energy,
+                tags,
+                content_preview,
+            });
+        }
+
+        Ok(points)
+    }
+
     /// Search notes by vector similarity using the HNSW index.
     ///
     /// Returns notes ordered by descending cosine similarity score,
@@ -1647,23 +1704,36 @@ impl Neo4jClient {
             0
         };
 
-        // Step 2: Prune weak synapses
-        let prune_q = query(
+        // Step 2: Prune weak synapses (2-step: count first, then delete)
+        // NOTE: Neo4j RETURN count() after DELETE always returns 0,
+        // so we must count before deleting.
+        let count_q = query(
             r#"
             MATCH ()-[s:SYNAPSE]->()
             WHERE s.weight < $threshold
-            DELETE s
             RETURN count(s) AS pruned
             "#,
         )
         .param("threshold", prune_threshold);
 
-        let mut result = self.graph.execute(prune_q).await?;
+        let mut result = self.graph.execute(count_q).await?;
         let pruned = if let Some(row) = result.next().await? {
             row.get::<i64>("pruned").unwrap_or(0) as usize
         } else {
             0
         };
+
+        if pruned > 0 {
+            let delete_q = query(
+                r#"
+                MATCH ()-[s:SYNAPSE]->()
+                WHERE s.weight < $threshold
+                DELETE s
+                "#,
+            )
+            .param("threshold", prune_threshold);
+            let _ = self.graph.execute(delete_q).await?;
+        }
 
         Ok((decayed, pruned))
     }
@@ -1843,5 +1913,72 @@ impl Neo4jClient {
             assertion_rule,
             last_assertion_result: None, // Loaded separately if needed
         })
+    }
+
+    // ========================================================================
+    // Graph visualization batch queries
+    // ========================================================================
+
+    /// Get all LINKED_TO edges from notes in a project to code entities (batch).
+    /// Returns (note_id, entity_type_label, entity_id).
+    pub async fn get_project_note_entity_links(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(String, String, String)>> {
+        let q = query(
+            "MATCH (n:Note {project_id: $pid})-[:LINKED_TO]->(e)
+             RETURN n.id AS note_id,
+                    CASE
+                      WHEN e:File THEN 'file'
+                      WHEN e:Function THEN 'function'
+                      WHEN e:Struct THEN 'struct'
+                      WHEN e:Trait THEN 'trait'
+                      WHEN e:Enum THEN 'enum'
+                      ELSE 'unknown'
+                    END AS entity_type,
+                    COALESCE(e.path, e.id, toString(elementId(e))) AS entity_id",
+        )
+        .param("pid", project_id.to_string());
+
+        let mut result = self.graph.execute(q).await?;
+        let mut links = Vec::new();
+        while let Some(row) = result.next().await? {
+            let note_id: String = row.get("note_id").unwrap_or_default();
+            let entity_type: String = row.get("entity_type").unwrap_or_default();
+            let entity_id: String = row.get("entity_id").unwrap_or_default();
+            if !note_id.is_empty() && !entity_id.is_empty() {
+                links.push((note_id, entity_type, entity_id));
+            }
+        }
+        Ok(links)
+    }
+
+    /// Get all SYNAPSE edges between notes in a project (batch, deduplicated).
+    /// Returns (source_note_id, target_note_id, weight).
+    pub async fn get_project_note_synapses(
+        &self,
+        project_id: Uuid,
+        min_weight: f64,
+    ) -> Result<Vec<(String, String, f64)>> {
+        let q = query(
+            "MATCH (a:Note {project_id: $pid})-[s:SYNAPSE]->(b:Note {project_id: $pid})
+             WHERE s.weight >= $min_weight AND a.id < b.id
+             RETURN a.id AS source_id, b.id AS target_id, s.weight AS weight
+             ORDER BY s.weight DESC",
+        )
+        .param("pid", project_id.to_string())
+        .param("min_weight", min_weight);
+
+        let mut result = self.graph.execute(q).await?;
+        let mut synapses = Vec::new();
+        while let Some(row) = result.next().await? {
+            let source: String = row.get("source_id").unwrap_or_default();
+            let target: String = row.get("target_id").unwrap_or_default();
+            let weight: f64 = row.get("weight").unwrap_or(0.0);
+            if !source.is_empty() && !target.is_empty() {
+                synapses.push((source, target, weight));
+            }
+        }
+        Ok(synapses)
     }
 }

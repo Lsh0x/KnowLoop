@@ -225,6 +225,18 @@ fn protected_routes() -> Router<OrchestratorState> {
             "/api/projects/{slug}/code/search",
             get(project_handlers::search_project_code),
         )
+        .route(
+            "/api/projects/{slug}/graph",
+            get(project_handlers::get_project_graph),
+        )
+        .route(
+            "/api/projects/{slug}/intelligence/summary",
+            get(project_handlers::get_intelligence_summary),
+        )
+        .route(
+            "/api/projects/{slug}/embeddings/projection",
+            get(project_handlers::get_embeddings_projection),
+        )
         // Releases (by project_id)
         .route(
             "/api/projects/{project_id}/releases",

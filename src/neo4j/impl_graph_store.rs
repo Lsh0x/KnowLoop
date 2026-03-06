@@ -1815,6 +1815,28 @@ impl GraphStore for Neo4jClient {
         self.delete_synapses(note_id).await
     }
 
+    async fn get_project_note_entity_links(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        self.get_project_note_entity_links(project_id).await
+    }
+
+    async fn get_project_note_synapses(
+        &self,
+        project_id: Uuid,
+        min_weight: f64,
+    ) -> anyhow::Result<Vec<(String, String, f64)>> {
+        self.get_project_note_synapses(project_id, min_weight).await
+    }
+
+    async fn get_project_decisions_for_graph(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<(DecisionNode, Vec<AffectsRelation>)>> {
+        self.get_project_decisions_for_graph(project_id).await
+    }
+
     // ========================================================================
     // Energy operations (Phase 2 — Neural Network)
     // ========================================================================
@@ -2606,5 +2628,12 @@ impl GraphStore for Neo4jClient {
 
     async fn has_context_cards(&self, project_id: &str) -> anyhow::Result<bool> {
         self.has_context_cards(project_id).await
+    }
+
+    async fn get_note_embeddings_for_project(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> anyhow::Result<Vec<super::models::NoteEmbeddingPoint>> {
+        self.get_note_embeddings_for_project(project_id).await
     }
 }
