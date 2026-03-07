@@ -33,6 +33,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         analysis_profile_tool(),
         admin_tool(),
         skill_tool(),
+        protocol_tool(),
     ]
 }
 
@@ -283,6 +284,20 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "export_skill" => Some(("skill", "export")),
         "import_skill" => Some(("skill", "import")),
         "get_skill_health" => Some(("skill", "get_health")),
+
+        // Protocol (Pattern Federation)
+        "list_protocols" => Some(("protocol", "list")),
+        "create_protocol" => Some(("protocol", "create")),
+        "get_protocol" => Some(("protocol", "get")),
+        "update_protocol" => Some(("protocol", "update")),
+        "delete_protocol" => Some(("protocol", "delete")),
+        "add_protocol_state" => Some(("protocol", "add_state")),
+        "delete_protocol_state" => Some(("protocol", "delete_state")),
+        "list_protocol_states" => Some(("protocol", "list_states")),
+        "add_protocol_transition" => Some(("protocol", "add_transition")),
+        "delete_protocol_transition" => Some(("protocol", "delete_transition")),
+        "list_protocol_transitions" => Some(("protocol", "list_transitions")),
+        "link_protocol_to_skill" => Some(("protocol", "link_to_skill")),
 
         // Admin
         "sync_directory" => Some(("admin", "sync_directory")),
@@ -965,6 +980,51 @@ fn skill_tool() -> ToolDefinition {
     }
 }
 
+fn protocol_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "protocol".to_string(),
+        description: "Manage protocols (Pattern Federation FSMs). Actions: list, create, get, update, delete, add_state, delete_state, list_states, add_transition, delete_transition, list_transitions, link_to_skill".to_string(),
+        input_schema: InputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "create", "get", "update", "delete", "add_state", "delete_state", "list_states", "add_transition", "delete_transition", "list_transitions", "link_to_skill"],
+                    "description": "Operation to perform"
+                },
+                "protocol_id": {"type": "string", "description": "Protocol UUID (get/update/delete/add_state/delete_state/list_states/add_transition/delete_transition/list_transitions/link_to_skill)"},
+                "project_id": {"type": "string", "description": "Project UUID (list/create)"},
+                "name": {"type": "string", "description": "Protocol or state name (create/update/add_state)"},
+                "description": {"type": "string", "description": "Description (create/update/add_state)"},
+                "protocol_category": {"type": "string", "description": "Category (create/update): system, business. Default: business"},
+                "skill_id": {"type": "string", "description": "Skill UUID (create/link_to_skill)"},
+                "category": {"type": "string", "description": "Category filter (list): system, business"},
+                "state_id": {"type": "string", "description": "State UUID (delete_state)"},
+                "state_type": {"type": "string", "description": "State type (add_state): start, intermediate, terminal. Default: intermediate"},
+                "action_name": {"type": "string", "description": "Action to execute when entering state (add_state)"},
+                "transition_id": {"type": "string", "description": "Transition UUID (delete_transition)"},
+                "from_state": {"type": "string", "description": "Source state UUID (add_transition)"},
+                "to_state": {"type": "string", "description": "Target state UUID (add_transition)"},
+                "trigger": {"type": "string", "description": "Transition trigger (add_transition)"},
+                "guard": {"type": "string", "description": "Optional guard condition (add_transition)"},
+                "states": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Inline states to create with the protocol (create): [{\"name\": \"...\", \"state_type\": \"start|intermediate|terminal\", \"description\": \"...\", \"action\": \"...\"}]"
+                },
+                "transitions": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Inline transitions to create with the protocol (create): [{\"from_state\": \"uuid\", \"to_state\": \"uuid\", \"trigger\": \"...\", \"guard\": \"...\"}]"
+                },
+                "limit": {"type": "integer", "description": "Max items (list)"},
+                "offset": {"type": "integer", "description": "Skip items (list)"}
+            })),
+            required: Some(vec!["action".to_string()]),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,8 +1034,8 @@ mod tests {
         let tools = all_tools();
         assert_eq!(
             tools.len(),
-            21,
-            "Expected 21 mega-tools, got {}",
+            22,
+            "Expected 22 mega-tools, got {}",
             tools.len()
         );
     }

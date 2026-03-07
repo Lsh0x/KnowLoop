@@ -63,6 +63,7 @@ impl ToolHandler {
             "admin",
             "skill",
             "analysis_profile",
+            "protocol",
         ];
 
         if !mega_tools.contains(&name) {
@@ -329,6 +330,20 @@ impl ToolHandler {
             ("skill", "export") => "export_skill",
             ("skill", "import") => "import_skill",
             ("skill", "get_health") => "get_skill_health",
+
+            // Protocol (Pattern Federation)
+            ("protocol", "list") => "list_protocols",
+            ("protocol", "create") => "create_protocol",
+            ("protocol", "get") => "get_protocol",
+            ("protocol", "update") => "update_protocol",
+            ("protocol", "delete") => "delete_protocol",
+            ("protocol", "add_state") => "add_protocol_state",
+            ("protocol", "delete_state") => "delete_protocol_state",
+            ("protocol", "list_states") => "list_protocol_states",
+            ("protocol", "add_transition") => "add_protocol_transition",
+            ("protocol", "delete_transition") => "delete_protocol_transition",
+            ("protocol", "list_transitions") => "list_protocol_transitions",
+            ("protocol", "link_to_skill") => "link_protocol_to_skill",
 
             // Reasoning Tree
             ("reasoning", "reason") => "reason",
@@ -3573,6 +3588,174 @@ impl ToolHandler {
                 Ok(Some(result))
             }
 
+            // ── Protocol (Pattern Federation) (12 tools) ───────────────
+            "list_protocols" => {
+                let project_id = extract_id(args, "project_id")?;
+                let mut query = vec![("project_id".to_string(), project_id)];
+                if let Some(cat) = args.get("category").and_then(|v| v.as_str()) {
+                    query.push(("category".to_string(), cat.to_string()));
+                }
+                if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+                    query.push(("limit".to_string(), l.to_string()));
+                }
+                if let Some(o) = args.get("offset").and_then(|v| v.as_i64()) {
+                    query.push(("offset".to_string(), o.to_string()));
+                }
+                let result = http.get_with_query("/api/protocols", &query).await?;
+                Ok(Some(result))
+            }
+
+            "create_protocol" => {
+                let result = http.post("/api/protocols", args).await?;
+                Ok(Some(result))
+            }
+
+            "get_protocol" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let result = http
+                    .get(&format!("/api/protocols/{}", protocol_id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "update_protocol" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let mut body = serde_json::Map::new();
+                if let Some(v) = args.get("name") {
+                    body.insert("name".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("description") {
+                    body.insert("description".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("protocol_category") {
+                    body.insert("protocol_category".to_string(), v.clone());
+                }
+                let result = http
+                    .put(
+                        &format!("/api/protocols/{}", protocol_id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "delete_protocol" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let result = http
+                    .delete(&format!("/api/protocols/{}", protocol_id))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "add_protocol_state" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let name = extract_string(args, "name")?;
+                let mut body = serde_json::Map::new();
+                body.insert("name".to_string(), json!(name));
+                if let Some(v) = args.get("description") {
+                    body.insert("description".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("state_type") {
+                    body.insert("state_type".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("action_name") {
+                    body.insert("action".to_string(), v.clone());
+                }
+                let result = http
+                    .post(
+                        &format!("/api/protocols/{}/states", protocol_id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "delete_protocol_state" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let state_id = extract_id(args, "state_id")?;
+                let result = http
+                    .delete(&format!(
+                        "/api/protocols/{}/states/{}",
+                        protocol_id, state_id
+                    ))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "list_protocol_states" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let result = http
+                    .get(&format!("/api/protocols/{}/states", protocol_id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "add_protocol_transition" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let from_state = extract_string(args, "from_state")?;
+                let to_state = extract_string(args, "to_state")?;
+                let trigger = extract_string(args, "trigger")?;
+                let mut body = serde_json::Map::new();
+                body.insert("from_state".to_string(), json!(from_state));
+                body.insert("to_state".to_string(), json!(to_state));
+                body.insert("trigger".to_string(), json!(trigger));
+                if let Some(v) = args.get("guard") {
+                    body.insert("guard".to_string(), v.clone());
+                }
+                let result = http
+                    .post(
+                        &format!("/api/protocols/{}/transitions", protocol_id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "delete_protocol_transition" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let transition_id = extract_id(args, "transition_id")?;
+                let result = http
+                    .delete(&format!(
+                        "/api/protocols/{}/transitions/{}",
+                        protocol_id, transition_id
+                    ))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "list_protocol_transitions" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let result = http
+                    .get(&format!("/api/protocols/{}/transitions", protocol_id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "link_protocol_to_skill" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let skill_id = extract_string(args, "skill_id")?;
+                let body = json!({"skill_id": skill_id});
+                let result = http
+                    .post(
+                        &format!("/api/protocols/{}/link-skill", protocol_id),
+                        &body,
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
             // ── All tools migrated ──────────────────────────────────────
             _ => Ok(None),
         }
@@ -3796,6 +3979,9 @@ mod tests {
             ("chat", "list_sessions"),
             ("feature_graph", "list"),
             ("admin", "meilisearch_stats"),
+            ("skill", "list"),
+            ("analysis_profile", "list"),
+            ("protocol", "list"),
         ];
 
         for (tool, action) in mega_tools_with_action {

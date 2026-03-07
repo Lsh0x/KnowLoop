@@ -11,6 +11,7 @@ use super::hook_handlers;
 use super::note_handlers;
 use super::profile_handlers;
 use super::project_handlers;
+use super::protocol_handlers;
 use super::reason_handlers;
 use super::skill_handlers;
 use super::workspace_handlers;
@@ -829,6 +830,39 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/skills/{skill_id}/health",
             get(skill_handlers::get_skill_health),
+        )
+        // ================================================================
+        // Protocols (Pattern Federation)
+        // ================================================================
+        .route(
+            "/api/protocols",
+            get(protocol_handlers::list_protocols).post(protocol_handlers::create_protocol),
+        )
+        .route(
+            "/api/protocols/{protocol_id}",
+            get(protocol_handlers::get_protocol)
+                .put(protocol_handlers::update_protocol)
+                .delete(protocol_handlers::delete_protocol),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/states",
+            get(protocol_handlers::list_states).post(protocol_handlers::add_state),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/states/{state_id}",
+            axum::routing::delete(protocol_handlers::delete_state),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/transitions",
+            get(protocol_handlers::list_transitions).post(protocol_handlers::add_transition),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/transitions/{transition_id}",
+            axum::routing::delete(protocol_handlers::delete_transition),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/link-skill",
+            post(protocol_handlers::link_to_skill),
         )
         // ================================================================
         // Reasoning Tree

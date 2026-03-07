@@ -1032,6 +1032,20 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
             description: "Build reasoning trees (reason/reason_feedback)",
         }],
     },
+    // ── Protocol (Pattern Federation) ────────────────────────────────
+    ToolGroup {
+        name: "protocol_federation",
+        description: "Manage Protocol FSMs for Pattern Federation — finite state machines with states, transitions, guards",
+        keywords: &[
+            "protocol", "protocole", "fsm", "state machine", "machine à états",
+            "transition", "guard", "état", "state", "pattern federation",
+            "federation", "fédération", "workflow",
+        ],
+        tools: &[ToolRef {
+            name: "protocol",
+            description: "Manage protocols (list/create/get/update/delete/add_state/delete_state/list_states/add_transition/delete_transition/list_transitions/link_to_skill)",
+        }],
+    },
     // ── Admin & Sync ────────────────────────────────────────────────
     ToolGroup {
         name: "sync_admin",
@@ -2720,11 +2734,11 @@ mod tests {
     // ================================================================
 
     #[test]
-    fn test_tool_groups_cover_all_21_mega_tools() {
+    fn test_tool_groups_cover_all_22_mega_tools() {
         let count = tool_catalog_tool_count();
         assert_eq!(
-            count, 21,
-            "TOOL_GROUPS must cover exactly 21 unique mega-tools (got {}). \
+            count, 22,
+            "TOOL_GROUPS must cover exactly 22 unique mega-tools (got {}). \
              Update the catalog when adding/removing MCP tools.",
             count
         );
@@ -2774,7 +2788,7 @@ mod tests {
 
     #[test]
     fn test_tool_groups_count() {
-        assert_eq!(TOOL_GROUPS.len(), 12, "Expected 12 tool groups");
+        assert_eq!(TOOL_GROUPS.len(), 13, "Expected 13 tool groups");
     }
 
     #[test]
