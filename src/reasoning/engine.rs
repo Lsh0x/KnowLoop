@@ -836,7 +836,10 @@ fn entity_type_from_str(s: &str) -> EntitySource {
         "struct" | "class" => EntitySource::Struct,
         "trait" | "interface" => EntitySource::Trait,
         other => {
-            warn!(entity_type = other, "Unknown entity type in reasoning graph, defaulting to File");
+            warn!(
+                entity_type = other,
+                "Unknown entity type in reasoning graph, defaulting to File"
+            );
             EntitySource::File
         }
     }
