@@ -887,4 +887,231 @@ mod tests {
         assert!(matches!(&blocks[3], ContentBlock::Viz(_)));
         assert!(matches!(&blocks[4], ContentBlock::Text(_)));
     }
+
+    // --- TP3.5: E2E test scenarios ---
+
+    /// Scenario 4: Unknown viz_type → graceful fallback as error text block
+    #[tokio::test]
+    async fn test_e2e_unknown_viz_type_fallback() {
+        let graph = make_mock_graph();
+        let processor = VizBlockProcessor::new(graph, None);
+
+        let text = r#"Test: <viz type="totally_unknown_viz" /> end"#;
+        let blocks = processor.process(text).await;
+
+        // Unknown type should degrade to a text block with error info
+        assert!(blocks.len() >= 2, "Expected at least 2 blocks, got {}", blocks.len());
+
+        // The middle block should be a text block (graceful degradation) since
+        // there's no handler for "totally_unknown_viz"
+        let error_block = &blocks[1];
+        match error_block {
+            ContentBlock::Text(tb) => {
+                assert!(
+                    tb.content.contains("error") || tb.content.contains("unknown"),
+                    "Fallback text should indicate an error, got: {}",
+                    tb.content
+                );
+            }
+            ContentBlock::Viz(_) => {
+                // If it becomes a viz block (e.g., custom type handler), that's also OK
+                // as long as fallback_text is non-empty
+                let ft = error_block.fallback_text();
+                assert!(!ft.is_empty(), "VizBlock for unknown type must have non-empty fallback_text");
+            }
+        }
+    }
+
+    /// Scenario 5: Performance — VizBlock generation < 100ms per block
+    #[tokio::test]
+    async fn test_e2e_vizblock_performance() {
+        let graph = make_mock_graph();
+
+        // Seed some data for realistic scenario
+        {
+            let mut ir = graph.import_relationships.write().await;
+            for i in 0..10 {
+                ir.insert(
+                    format!("src/file_{i}.rs"),
+                    vec!["src/common.rs".to_string()],
+                );
+            }
+        }
+
+        let processor = VizBlockProcessor::new(graph, None);
+        let text = r#"Analysis: <viz type="impact_graph" target="src/common.rs" /> done."#;
+
+        let start = std::time::Instant::now();
+        let iterations = 100;
+        for _ in 0..iterations {
+            let _ = processor.process(text).await;
+        }
+        let elapsed = start.elapsed();
+        let per_block_ms = elapsed.as_millis() as f64 / iterations as f64;
+
+        assert!(
+            per_block_ms < 100.0,
+            "VizBlock generation took {per_block_ms:.1}ms per block (limit: 100ms)"
+        );
+    }
+
+    /// Scenario 6: Accessibility — VizBlocks have non-empty fallback_text and title
+    #[tokio::test]
+    async fn test_e2e_vizblock_accessibility() {
+        let graph = make_mock_graph();
+
+        // Seed data
+        {
+            let mut ir = graph.import_relationships.write().await;
+            ir.insert("src/b.rs".to_string(), vec!["src/a.rs".to_string()]);
+        }
+
+        let mut tree = ReasoningTree::new("test query", None);
+        tree.add_root(ReasoningNode::new(EntitySource::Note, "note-1", 0.9, "Test"));
+
+        let processor = VizBlockProcessor::new(graph, None).with_reasoning_tree(tree);
+
+        // Test impact_graph
+        let blocks = processor.process(r#"<viz type="impact_graph" target="src/a.rs" />"#).await;
+        for block in &blocks {
+            if let ContentBlock::Viz(viz) = block {
+                assert!(!viz.fallback_text.is_empty(), "impact_graph: fallback_text must be non-empty");
+                assert!(viz.title.is_some(), "impact_graph: title should be set for accessibility");
+            }
+        }
+
+        // Test reasoning_tree
+        let blocks = processor.process(r#"<viz type="reasoning_tree" />"#).await;
+        for block in &blocks {
+            if let ContentBlock::Viz(viz) = block {
+                assert!(!viz.fallback_text.is_empty(), "reasoning_tree: fallback_text must be non-empty");
+                assert!(viz.title.is_some(), "reasoning_tree: title should be set for accessibility");
+            }
+        }
+
+        // Test context_radar (via direct builder)
+        let dims = vec![
+            ("Knowledge".into(), 0.8),
+            ("Risk".into(), 0.3),
+            ("Activity".into(), 0.9),
+        ];
+        let block = build_radar_viz(&dims).unwrap();
+        assert!(!block.fallback_text.is_empty(), "context_radar: fallback_text must be non-empty");
+        assert!(block.title.is_some(), "context_radar: title should be set for accessibility");
+
+        // Test knowledge_card (Pattern Federation stub as proxy)
+        let blocks = processor.process(r#"<viz type="protocol_run" />"#).await;
+        for block in &blocks {
+            if let ContentBlock::Viz(viz) = block {
+                assert!(!viz.fallback_text.is_empty(), "Pattern Federation stub: fallback_text must be non-empty");
+            }
+        }
+    }
+
+    /// Full E2E: message with mixed viz types → all render correctly
+    #[tokio::test]
+    async fn test_e2e_full_message_with_mixed_viz() {
+        let graph = make_mock_graph();
+        let plan_id = Uuid::new_v4();
+
+        // Seed plan
+        let plan = PlanNode {
+            id: plan_id,
+            title: "TP3 Plan".to_string(),
+            description: "desc".to_string(),
+            status: PlanStatus::InProgress,
+            priority: 80,
+            created_at: chrono::Utc::now(),
+            created_by: "test".to_string(),
+            project_id: None,
+        };
+        graph.plans.write().await.insert(plan_id, plan);
+
+        let task_id = Uuid::new_v4();
+        graph.tasks.write().await.insert(
+            task_id,
+            TaskNode {
+                id: task_id,
+                title: Some("Task 1".to_string()),
+                description: "done".to_string(),
+                status: TaskStatus::Completed,
+                priority: Some(85),
+                tags: vec![],
+                acceptance_criteria: vec![],
+                affected_files: vec![],
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+                assigned_to: None,
+                estimated_complexity: None,
+                actual_complexity: None,
+                started_at: None,
+                completed_at: None,
+            },
+        );
+        graph
+            .plan_tasks
+            .write()
+            .await
+            .insert(plan_id, vec![task_id]);
+
+        // Seed imports
+        {
+            let mut ir = graph.import_relationships.write().await;
+            ir.insert("src/b.rs".to_string(), vec!["src/a.rs".to_string()]);
+        }
+
+        let mut tree = ReasoningTree::new("full test", None);
+        tree.add_root(ReasoningNode::new(
+            EntitySource::Decision,
+            "dec-1",
+            0.85,
+            "Architecture decision",
+        ));
+
+        let processor = VizBlockProcessor::new(graph, None).with_reasoning_tree(tree);
+
+        let text = format!(
+            r#"Here's your analysis:
+
+<viz type="reasoning_tree" />
+
+The impact on the codebase:
+
+<viz type="impact_graph" target="src/a.rs" />
+
+And plan progress:
+
+<viz type="progress_bar" plan_id="{plan_id}" />
+
+That's all!"#
+        );
+
+        let blocks = processor.process(&text).await;
+
+        // Count viz blocks
+        let viz_count = blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::Viz(_)))
+            .count();
+        assert_eq!(viz_count, 3, "Expected 3 VizBlocks in mixed message");
+
+        // Verify each viz type
+        let viz_types: Vec<_> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Viz(v) => Some(v.viz_type.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(viz_types.contains(&VizType::ReasoningTree));
+        assert!(viz_types.contains(&VizType::ImpactGraph));
+        assert!(viz_types.contains(&VizType::ProgressBar));
+
+        // All viz blocks have non-empty fallback
+        for block in &blocks {
+            if let ContentBlock::Viz(viz) = block {
+                assert!(!viz.fallback_text.is_empty(), "VizBlock {:?} has empty fallback", viz.viz_type);
+            }
+        }
+    }
 }
