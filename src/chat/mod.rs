@@ -5,6 +5,7 @@
 
 pub mod cli_version;
 pub mod config;
+pub mod enrichment;
 pub mod entity_extractor;
 pub mod manager;
 pub mod path_detect;

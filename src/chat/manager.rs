@@ -148,6 +148,9 @@ pub struct ChatManager {
     /// Runtime-mutable environment config (PATH, CLI path, auto-update).
     /// Updated via REST API and persisted to config.yaml.
     pub(crate) env_config: Arc<RwLock<RuntimeEnvConfig>>,
+    /// Pre-enrichment pipeline that runs before each LLM call.
+    /// Enriches the user message with context from the knowledge graph.
+    pub(crate) enrichment_pipeline: Arc<super::enrichment::EnrichmentPipeline>,
 }
 
 // ============================================================================
@@ -232,6 +235,9 @@ impl ChatManager {
             auto_update_cli: config.auto_update_cli,
             auto_update_app: config.auto_update_app,
         }));
+        let enrichment_pipeline = Arc::new(super::enrichment::EnrichmentPipeline::new(
+            super::enrichment::EnrichmentConfig::default(),
+        ));
         Self {
             graph,
             search,
@@ -244,6 +250,7 @@ impl ChatManager {
             permission_config,
             config_yaml_path: None,
             env_config,
+            enrichment_pipeline,
         }
     }
 
@@ -278,6 +285,9 @@ impl ChatManager {
             auto_update_cli: config.auto_update_cli,
             auto_update_app: config.auto_update_app,
         }));
+        let enrichment_pipeline = Arc::new(super::enrichment::EnrichmentPipeline::new(
+            super::enrichment::EnrichmentConfig::default(),
+        ));
         Self {
             graph,
             search,
@@ -290,6 +300,7 @@ impl ChatManager {
             permission_config,
             config_yaml_path: None,
             env_config,
+            enrichment_pipeline,
         }
     }
 
@@ -312,6 +323,30 @@ impl ChatManager {
     /// Interrupts are also propagated via NATS to all instances.
     pub fn with_nats(mut self, nats: Arc<crate::events::NatsEmitter>) -> Self {
         self.nats = Some(nats);
+        self
+    }
+
+    /// Replace the enrichment pipeline with a custom-configured one.
+    ///
+    /// Use this to configure which enrichment stages are enabled/disabled,
+    /// set debug mode, or override the time budget. Stages must be added
+    /// to the pipeline before passing it here.
+    ///
+    /// ```ignore
+    /// let mut pipeline = EnrichmentPipeline::new(EnrichmentConfig {
+    ///     skill_activation: true,
+    ///     knowledge_injection: true,
+    ///     debug: true,
+    ///     ..Default::default()
+    /// });
+    /// // pipeline.add_stage(Box::new(SkillActivationStage::new(graph.clone())));
+    /// let manager = manager.with_enrichment_pipeline(Arc::new(pipeline));
+    /// ```
+    pub fn with_enrichment_pipeline(
+        mut self,
+        pipeline: Arc<super::enrichment::EnrichmentPipeline>,
+    ) -> Self {
+        self.enrichment_pipeline = pipeline;
         self
     }
 
@@ -787,6 +822,7 @@ impl ChatManager {
         let context_injector = self.context_injector.clone();
         let event_emitter = self.event_emitter.clone();
         let retry_config = self.config.retry.clone();
+        let enrichment_pipeline = self.enrichment_pipeline.clone();
 
         tokio::spawn(async move {
             let mut subscriber = match nats.subscribe_rpc_send(&session_id).await {
@@ -1051,6 +1087,7 @@ impl ChatManager {
                             let event_emitter_clone = event_emitter.clone();
                             let nats_clone = Some(nats.clone());
                             let retry_config_clone = retry_config.clone();
+                            let enrichment_pipeline_clone = enrichment_pipeline.clone();
 
                             tokio::spawn(async move {
                                 Self::stream_response(
@@ -1073,6 +1110,7 @@ impl ChatManager {
                                     sdk_control_rx,
                                     auto_continue,
                                     retry_config_clone,
+                                    enrichment_pipeline_clone,
                                 )
                                 .await;
                             });
@@ -2019,6 +2057,7 @@ impl ChatManager {
         let event_emitter = self.event_emitter.clone();
         let nats = self.nats.clone();
         let retry_config = self.config.retry.clone();
+        let enrichment_pipeline = self.enrichment_pipeline.clone();
 
         tokio::spawn(async move {
             Self::stream_response(
@@ -2041,6 +2080,7 @@ impl ChatManager {
                 sdk_control_rx,
                 auto_continue,
                 retry_config,
+                enrichment_pipeline,
             )
             .await;
         });
@@ -2075,6 +2115,7 @@ impl ChatManager {
         >,
         auto_continue: Arc<AtomicBool>,
         retry_config: super::config::RetryConfig,
+        enrichment_pipeline: Arc<super::enrichment::EnrichmentPipeline>,
     ) {
         // Helper closure: emit a ChatEvent to local broadcast + NATS (if configured)
         let emit_chat = |event: ChatEvent,
@@ -2135,6 +2176,44 @@ impl ChatManager {
             let mut mm = mm.lock().await;
             mm.record_user_message(&prompt);
         }
+
+        // ===== PRE-ENRICHMENT PIPELINE =====
+        // Enrich the prompt with context from the knowledge graph BEFORE the LLM call.
+        // If the pipeline has no stages or all fail, the original prompt is used unchanged.
+        let prompt = {
+            let session_uuid = Uuid::parse_str(&session_id).ok();
+            let enrichment_input = if let Some(uuid) = session_uuid {
+                // Load session node to get project_slug
+                match graph.get_chat_session(uuid).await {
+                    Ok(Some(node)) => Some(super::enrichment::EnrichmentInput {
+                        message: prompt.clone(),
+                        session_id: uuid,
+                        project_slug: node.project_slug,
+                        project_id: None, // Resolved from slug inside stages
+                        cwd: Some(node.cwd),
+                    }),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            if let Some(input) = enrichment_input {
+                let ctx = enrichment_pipeline.execute(&input).await;
+                if ctx.has_content() {
+                    debug!(
+                        "[enrichment] Prompt enriched: {} sections, {}ms",
+                        ctx.sections.len(),
+                        ctx.total_time_ms
+                    );
+                    super::enrichment::enrich_prompt(&prompt, &ctx)
+                } else {
+                    prompt
+                }
+            } else {
+                prompt
+            }
+        };
 
         // Events are persisted in Neo4j — the WebSocket replay handles late-joining clients.
 
@@ -3125,6 +3204,7 @@ impl ChatManager {
                 shared_sdk_control_rx,
                 auto_continue,
                 retry_config,
+                enrichment_pipeline,
             ))
             .await;
         } else if has_pending {
@@ -3338,6 +3418,7 @@ impl ChatManager {
         let event_emitter = self.event_emitter.clone();
         let nats = self.nats.clone();
         let retry_config = self.config.retry.clone();
+        let enrichment_pipeline = self.enrichment_pipeline.clone();
 
         tokio::spawn(async move {
             Self::stream_response(
@@ -3360,6 +3441,7 @@ impl ChatManager {
                 sdk_control_rx,
                 auto_continue,
                 retry_config,
+                enrichment_pipeline,
             )
             .await;
         });
@@ -4018,6 +4100,7 @@ impl ChatManager {
         let event_emitter = self.event_emitter.clone();
         let nats = self.nats.clone();
         let retry_config = self.config.retry.clone();
+        let enrichment_pipeline = self.enrichment_pipeline.clone();
 
         tokio::spawn(async move {
             Self::stream_response(
@@ -4040,6 +4123,7 @@ impl ChatManager {
                 sdk_control_rx,
                 auto_continue,
                 retry_config,
+                enrichment_pipeline,
             )
             .await;
         });
