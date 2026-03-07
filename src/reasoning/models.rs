@@ -301,12 +301,7 @@ impl ReasoningTree {
     /// Recompute aggregate stats (depth, node_count, confidence) from the current tree.
     pub fn recompute_stats(&mut self) {
         self.node_count = self.roots.iter().map(|r| r.node_count()).sum();
-        self.depth = self
-            .roots
-            .iter()
-            .map(|r| r.max_depth())
-            .max()
-            .unwrap_or(0);
+        self.depth = self.roots.iter().map(|r| r.max_depth()).max().unwrap_or(0);
         self.confidence = self.compute_confidence();
     }
 
@@ -355,7 +350,11 @@ impl ReasoningTree {
             collect_actions(root, &mut actions);
         }
 
-        actions.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        actions.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         actions
     }
 }
@@ -460,10 +459,20 @@ mod tests {
 
     #[test]
     fn test_reasoning_node_with_children() {
-        let child1 = ReasoningNode::new(EntitySource::File, "src/api/routes.rs", 0.7, "Co-changed file")
-            .with_depth(1);
-        let child2 = ReasoningNode::new(EntitySource::Function, "handle_request", 0.6, "Called function")
-            .with_depth(1);
+        let child1 = ReasoningNode::new(
+            EntitySource::File,
+            "src/api/routes.rs",
+            0.7,
+            "Co-changed file",
+        )
+        .with_depth(1);
+        let child2 = ReasoningNode::new(
+            EntitySource::Function,
+            "handle_request",
+            0.6,
+            "Called function",
+        )
+        .with_depth(1);
 
         let mut root = ReasoningNode::new(EntitySource::Note, "note-1", 0.9, "Root note");
         root.add_child(child1);
@@ -577,8 +586,7 @@ mod tests {
             .with_action(action);
 
         let grandchild =
-            ReasoningNode::new(EntitySource::Function, "main", 0.5, "Main function")
-                .with_depth(2);
+            ReasoningNode::new(EntitySource::Function, "main", 0.5, "Main function").with_depth(2);
 
         let mut child_clone = child;
         child_clone.add_child(grandchild);

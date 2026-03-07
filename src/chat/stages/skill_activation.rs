@@ -20,7 +20,9 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::chat::enrichment::{EnrichmentConfig, EnrichmentContext, EnrichmentInput, EnrichmentStage};
+use crate::chat::enrichment::{
+    EnrichmentConfig, EnrichmentContext, EnrichmentInput, EnrichmentStage,
+};
 use crate::neo4j::traits::GraphStore;
 use crate::skills::activation::evaluate_skill_match;
 use crate::skills::models::SkillNode;
@@ -84,8 +86,9 @@ impl SkillActivationStage {
         // Must contain at least one slash or dot+extension to be a file path
         for word in message.split_whitespace() {
             // Strip common wrapping chars (quotes, backticks, parens)
-            let cleaned = word
-                .trim_matches(|c: char| c == '`' || c == '\'' || c == '"' || c == '(' || c == ')' || c == ',');
+            let cleaned = word.trim_matches(|c: char| {
+                c == '`' || c == '\'' || c == '"' || c == '(' || c == ')' || c == ','
+            });
             if cleaned.is_empty() {
                 continue;
             }
@@ -93,11 +96,17 @@ impl SkillActivationStage {
             let has_slash = cleaned.contains('/');
             let has_extension = cleaned.contains('.') && {
                 let parts: Vec<&str> = cleaned.rsplit('.').collect();
-                parts.first().map(|ext| ext.len() <= 10 && ext.chars().all(|c| c.is_alphanumeric())).unwrap_or(false)
+                parts
+                    .first()
+                    .map(|ext| ext.len() <= 10 && ext.chars().all(|c| c.is_alphanumeric()))
+                    .unwrap_or(false)
             };
             if has_slash || (has_extension && cleaned.len() > 3) {
                 // Additional check: must have path-like characters only
-                if cleaned.chars().all(|c| c.is_alphanumeric() || "/_.-+@".contains(c)) {
+                if cleaned
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || "/_.-+@".contains(c))
+                {
                     paths.push(cleaned.to_string());
                 }
             }
@@ -110,11 +119,7 @@ impl SkillActivationStage {
     /// Uses the existing `evaluate_skill_match` function with:
     /// - `pattern`: the full user message (for regex matching)
     /// - `file_context`: extracted file paths concatenated (for file_glob matching)
-    async fn match_skills(
-        &self,
-        message: &str,
-        project_id: Uuid,
-    ) -> Result<Vec<(SkillNode, f64)>> {
+    async fn match_skills(&self, message: &str, project_id: Uuid) -> Result<Vec<(SkillNode, f64)>> {
         // Load matchable skills
         let skills = self.graph.get_skills_for_project(project_id).await?;
         let matchable: Vec<_> = skills.into_iter().filter(|s| s.is_matchable()).collect();
@@ -134,11 +139,7 @@ impl SkillActivationStage {
         // Evaluate each skill
         let mut matches: Vec<(SkillNode, f64)> = Vec::new();
         for skill in matchable {
-            let confidence = evaluate_skill_match(
-                &skill,
-                Some(message),
-                file_context.as_deref(),
-            );
+            let confidence = evaluate_skill_match(&skill, Some(message), file_context.as_deref());
             if confidence >= self.config.confidence_threshold {
                 matches.push((skill, confidence));
             }
@@ -159,7 +160,10 @@ impl SkillActivationStage {
             Ok(Some(project)) => Ok(Some(project.id)),
             Ok(None) => Ok(None),
             Err(e) => {
-                warn!("[skill_activation] Failed to resolve project slug '{}': {}", slug, e);
+                warn!(
+                    "[skill_activation] Failed to resolve project slug '{}': {}",
+                    slug, e
+                );
                 Ok(None)
             }
         }
@@ -193,7 +197,11 @@ impl EnrichmentStage for SkillActivationStage {
         let mut skill_ids_to_boost: Vec<Uuid> = Vec::new();
 
         for (skill, confidence) in &matches {
-            let mut section = format!("### {} (confidence: {:.0}%)\n", skill.name, confidence * 100.0);
+            let mut section = format!(
+                "### {} (confidence: {:.0}%)\n",
+                skill.name,
+                confidence * 100.0
+            );
 
             // Add context_template if available
             if let Some(ref template) = skill.context_template {
@@ -214,11 +222,7 @@ impl EnrichmentStage for SkillActivationStage {
         }
 
         if !content_parts.is_empty() {
-            ctx.add_section(
-                "Activated Skills",
-                content_parts.join("\n"),
-                self.name(),
-            );
+            ctx.add_section("Activated Skills", content_parts.join("\n"), self.name());
         }
 
         // Async boost energy for activated skills (Hebbian reinforcement)
@@ -293,17 +297,13 @@ mod tests {
 
     #[test]
     fn test_extract_file_paths_no_paths() {
-        let paths = SkillActivationStage::extract_file_paths(
-            "How do I create a new endpoint?",
-        );
+        let paths = SkillActivationStage::extract_file_paths("How do I create a new endpoint?");
         assert!(paths.is_empty());
     }
 
     #[test]
     fn test_extract_file_paths_dotfile() {
-        let paths = SkillActivationStage::extract_file_paths(
-            "Edit the .env file and Cargo.toml",
-        );
+        let paths = SkillActivationStage::extract_file_paths("Edit the .env file and Cargo.toml");
         // .env is too short (3 chars), Cargo.toml should match
         assert!(paths.contains(&"Cargo.toml".to_string()));
     }

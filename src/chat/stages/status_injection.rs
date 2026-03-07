@@ -187,10 +187,7 @@ impl StatusInjectionStage {
         {
             Ok(result) => result,
             Err(e) => {
-                debug!(
-                    "[status_injection] Failed to list in-progress plans: {}",
-                    e
-                );
+                debug!("[status_injection] Failed to list in-progress plans: {}", e);
                 return None;
             }
         };
@@ -212,11 +209,16 @@ impl StatusInjectionStage {
                 Ok(tasks) => {
                     let active_tasks: Vec<_> = tasks
                         .iter()
-                        .filter(|t| t.status == TaskStatus::InProgress || t.status == TaskStatus::Blocked)
+                        .filter(|t| {
+                            t.status == TaskStatus::InProgress || t.status == TaskStatus::Blocked
+                        })
                         .take(self.config.max_tasks_per_plan)
                         .collect();
 
-                    let completed = tasks.iter().filter(|t| t.status == TaskStatus::Completed).count();
+                    let completed = tasks
+                        .iter()
+                        .filter(|t| t.status == TaskStatus::Completed)
+                        .count();
                     let total = tasks.len();
                     let progress = if total > 0 {
                         (completed as f64 / total as f64 * 100.0) as u32
@@ -224,7 +226,10 @@ impl StatusInjectionStage {
                         0
                     };
 
-                    content.push_str(&format!("  Progress: {}/{}  ({}%)\n", completed, total, progress));
+                    content.push_str(&format!(
+                        "  Progress: {}/{}  ({}%)\n",
+                        completed, total, progress
+                    ));
 
                     for task in active_tasks {
                         let title = task.title.as_deref().unwrap_or(&task.description);
@@ -287,10 +292,7 @@ impl StatusInjectionStage {
                 }
             }
             Err(e) => {
-                debug!(
-                    "[status_injection] ReasoningTree generation failed: {}",
-                    e
-                );
+                debug!("[status_injection] ReasoningTree generation failed: {}", e);
                 None
             }
         }
@@ -370,21 +372,13 @@ impl EnrichmentStage for StatusInjectionStage {
 
         // ── Query 2: Protocol status (stub) ─────────────────────────────
         let protocol_content = if let Some(pid) = project_id {
-            match timeout(
-                query_timeout,
-                self.protocol_provider.get_active_runs(pid),
-            )
-            .await
-            {
+            match timeout(query_timeout, self.protocol_provider.get_active_runs(pid)).await {
                 Ok(Ok(runs)) if !runs.is_empty() => {
                     let mut content = String::new();
                     for run in &runs {
                         content.push_str(&format!(
                             "- **{}**: {} ({}%) — {}\n",
-                            run.protocol_name,
-                            run.current_state,
-                            run.progress,
-                            run.status_message,
+                            run.protocol_name, run.current_state, run.progress, run.status_message,
                         ));
                     }
                     Some(content)

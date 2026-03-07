@@ -119,7 +119,9 @@ impl ReasoningTreeCache {
             inner: Arc::new(RwLock::new(LruCache::new(
                 NonZeroUsize::new(max_size).unwrap_or(NonZeroUsize::new(DEFAULT_MAX_SIZE).unwrap()),
             ))),
-            id_index: Arc::new(RwLock::new(std::collections::HashMap::with_capacity(max_size))),
+            id_index: Arc::new(RwLock::new(std::collections::HashMap::with_capacity(
+                max_size,
+            ))),
             ttl: cache_ttl(),
         }
     }
@@ -130,7 +132,9 @@ impl ReasoningTreeCache {
             inner: Arc::new(RwLock::new(LruCache::new(
                 NonZeroUsize::new(max_size).unwrap_or(NonZeroUsize::new(1).unwrap()),
             ))),
-            id_index: Arc::new(RwLock::new(std::collections::HashMap::with_capacity(max_size))),
+            id_index: Arc::new(RwLock::new(std::collections::HashMap::with_capacity(
+                max_size,
+            ))),
             ttl,
         }
     }

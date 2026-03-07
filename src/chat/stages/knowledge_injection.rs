@@ -28,7 +28,9 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::chat::enrichment::{EnrichmentConfig, EnrichmentContext, EnrichmentInput, EnrichmentStage};
+use crate::chat::enrichment::{
+    EnrichmentConfig, EnrichmentContext, EnrichmentInput, EnrichmentStage,
+};
 use crate::chat::entity_extractor::{self, EntityType as ChatEntityType, ExtractedEntity};
 use crate::meilisearch::SearchStore;
 use crate::neo4j::traits::GraphStore;
@@ -206,9 +208,9 @@ impl KnowledgeInjectionStage {
                     &msg1,
                     max_notes,
                     slug1.as_deref(),
-                    None, // note_type
+                    None,           // note_type
                     Some("active"), // only active notes
-                    None, // importance
+                    None,           // importance
                 )
                 .await;
             result.unwrap_or_default()
@@ -479,7 +481,11 @@ impl KnowledgeInjectionStage {
 
         // Collect and sort notes by score descending
         let mut notes: Vec<ScoredNote> = note_map.into_values().collect();
-        notes.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        notes.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Collect BM25 decisions and merge with UUID decisions
         if let Ok(docs) = decisions_result {
@@ -506,7 +512,11 @@ impl KnowledgeInjectionStage {
         }
 
         let mut decisions: Vec<ScoredDecision> = decision_map.into_values().collect();
-        decisions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        decisions.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         (notes, decisions)
     }
@@ -794,7 +804,10 @@ mod tests {
                 id: format!("n{}", i),
                 note_type: "Tip".to_string(),
                 importance: "Low".to_string(),
-                content: format!("This is note number {} with some content that takes space", i),
+                content: format!(
+                    "This is note number {} with some content that takes space",
+                    i
+                ),
                 score: 1.0 - (i as f64 * 0.05),
                 source: "bm25_search",
             })
@@ -976,16 +989,24 @@ mod tests {
         let entities = entity_extractor::extract_entities(message);
 
         // Should detect a file
-        let has_file = entities
-            .iter()
-            .any(|e| e.entity_type == ChatEntityType::File && e.identifier == "src/chat/manager.rs");
-        assert!(has_file, "Should detect file src/chat/manager.rs, got: {:?}", entities);
+        let has_file = entities.iter().any(|e| {
+            e.entity_type == ChatEntityType::File && e.identifier == "src/chat/manager.rs"
+        });
+        assert!(
+            has_file,
+            "Should detect file src/chat/manager.rs, got: {:?}",
+            entities
+        );
 
         // Should detect a function (via backtick extraction)
         let has_function = entities
             .iter()
             .any(|e| e.identifier == "build_system_prompt");
-        assert!(has_function, "Should detect function build_system_prompt, got: {:?}", entities);
+        assert!(
+            has_function,
+            "Should detect function build_system_prompt, got: {:?}",
+            entities
+        );
     }
 
     #[test]
@@ -994,33 +1015,34 @@ mod tests {
         let message = "regarde src/chat/manager.rs et fn build_system_prompt";
         let entities = entity_extractor::extract_entities(message);
 
-        let has_file = entities
-            .iter()
-            .any(|e| e.entity_type == ChatEntityType::File && e.identifier == "src/chat/manager.rs");
+        let has_file = entities.iter().any(|e| {
+            e.entity_type == ChatEntityType::File && e.identifier == "src/chat/manager.rs"
+        });
         assert!(has_file, "Should detect file");
 
-        let has_function = entities
-            .iter()
-            .any(|e| e.identifier == "build_system_prompt" && e.entity_type == ChatEntityType::Function);
-        assert!(has_function, "Should detect function via 'fn' pattern, got: {:?}", entities);
+        let has_function = entities.iter().any(|e| {
+            e.identifier == "build_system_prompt" && e.entity_type == ChatEntityType::Function
+        });
+        assert!(
+            has_function,
+            "Should detect function via 'fn' pattern, got: {:?}",
+            entities
+        );
     }
 
     #[test]
     fn test_step_verification_uuid_extraction() {
         let uuid_str = "09fe035c-ab4e-40a8-a181-4e1be8a31004";
-        let message = format!(
-            "Regarde la note {} et src/chat/manager.rs",
-            uuid_str
-        );
+        let message = format!("Regarde la note {} et src/chat/manager.rs", uuid_str);
         let uuids = KnowledgeInjectionStage::extract_uuids(&message);
         assert_eq!(uuids.len(), 1, "Should extract one UUID");
         assert_eq!(uuids[0].to_string(), uuid_str);
 
         // File should also be detected
         let entities = entity_extractor::extract_entities(&message);
-        let has_file = entities
-            .iter()
-            .any(|e| e.entity_type == ChatEntityType::File && e.identifier == "src/chat/manager.rs");
+        let has_file = entities.iter().any(|e| {
+            e.entity_type == ChatEntityType::File && e.identifier == "src/chat/manager.rs"
+        });
         assert!(has_file, "Should also detect file alongside UUID");
     }
 
@@ -1076,7 +1098,11 @@ mod tests {
         // Render should have no duplicates
         let content = stage.render_knowledge(&deduped, &[]).unwrap();
         let count = content.matches("Watch out for null").count();
-        assert_eq!(count, 1, "Content should appear exactly once, got {}", count);
+        assert_eq!(
+            count, 1,
+            "Content should appear exactly once, got {}",
+            count
+        );
     }
 
     #[test]
@@ -1109,7 +1135,11 @@ mod tests {
         ];
 
         // Sort like query_knowledge does
-        notes.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        notes.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         assert_eq!(notes[0].id, "high", "Highest score first");
         assert_eq!(notes[1].id, "mid", "Medium score second");

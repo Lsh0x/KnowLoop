@@ -239,15 +239,16 @@ impl ChatManager {
             let mut pipeline = super::enrichment::EnrichmentPipeline::new(
                 super::enrichment::EnrichmentConfig::default(),
             );
-            pipeline.add_stage(Box::new(
-                super::stages::SkillActivationStage::new(graph.clone()),
-            ));
-            pipeline.add_stage(Box::new(
-                super::stages::KnowledgeInjectionStage::new(graph.clone(), search.clone()),
-            ));
-            pipeline.add_stage(Box::new(
-                super::stages::StatusInjectionStage::new(graph.clone()),
-            ));
+            pipeline.add_stage(Box::new(super::stages::SkillActivationStage::new(
+                graph.clone(),
+            )));
+            pipeline.add_stage(Box::new(super::stages::KnowledgeInjectionStage::new(
+                graph.clone(),
+                search.clone(),
+            )));
+            pipeline.add_stage(Box::new(super::stages::StatusInjectionStage::new(
+                graph.clone(),
+            )));
             Arc::new(pipeline)
         };
         Self {
@@ -301,15 +302,16 @@ impl ChatManager {
             let mut pipeline = super::enrichment::EnrichmentPipeline::new(
                 super::enrichment::EnrichmentConfig::default(),
             );
-            pipeline.add_stage(Box::new(
-                super::stages::SkillActivationStage::new(graph.clone()),
-            ));
-            pipeline.add_stage(Box::new(
-                super::stages::KnowledgeInjectionStage::new(graph.clone(), search.clone()),
-            ));
-            pipeline.add_stage(Box::new(
-                super::stages::StatusInjectionStage::new(graph.clone()),
-            ));
+            pipeline.add_stage(Box::new(super::stages::SkillActivationStage::new(
+                graph.clone(),
+            )));
+            pipeline.add_stage(Box::new(super::stages::KnowledgeInjectionStage::new(
+                graph.clone(),
+                search.clone(),
+            )));
+            pipeline.add_stage(Box::new(super::stages::StatusInjectionStage::new(
+                graph.clone(),
+            )));
             Arc::new(pipeline)
         };
         Self {

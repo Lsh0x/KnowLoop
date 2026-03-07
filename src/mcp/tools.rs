@@ -843,7 +843,9 @@ fn code_tool() -> ToolDefinition {
 fn reasoning_tool() -> ToolDefinition {
     ToolDefinition {
         name: "reasoning".to_string(),
-        description: "Build reasoning trees from the knowledge graph. Actions: reason, reason_feedback".to_string(),
+        description:
+            "Build reasoning trees from the knowledge graph. Actions: reason, reason_feedback"
+                .to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({

@@ -313,8 +313,8 @@ pub trait VizDataBuilder: Send + Sync {
     fn build(&self) -> Result<VizBlock> {
         let data = self.build_data()?;
         let fallback = self.build_fallback();
-        let mut block = VizBlock::new(self.viz_type(), data, fallback)
-            .with_interactive(self.is_interactive());
+        let mut block =
+            VizBlock::new(self.viz_type(), data, fallback).with_interactive(self.is_interactive());
         block.title = self.title();
         Ok(block)
     }
@@ -397,13 +397,15 @@ impl VizRegistry {
             Some(result) => result,
             None => {
                 let fallback = if viz_type.is_pattern_federation() {
-                    format!(
-                        "[{viz_type}] Available after Pattern Federation installation."
-                    )
+                    format!("[{viz_type}] Available after Pattern Federation installation.")
                 } else {
                     format!("[{viz_type}] Visualization type not registered.")
                 };
-                Ok(VizBlock::new(viz_type.clone(), serde_json::Value::Null, fallback))
+                Ok(VizBlock::new(
+                    viz_type.clone(),
+                    serde_json::Value::Null,
+                    fallback,
+                ))
             }
         }
     }
@@ -510,10 +512,7 @@ impl ReasoningTreeVizBuilder {
             .get("entity_type")
             .and_then(|v| v.as_str())
             .unwrap_or("?");
-        let reasoning = node
-            .get("reasoning")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let reasoning = node.get("reasoning").and_then(|v| v.as_str()).unwrap_or("");
         let relevance = node
             .get("relevance")
             .and_then(|v| v.as_f64())
@@ -712,9 +711,7 @@ impl VizDataBuilder for KnowledgeCardVizBuilder {
             self.content.clone()
         };
 
-        format!(
-            "{importance_icon} {kind_upper}{tags_str}\n{content_preview}"
-        )
+        format!("{importance_icon} {kind_upper}{tags_str}\n{content_preview}")
     }
 }
 
@@ -775,10 +772,7 @@ impl VizBuilderFactory for ReasoningTreeVizFactory {
             .get("node_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
-        let depth = params
-            .get("depth")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let request = params
             .get("request")
             .and_then(|v| v.as_str())
@@ -959,7 +953,10 @@ mod tests {
 
     #[test]
     fn test_viz_type_from_str_loose() {
-        assert_eq!(VizType::from_str_loose("impact_graph"), VizType::ImpactGraph);
+        assert_eq!(
+            VizType::from_str_loose("impact_graph"),
+            VizType::ImpactGraph
+        );
         assert_eq!(
             VizType::from_str_loose("REASONING_TREE"),
             VizType::ReasoningTree

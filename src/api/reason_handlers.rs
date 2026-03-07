@@ -114,20 +114,15 @@ pub async fn reason(
 ) -> Result<Json<ReasonResponse>, AppError> {
     // Validate
     if body.request.trim().is_empty() {
-        return Err(AppError::BadRequest(
-            "request cannot be empty".to_string(),
-        ));
+        return Err(AppError::BadRequest("request cannot be empty".to_string()));
     }
 
     // Get the reasoning engine
-    let engine = state
-        .orchestrator
-        .reasoning_engine()
-        .ok_or_else(|| {
-            AppError::BadRequest(
-                "Reasoning engine unavailable (embedding provider not configured)".to_string(),
-            )
-        })?;
+    let engine = state.orchestrator.reasoning_engine().ok_or_else(|| {
+        AppError::BadRequest(
+            "Reasoning engine unavailable (embedding provider not configured)".to_string(),
+        )
+    })?;
 
     // Build config from request params
     let config = ReasoningTreeConfig {

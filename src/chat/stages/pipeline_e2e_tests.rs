@@ -29,7 +29,9 @@ mod tests {
     use crate::meilisearch::traits::SearchStore;
     use crate::neo4j::mock::MockGraphStore;
     use crate::neo4j::models::{PlanNode, PlanStatus, ProjectNode, TaskNode, TaskStatus};
-    use crate::notes::{EntityType, Note, NoteAnchor, NoteImportance, NoteScope, NoteStatus, NoteType};
+    use crate::notes::{
+        EntityType, Note, NoteAnchor, NoteImportance, NoteScope, NoteStatus, NoteType,
+    };
     use crate::skills::models::{SkillNode, SkillStatus, SkillTrigger, TriggerType};
 
     // ========================================================================
@@ -120,11 +122,7 @@ mod tests {
 
         // Register anchors for get_notes_for_entity lookup
         if !anchors.is_empty() {
-            graph
-                .note_anchors
-                .write()
-                .await
-                .insert(note_id, anchors);
+            graph.note_anchors.write().await.insert(note_id, anchors);
         }
 
         // Index in search (MeiliSearch mock)
@@ -225,11 +223,7 @@ mod tests {
         }
 
         // Link tasks to plan
-        graph
-            .plan_tasks
-            .write()
-            .await
-            .insert(plan_id, task_ids);
+        graph.plan_tasks.write().await.insert(plan_id, task_ids);
 
         plan_id
     }
@@ -314,15 +308,14 @@ mod tests {
 
         let pipeline = build_pipeline(graph.clone(), search.clone());
         // Use a short query that will match as a substring in the note/decision content
-        let input = make_input(
-            "error",
-            Some(&slug),
-            Some(project_id),
-        );
+        let input = make_input("error", Some(&slug), Some(project_id));
         let ctx = pipeline.execute(&input).await;
 
         // Should have knowledge injection content
-        assert!(ctx.has_content(), "Pipeline should produce enrichment content");
+        assert!(
+            ctx.has_content(),
+            "Pipeline should produce enrichment content"
+        );
 
         let rendered = ctx.render();
         assert!(
@@ -463,21 +456,14 @@ mod tests {
             &[
                 ("TP2.1 — Pipeline Architecture", TaskStatus::Completed),
                 ("TP2.2 — SkillActivation Stage", TaskStatus::Completed),
-                (
-                    "TP2.3 — KnowledgeInjection Stage",
-                    TaskStatus::InProgress,
-                ),
+                ("TP2.3 — KnowledgeInjection Stage", TaskStatus::InProgress),
                 ("TP2.4 — StatusInjection Stage", TaskStatus::Pending),
             ],
         )
         .await;
 
         let pipeline = build_pipeline(graph.clone(), search.clone());
-        let input = make_input(
-            "What should I work on next?",
-            Some(&slug),
-            Some(project_id),
-        );
+        let input = make_input("What should I work on next?", Some(&slug), Some(project_id));
         let ctx = pipeline.execute(&input).await;
 
         assert!(
@@ -652,11 +638,7 @@ mod tests {
         )));
         pipeline.add_stage(Box::new(StatusInjectionStage::new(graph.clone())));
 
-        let input = make_input(
-            "Show me what's in progress",
-            Some(&slug),
-            Some(project_id),
-        );
+        let input = make_input("Show me what's in progress", Some(&slug), Some(project_id));
         let ctx = pipeline.execute(&input).await;
 
         // Despite failing stage, later stages should still execute

@@ -203,7 +203,9 @@ impl ReasoningTreeEngine {
 
         // Phase 3: Cristallisation — transform to tree
         let tree = self
-            .phase3_cristallize(request, project_id, embedding, &seeds, &activated, config, start)
+            .phase3_cristallize(
+                request, project_id, embedding, &seeds, &activated, config, start,
+            )
             .await;
 
         debug!(
@@ -258,8 +260,8 @@ impl ReasoningTreeEngine {
                 &embedding,
                 note_limit,
                 project_id,
-                None,       // no workspace filter
-                Some(0.3),  // min cosine similarity
+                None,      // no workspace filter
+                Some(0.3), // min cosine similarity
             ),
             self.graph_store.search_decisions_by_vector(
                 &embedding,
@@ -387,11 +389,7 @@ impl ReasoningTreeEngine {
                 };
 
                 // Traverse SYNAPSE relations (cross-entity: Note↔Note, Note↔Decision)
-                let synapses = match self
-                    .graph_store
-                    .get_cross_entity_synapses(node_uuid)
-                    .await
-                {
+                let synapses = match self.graph_store.get_cross_entity_synapses(node_uuid).await {
                     Ok(s) => s,
                     Err(_) => {
                         // Fallback to note-only synapses
@@ -464,12 +462,7 @@ impl ReasoningTreeEngine {
                     });
                     total_nodes += 1;
 
-                    next_frontier.push((
-                        neighbor_id_str,
-                        relevance,
-                        seed_id.clone(),
-                        depth,
-                    ));
+                    next_frontier.push((neighbor_id_str, relevance, seed_id.clone(), depth));
                 }
             }
 
@@ -477,10 +470,7 @@ impl ReasoningTreeEngine {
         }
 
         // Discover LINKED_TO entities for note seeds (files, functions, structs)
-        for seed in seeds
-            .iter()
-            .filter(|s| s.entity_type == EntitySource::Note)
-        {
+        for seed in seeds.iter().filter(|s| s.entity_type == EntitySource::Note) {
             if total_nodes >= config.max_nodes {
                 break;
             }
@@ -599,7 +589,10 @@ impl ReasoningTreeEngine {
         // Group activated entities by seed_id
         let mut by_seed: HashMap<String, Vec<&ActivatedEntity>> = HashMap::new();
         for entity in activated {
-            by_seed.entry(entity.seed_id.clone()).or_default().push(entity);
+            by_seed
+                .entry(entity.seed_id.clone())
+                .or_default()
+                .push(entity);
         }
 
         // Build root nodes (one per seed) with their children
@@ -626,8 +619,7 @@ impl ReasoningTreeEngine {
 
             // Add action for root
             if config.include_actions {
-                if let Some(action) =
-                    generate_action(seed.entity_type, &seed.entity_id, seed.score)
+                if let Some(action) = generate_action(seed.entity_type, &seed.entity_id, seed.score)
                 {
                     root = root.with_action(action);
                 }
@@ -649,11 +641,9 @@ impl ReasoningTreeEngine {
 
                 // Generate action for children
                 if config.include_actions {
-                    if let Some(action) = generate_action(
-                        entity.entity_type,
-                        &entity.entity_id,
-                        entity.relevance,
-                    ) {
+                    if let Some(action) =
+                        generate_action(entity.entity_type, &entity.entity_id, entity.relevance)
+                    {
                         child_node = child_node.with_action(action);
                     }
                 }
@@ -746,11 +736,7 @@ fn check_skill_fast_path(skill: &SkillNode, request: &str) -> Option<SeedNode> {
 /// Generate an MCP Action suggestion based on entity type and ID.
 fn generate_action(entity_type: EntitySource, entity_id: &str, confidence: f64) -> Option<Action> {
     let (tool, action, params) = match entity_type {
-        EntitySource::Note => (
-            "note",
-            "get",
-            serde_json::json!({"note_id": entity_id}),
-        ),
+        EntitySource::Note => ("note", "get", serde_json::json!({"note_id": entity_id})),
         EntitySource::Decision => (
             "decision",
             "get",
@@ -761,11 +747,9 @@ fn generate_action(entity_type: EntitySource, entity_id: &str, confidence: f64) 
             "activate",
             serde_json::json!({"skill_id": entity_id, "query": ""}),
         ),
-        EntitySource::FeatureGraph => (
-            "feature_graph",
-            "get",
-            serde_json::json!({"id": entity_id}),
-        ),
+        EntitySource::FeatureGraph => {
+            ("feature_graph", "get", serde_json::json!({"id": entity_id}))
+        }
         EntitySource::File => (
             "code",
             "get_file_symbols",

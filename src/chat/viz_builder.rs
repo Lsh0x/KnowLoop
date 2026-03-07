@@ -43,14 +43,12 @@ use crate::reasoning::models::ReasoningTree;
 ///
 /// Captures the entire tag including all attributes.
 /// Supports both `<viz ... />` (self-closing) and `<viz ...>...</viz>` forms.
-static VIZ_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<viz\s+([^>]*?)\s*/>"#).expect("invalid viz tag regex")
-});
+static VIZ_TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<viz\s+([^>]*?)\s*/>"#).expect("invalid viz tag regex"));
 
 /// Regex for extracting key="value" attribute pairs from a viz tag.
-static ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(\w+)\s*=\s*"([^"]*)""#).expect("invalid attr regex")
-});
+static ATTR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(\w+)\s*=\s*"([^"]*)""#).expect("invalid attr regex"));
 
 /// A parsed viz tag with its type and attributes.
 #[derive(Debug, Clone)]
@@ -161,10 +159,7 @@ pub async fn build_impact_viz(
     // Build fallback text
     let mut fallback_lines = vec![format!("Impact analysis for: {target}")];
     if !impacted_files.is_empty() {
-        fallback_lines.push(format!(
-            "Impacted files ({}):",
-            impacted_files.len()
-        ));
+        fallback_lines.push(format!("Impacted files ({}):", impacted_files.len()));
         for file in &impacted_files {
             if file != target {
                 fallback_lines.push(format!("  → {file}"));
@@ -172,10 +167,7 @@ pub async fn build_impact_viz(
         }
     }
     if !dependent_files.is_empty() {
-        fallback_lines.push(format!(
-            "Dependent files ({}):",
-            dependent_files.len()
-        ));
+        fallback_lines.push(format!("Dependent files ({}):", dependent_files.len()));
         for file in &dependent_files {
             if file != target && !impacted_files.contains(file) {
                 fallback_lines.push(format!("  ← {file}"));
@@ -224,10 +216,7 @@ pub fn build_reasoning_tree_viz(tree: &ReasoningTree) -> Result<VizBlock> {
 ///
 /// Queries the graph for the plan and its tasks, then builds a
 /// segmented progress bar visualization.
-pub async fn build_progress_viz(
-    graph: &dyn GraphStore,
-    plan_id: Uuid,
-) -> Result<VizBlock> {
+pub async fn build_progress_viz(graph: &dyn GraphStore, plan_id: Uuid) -> Result<VizBlock> {
     let plan = graph
         .get_plan(plan_id)
         .await?
@@ -244,7 +233,10 @@ pub async fn build_progress_viz(
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| format!("{:?}", t.status).to_lowercase());
             TaskProgress {
-                title: t.title.clone().unwrap_or_else(|| t.description.chars().take(60).collect()),
+                title: t
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| t.description.chars().take(60).collect()),
                 status: status_str,
                 priority: t.priority.unwrap_or(50),
             }
@@ -263,10 +255,7 @@ pub async fn build_progress_viz(
 ///
 /// Queries the graph for the note and its linked entities,
 /// then builds an inline knowledge card.
-pub async fn build_knowledge_card_viz(
-    graph: &dyn GraphStore,
-    note_id: Uuid,
-) -> Result<VizBlock> {
+pub async fn build_knowledge_card_viz(graph: &dyn GraphStore, note_id: Uuid) -> Result<VizBlock> {
     let note = graph
         .get_note(note_id)
         .await?
@@ -381,10 +370,7 @@ pub struct VizBlockProcessor {
 
 impl VizBlockProcessor {
     /// Create a new processor.
-    pub fn new(
-        graph: Arc<dyn GraphStore>,
-        project_id: Option<Uuid>,
-    ) -> Self {
+    pub fn new(graph: Arc<dyn GraphStore>, project_id: Option<Uuid>) -> Self {
         Self {
             graph,
             reasoning_tree: None,
@@ -485,10 +471,9 @@ impl VizBlockProcessor {
             }
 
             VizType::KnowledgeCard => {
-                let note_id_str = tag
-                    .attrs
-                    .get("note_id")
-                    .ok_or_else(|| anyhow::anyhow!("knowledge_card requires 'note_id' attribute"))?;
+                let note_id_str = tag.attrs.get("note_id").ok_or_else(|| {
+                    anyhow::anyhow!("knowledge_card requires 'note_id' attribute")
+                })?;
                 let note_id = Uuid::parse_str(note_id_str)?;
                 build_knowledge_card_viz(self.graph.as_ref(), note_id).await
             }
@@ -503,25 +488,18 @@ impl VizBlockProcessor {
             }
 
             VizType::DependencyTree => {
-                let target = tag
-                    .attrs
-                    .get("target")
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("dependency_tree requires 'target' attribute")
-                    })?;
+                let target = tag.attrs.get("target").ok_or_else(|| {
+                    anyhow::anyhow!("dependency_tree requires 'target' attribute")
+                })?;
                 build_dependency_tree_viz(self.graph.as_ref(), target, self.project_id).await
             }
 
             // Pattern Federation reserved types → stub
-            viz_type if viz_type.is_pattern_federation() => {
-                Ok(VizBlock::new(
-                    viz_type.clone(),
-                    serde_json::json!({"status": "not_installed"}),
-                    format!(
-                        "[{viz_type}] Available after Pattern Federation installation."
-                    ),
-                ))
-            }
+            viz_type if viz_type.is_pattern_federation() => Ok(VizBlock::new(
+                viz_type.clone(),
+                serde_json::json!({"status": "not_installed"}),
+                format!("[{viz_type}] Available after Pattern Federation installation."),
+            )),
 
             // Unknown/custom types → generic stub
             _ => Ok(VizBlock::new(
@@ -616,10 +594,7 @@ mod tests {
         // Seed import relationships: b.rs imports a.rs
         {
             let mut ir = graph.import_relationships.write().await;
-            ir.insert(
-                "src/b.rs".to_string(),
-                vec!["src/a.rs".to_string()],
-            );
+            ir.insert("src/b.rs".to_string(), vec!["src/a.rs".to_string()]);
         }
 
         let block = build_impact_viz(graph.as_ref(), "src/a.rs", None)
@@ -708,9 +683,7 @@ mod tests {
             .await
             .insert(plan_id, vec![task1_id, task2_id]);
 
-        let block = build_progress_viz(graph.as_ref(), plan_id)
-            .await
-            .unwrap();
+        let block = build_progress_viz(graph.as_ref(), plan_id).await.unwrap();
 
         assert_eq!(block.viz_type, VizType::ProgressBar);
         assert_eq!(block.data["total"], 2);
@@ -867,11 +840,7 @@ mod tests {
             project_id: None,
         };
         graph.plans.write().await.insert(plan_id, plan);
-        graph
-            .plan_tasks
-            .write()
-            .await
-            .insert(plan_id, vec![]);
+        graph.plan_tasks.write().await.insert(plan_id, vec![]);
 
         let processor = VizBlockProcessor::new(graph, None);
         let text = format!(
@@ -900,7 +869,11 @@ mod tests {
         let blocks = processor.process(text).await;
 
         // Unknown type should degrade to a text block with error info
-        assert!(blocks.len() >= 2, "Expected at least 2 blocks, got {}", blocks.len());
+        assert!(
+            blocks.len() >= 2,
+            "Expected at least 2 blocks, got {}",
+            blocks.len()
+        );
 
         // The middle block should be a text block (graceful degradation) since
         // there's no handler for "totally_unknown_viz"
@@ -917,7 +890,10 @@ mod tests {
                 // If it becomes a viz block (e.g., custom type handler), that's also OK
                 // as long as fallback_text is non-empty
                 let ft = error_block.fallback_text();
-                assert!(!ft.is_empty(), "VizBlock for unknown type must have non-empty fallback_text");
+                assert!(
+                    !ft.is_empty(),
+                    "VizBlock for unknown type must have non-empty fallback_text"
+                );
             }
         }
     }
@@ -967,16 +943,29 @@ mod tests {
         }
 
         let mut tree = ReasoningTree::new("test query", None);
-        tree.add_root(ReasoningNode::new(EntitySource::Note, "note-1", 0.9, "Test"));
+        tree.add_root(ReasoningNode::new(
+            EntitySource::Note,
+            "note-1",
+            0.9,
+            "Test",
+        ));
 
         let processor = VizBlockProcessor::new(graph, None).with_reasoning_tree(tree);
 
         // Test impact_graph
-        let blocks = processor.process(r#"<viz type="impact_graph" target="src/a.rs" />"#).await;
+        let blocks = processor
+            .process(r#"<viz type="impact_graph" target="src/a.rs" />"#)
+            .await;
         for block in &blocks {
             if let ContentBlock::Viz(viz) = block {
-                assert!(!viz.fallback_text.is_empty(), "impact_graph: fallback_text must be non-empty");
-                assert!(viz.title.is_some(), "impact_graph: title should be set for accessibility");
+                assert!(
+                    !viz.fallback_text.is_empty(),
+                    "impact_graph: fallback_text must be non-empty"
+                );
+                assert!(
+                    viz.title.is_some(),
+                    "impact_graph: title should be set for accessibility"
+                );
             }
         }
 
@@ -984,8 +973,14 @@ mod tests {
         let blocks = processor.process(r#"<viz type="reasoning_tree" />"#).await;
         for block in &blocks {
             if let ContentBlock::Viz(viz) = block {
-                assert!(!viz.fallback_text.is_empty(), "reasoning_tree: fallback_text must be non-empty");
-                assert!(viz.title.is_some(), "reasoning_tree: title should be set for accessibility");
+                assert!(
+                    !viz.fallback_text.is_empty(),
+                    "reasoning_tree: fallback_text must be non-empty"
+                );
+                assert!(
+                    viz.title.is_some(),
+                    "reasoning_tree: title should be set for accessibility"
+                );
             }
         }
 
@@ -996,14 +991,23 @@ mod tests {
             ("Activity".into(), 0.9),
         ];
         let block = build_radar_viz(&dims).unwrap();
-        assert!(!block.fallback_text.is_empty(), "context_radar: fallback_text must be non-empty");
-        assert!(block.title.is_some(), "context_radar: title should be set for accessibility");
+        assert!(
+            !block.fallback_text.is_empty(),
+            "context_radar: fallback_text must be non-empty"
+        );
+        assert!(
+            block.title.is_some(),
+            "context_radar: title should be set for accessibility"
+        );
 
         // Test knowledge_card (Pattern Federation stub as proxy)
         let blocks = processor.process(r#"<viz type="protocol_run" />"#).await;
         for block in &blocks {
             if let ContentBlock::Viz(viz) = block {
-                assert!(!viz.fallback_text.is_empty(), "Pattern Federation stub: fallback_text must be non-empty");
+                assert!(
+                    !viz.fallback_text.is_empty(),
+                    "Pattern Federation stub: fallback_text must be non-empty"
+                );
             }
         }
     }
@@ -1110,7 +1114,11 @@ That's all!"#
         // All viz blocks have non-empty fallback
         for block in &blocks {
             if let ContentBlock::Viz(viz) = block {
-                assert!(!viz.fallback_text.is_empty(), "VizBlock {:?} has empty fallback", viz.viz_type);
+                assert!(
+                    !viz.fallback_text.is_empty(),
+                    "VizBlock {:?} has empty fallback",
+                    viz.viz_type
+                );
             }
         }
     }

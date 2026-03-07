@@ -263,7 +263,10 @@ impl EnrichmentPipeline {
             if !stage.is_enabled(&self.config) {
                 ctx.skipped_stages.push(stage.name().to_string());
                 if self.config.debug {
-                    debug!("[enrichment] Stage '{}' is disabled, skipping", stage.name());
+                    debug!(
+                        "[enrichment] Stage '{}' is disabled, skipping",
+                        stage.name()
+                    );
                 }
                 continue;
             }
@@ -286,8 +289,7 @@ impl EnrichmentPipeline {
                 Err(e) => {
                     let elapsed = stage_start.elapsed().as_millis() as u64;
                     ctx.stage_timings.push((stage.name().to_string(), elapsed));
-                    ctx.skipped_stages
-                        .push(format!("{}(error)", stage.name()));
+                    ctx.skipped_stages.push(format!("{}(error)", stage.name()));
                     warn!(
                         "[enrichment] Stage '{}' failed after {}ms: {} — continuing pipeline",
                         stage.name(),
@@ -481,9 +483,7 @@ mod tests {
 
         let ctx = pipeline.execute(&test_input()).await;
         assert!(!ctx.has_content());
-        assert!(ctx
-            .skipped_stages
-            .contains(&"disabled_stage".to_string()));
+        assert!(ctx.skipped_stages.contains(&"disabled_stage".to_string()));
     }
 
     #[tokio::test]
