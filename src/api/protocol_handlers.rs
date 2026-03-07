@@ -1108,3 +1108,394 @@ pub async fn delete_run(
         )))
     }
 }
+
+// ============================================================================
+// Pattern Composer — Compose protocol from notes + FSM
+// ============================================================================
+
+/// A note-to-state binding in a composition
+#[derive(Debug, Deserialize)]
+pub struct NoteStateBinding {
+    pub note_id: Uuid,
+    pub state_name: String,
+}
+
+/// Inline state for composition (uses name-based references instead of UUIDs)
+#[derive(Debug, Deserialize)]
+pub struct ComposeStateInline {
+    pub name: String,
+    pub description: Option<String>,
+    pub state_type: Option<String>,
+    pub action: Option<String>,
+}
+
+/// Inline transition for composition (uses state names instead of UUIDs)
+#[derive(Debug, Deserialize)]
+pub struct ComposeTransitionInline {
+    pub from_state: String,
+    pub to_state: String,
+    pub trigger: String,
+    pub guard: Option<String>,
+}
+
+/// Request body for composing a protocol from notes + FSM definition
+#[derive(Debug, Deserialize)]
+pub struct ComposeProtocolBody {
+    pub project_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    /// Notes to bind to states
+    pub notes: Vec<NoteStateBinding>,
+    /// FSM states
+    pub states: Vec<ComposeStateInline>,
+    /// FSM transitions (using state names)
+    pub transitions: Vec<ComposeTransitionInline>,
+    /// Relevance vector for context routing
+    pub relevance_vector: Option<crate::protocol::routing::RelevanceVector>,
+    /// Trigger patterns to register on the auto-created skill
+    pub triggers: Option<Vec<crate::skills::SkillTrigger>>,
+}
+
+/// Response from composition
+#[derive(Debug, Serialize)]
+pub struct ComposeResponse {
+    pub protocol_id: Uuid,
+    pub skill_id: Uuid,
+    pub states_created: usize,
+    pub transitions_created: usize,
+    pub notes_linked: usize,
+}
+
+/// Compose a protocol from notes + FSM + triggers in one shot.
+///
+/// POST /api/protocols/compose
+///
+/// Creates: Skill + Protocol + States + Transitions + Note→State links
+pub async fn compose_protocol(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<ComposeProtocolBody>,
+) -> Result<(StatusCode, Json<ComposeResponse>), AppError> {
+    // ── Validation ──────────────────────────────────────────────────
+    if body.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name cannot be empty".to_string()));
+    }
+    if body.name.len() > MAX_NAME_LEN {
+        return Err(AppError::BadRequest(format!(
+            "name too long ({} > {} chars)",
+            body.name.len(),
+            MAX_NAME_LEN
+        )));
+    }
+    if body.states.is_empty() {
+        return Err(AppError::BadRequest(
+            "at least one state is required".to_string(),
+        ));
+    }
+
+    // Validate states have unique names
+    let state_names: Vec<&str> = body.states.iter().map(|s| s.name.as_str()).collect();
+    let unique_names: std::collections::HashSet<&str> = state_names.iter().copied().collect();
+    if unique_names.len() != state_names.len() {
+        return Err(AppError::BadRequest(
+            "duplicate state names found".to_string(),
+        ));
+    }
+
+    // Validate transitions reference existing state names
+    for t in &body.transitions {
+        if !unique_names.contains(t.from_state.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "transition from_state '{}' not found in states",
+                t.from_state
+            )));
+        }
+        if !unique_names.contains(t.to_state.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "transition to_state '{}' not found in states",
+                t.to_state
+            )));
+        }
+    }
+
+    // Validate note bindings reference existing state names
+    for nb in &body.notes {
+        if !unique_names.contains(nb.state_name.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "note binding state_name '{}' not found in states",
+                nb.state_name
+            )));
+        }
+    }
+
+    let category = match &body.category {
+        Some(s) => s
+            .parse::<ProtocolCategory>()
+            .map_err(|e| AppError::BadRequest(e.to_string()))?,
+        None => ProtocolCategory::default(),
+    };
+
+    let neo4j = state.orchestrator.neo4j();
+
+    // ── 1. Create Skill ─────────────────────────────────────────────
+    let skill_id = Uuid::new_v4();
+    let skill = crate::skills::SkillNode {
+        id: skill_id,
+        project_id: body.project_id,
+        name: format!("Skill: {}", body.name),
+        description: body
+            .description
+            .clone()
+            .unwrap_or_else(|| format!("Auto-generated skill for protocol '{}'", body.name)),
+        status: crate::skills::SkillStatus::Active,
+        trigger_patterns: body.triggers.clone().unwrap_or_default(),
+        context_template: None,
+        energy: 0.8,
+        cohesion: 0.7,
+        coverage: 0,
+        note_count: 0,
+        decision_count: 0,
+        activation_count: 0,
+        hit_rate: 0.0,
+        last_activated: None,
+        version: 1,
+        fingerprint: None,
+        imported_at: None,
+        is_validated: false,
+        tags: vec![],
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    neo4j
+        .create_skill(&skill)
+        .await
+        .map_err(AppError::Internal)?;
+
+    // ── 2. Create Protocol ──────────────────────────────────────────
+    let placeholder_entry = Uuid::new_v4();
+    let mut proto = Protocol::new(body.project_id, &body.name, placeholder_entry);
+    proto.description = body.description.unwrap_or_default();
+    proto.protocol_category = category;
+    proto.skill_id = Some(skill_id);
+    proto.relevance_vector = body.relevance_vector;
+
+    // Create states with UUID mapping
+    let mut name_to_id: std::collections::HashMap<String, Uuid> = std::collections::HashMap::new();
+    let mut created_states = Vec::new();
+
+    for s in &body.states {
+        let state_type = match &s.state_type {
+            Some(st) => st.parse().map_err(|e: String| AppError::BadRequest(e))?,
+            None => crate::protocol::StateType::default(),
+        };
+        let ps = ProtocolState {
+            id: Uuid::new_v4(),
+            protocol_id: proto.id,
+            name: s.name.clone(),
+            description: s.description.clone().unwrap_or_default(),
+            action: s.action.clone(),
+            state_type,
+        };
+        name_to_id.insert(s.name.clone(), ps.id);
+        created_states.push(ps);
+    }
+
+    // Set entry state and terminal states
+    if let Some(start) = created_states
+        .iter()
+        .find(|s| s.state_type == crate::protocol::StateType::Start)
+    {
+        proto.entry_state = start.id;
+    } else if let Some(first) = created_states.first() {
+        proto.entry_state = first.id;
+    }
+
+    proto.terminal_states = created_states
+        .iter()
+        .filter(|s| s.state_type == crate::protocol::StateType::Terminal)
+        .map(|s| s.id)
+        .collect();
+
+    // Upsert protocol
+    neo4j
+        .upsert_protocol(&proto)
+        .await
+        .map_err(AppError::Internal)?;
+
+    // Upsert states
+    for ps in &created_states {
+        neo4j
+            .upsert_protocol_state(ps)
+            .await
+            .map_err(AppError::Internal)?;
+    }
+
+    // ── 3. Create Transitions ───────────────────────────────────────
+    let mut created_transitions = Vec::new();
+    for t in &body.transitions {
+        let from_id = name_to_id
+            .get(&t.from_state)
+            .ok_or_else(|| AppError::BadRequest(format!("state '{}' not found", t.from_state)))?;
+        let to_id = name_to_id
+            .get(&t.to_state)
+            .ok_or_else(|| AppError::BadRequest(format!("state '{}' not found", t.to_state)))?;
+
+        let pt = ProtocolTransition {
+            id: Uuid::new_v4(),
+            protocol_id: proto.id,
+            from_state: *from_id,
+            to_state: *to_id,
+            trigger: t.trigger.clone(),
+            guard: t.guard.clone(),
+        };
+        created_transitions.push(pt);
+    }
+
+    for pt in &created_transitions {
+        neo4j
+            .upsert_protocol_transition(pt)
+            .await
+            .map_err(AppError::Internal)?;
+    }
+
+    // ── 4. Link notes to the skill as members ──────────────────────
+    // Notes become members of the auto-created skill (HAS_MEMBER relationship),
+    // which provides the knowledge base for this composed protocol.
+    let mut notes_linked = 0;
+    for nb in &body.notes {
+        if name_to_id.contains_key(&nb.state_name) {
+            neo4j
+                .add_skill_member(skill_id, "note", nb.note_id)
+                .await
+                .map_err(AppError::Internal)?;
+            notes_linked += 1;
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ComposeResponse {
+            protocol_id: proto.id,
+            skill_id,
+            states_created: created_states.len(),
+            transitions_created: created_transitions.len(),
+            notes_linked,
+        }),
+    ))
+}
+
+// ============================================================================
+// Pattern Composer — Simulate activation (dry-run routing)
+// ============================================================================
+
+/// Request body for simulating protocol activation
+#[derive(Debug, Deserialize)]
+pub struct SimulateActivationBody {
+    pub protocol_id: Uuid,
+    /// Explicit context vector (if provided, overrides plan-based auto-build)
+    pub context: Option<crate::protocol::routing::ContextVector>,
+    /// Optional plan_id to auto-build context from
+    pub plan_id: Option<Uuid>,
+}
+
+/// Response from simulation
+#[derive(Debug, Serialize)]
+pub struct SimulateResponse {
+    pub score: f64,
+    pub dimensions: Vec<crate::protocol::routing::DimensionScore>,
+    pub would_activate: bool,
+    pub explanation: String,
+    pub context_used: crate::protocol::routing::ContextVector,
+}
+
+/// Simulate protocol activation without side effects.
+///
+/// POST /api/protocols/simulate
+///
+/// Computes affinity score for a given protocol + context without creating a run.
+pub async fn simulate_activation(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<SimulateActivationBody>,
+) -> Result<Json<SimulateResponse>, AppError> {
+    use crate::protocol::routing::{compute_affinity, ContextVector, DimensionWeights};
+
+    let neo4j = state.orchestrator.neo4j();
+
+    // Fetch protocol
+    let proto = neo4j
+        .get_protocol(body.protocol_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Protocol {} not found", body.protocol_id))
+        })?;
+
+    // Build context
+    let context = if let Some(ctx) = body.context {
+        ctx
+    } else if let Some(plan_id) = body.plan_id {
+        // Auto-build from plan metrics (same logic as route_protocols)
+        let plan = neo4j.get_plan(plan_id).await.map_err(AppError::Internal)?;
+        let (tasks, edges) = neo4j
+            .get_plan_dependency_graph(plan_id)
+            .await
+            .map_err(AppError::Internal)?;
+
+        let task_count = tasks.len();
+        let dependency_count = edges.len();
+        let affected_files_count: usize = tasks
+            .iter()
+            .flat_map(|t| t.affected_files.iter())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let completed_count = tasks
+            .iter()
+            .filter(|t| t.status == crate::neo4j::models::TaskStatus::Completed)
+            .count();
+        let completion_pct = if task_count > 0 {
+            completed_count as f64 / task_count as f64
+        } else {
+            0.0
+        };
+
+        let plan_status_str = plan
+            .as_ref()
+            .map(|p| {
+                serde_json::to_string(&p.status)
+                    .unwrap_or_else(|_| "\"execution\"".to_string())
+                    .trim_matches('"')
+                    .to_string()
+            })
+            .unwrap_or_else(|| "execution".to_string());
+
+        ContextVector::from_plan_context(
+            &plan_status_str,
+            task_count,
+            dependency_count,
+            affected_files_count,
+            completion_pct,
+        )
+    } else {
+        ContextVector::default()
+    };
+
+    let relevance = proto
+        .relevance_vector
+        .clone()
+        .unwrap_or_default();
+    let weights = DimensionWeights::default();
+
+    let affinity = compute_affinity(&context, &relevance, &weights);
+
+    // Activation threshold: 0.6 (60%)
+    let would_activate = affinity.score >= 0.6;
+
+    Ok(Json(SimulateResponse {
+        score: affinity.score,
+        dimensions: affinity.dimensions,
+        would_activate,
+        explanation: affinity.explanation,
+        context_used: context,
+    }))
+}

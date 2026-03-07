@@ -354,6 +354,8 @@ impl ToolHandler {
             ("protocol", "report_progress") => "report_protocol_progress",
             ("protocol", "delete_run") => "delete_protocol_run",
             ("protocol", "route") => "route_protocols",
+            ("protocol", "compose") => "compose_protocol",
+            ("protocol", "simulate") => "simulate_protocol",
 
             // Reasoning Tree
             ("reasoning", "reason") => "reason",
@@ -3908,6 +3910,54 @@ impl ToolHandler {
                 let result = http
                     .get(&format!("/api/protocols/route?{}", query_params))
                     .await?;
+                Ok(Some(result))
+            }
+
+            "compose_protocol" => {
+                let mut body = json!({});
+                if let Some(v) = args.get("project_id") {
+                    body["project_id"] = v.clone();
+                }
+                if let Some(v) = args.get("name") {
+                    body["name"] = v.clone();
+                }
+                if let Some(v) = args.get("description") {
+                    body["description"] = v.clone();
+                }
+                if let Some(v) = args.get("category") {
+                    body["category"] = v.clone();
+                }
+                if let Some(v) = args.get("notes") {
+                    body["notes"] = v.clone();
+                }
+                if let Some(v) = args.get("states") {
+                    body["states"] = v.clone();
+                }
+                if let Some(v) = args.get("transitions") {
+                    body["transitions"] = v.clone();
+                }
+                if let Some(v) = args.get("relevance_vector") {
+                    body["relevance_vector"] = v.clone();
+                }
+                if let Some(v) = args.get("triggers") {
+                    body["triggers"] = v.clone();
+                }
+                let result = http.post("/api/protocols/compose", &body).await?;
+                Ok(Some(result))
+            }
+
+            "simulate_protocol" => {
+                let mut body = json!({});
+                if let Some(v) = args.get("protocol_id") {
+                    body["protocol_id"] = v.clone();
+                }
+                if let Some(v) = args.get("context") {
+                    body["context"] = v.clone();
+                }
+                if let Some(v) = args.get("plan_id") {
+                    body["plan_id"] = v.clone();
+                }
+                let result = http.post("/api/protocols/simulate", &body).await?;
                 Ok(Some(result))
             }
 

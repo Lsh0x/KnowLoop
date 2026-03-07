@@ -844,6 +844,14 @@ fn protected_routes() -> Router<OrchestratorState> {
             get(protocol_handlers::route_protocols),
         )
         .route(
+            "/api/protocols/compose",
+            post(protocol_handlers::compose_protocol),
+        )
+        .route(
+            "/api/protocols/simulate",
+            post(protocol_handlers::simulate_activation),
+        )
+        .route(
             "/api/protocols/{protocol_id}",
             get(protocol_handlers::get_protocol)
                 .put(protocol_handlers::update_protocol)

@@ -1732,7 +1732,7 @@ impl Neo4jClient {
                 "#,
             )
             .param("threshold", prune_threshold);
-            let _ = self.graph.execute(delete_q).await?;
+            self.graph.run(delete_q).await?;
         }
 
         Ok((decayed, pruned))

@@ -127,7 +127,6 @@ impl Neo4jClient {
                 proto.last_triggered_at = $last_triggered_at,
                 proto.updated_at = $updated_at
             MERGE (proto)-[:BELONGS_TO]->(p)
-            RETURN proto.id AS created_id
             "#,
         )
         .param("id", protocol.id.to_string())
@@ -168,9 +167,8 @@ impl Neo4jClient {
         .param("created_at", protocol.created_at.to_rfc3339())
         .param("updated_at", protocol.updated_at.to_rfc3339());
 
-        let _ = self
-            .graph
-            .execute(q)
+        self.graph
+            .run(q)
             .await
             .context("Failed to upsert protocol")?;
 
@@ -187,7 +185,7 @@ impl Neo4jClient {
             .param("skill_id", skill_id.to_string());
 
             // Best-effort: don't fail if skill doesn't exist
-            let _ = self.graph.execute(link_q).await;
+            let _ = self.graph.run(link_q).await;
         }
 
         Ok(())
@@ -314,9 +312,8 @@ impl Neo4jClient {
         )
         .param("id", id.to_string());
 
-        let _ = self
-            .graph
-            .execute(delete_q)
+        self.graph
+            .run(delete_q)
             .await
             .context("Failed to delete protocol")?;
 
@@ -339,7 +336,6 @@ impl Neo4jClient {
                 s.action = $action,
                 s.state_type = $state_type
             MERGE (proto)-[:HAS_STATE]->(s)
-            RETURN s.id AS created_id
             "#,
         )
         .param("id", state.id.to_string())
@@ -349,9 +345,8 @@ impl Neo4jClient {
         .param("action", state.action.clone().unwrap_or_default())
         .param("state_type", state.state_type.to_string());
 
-        let _ = self
-            .graph
-            .execute(q)
+        self.graph
+            .run(q)
             .await
             .context("Failed to upsert protocol state")?;
 
@@ -404,9 +399,8 @@ impl Neo4jClient {
         )
         .param("id", state_id.to_string());
 
-        let _ = self
-            .graph
-            .execute(delete_q)
+        self.graph
+            .run(delete_q)
             .await
             .context("Failed to delete protocol state")?;
 
@@ -429,7 +423,6 @@ impl Neo4jClient {
                 t.trigger = $trigger,
                 t.guard = $guard
             MERGE (proto)-[:HAS_TRANSITION]->(t)
-            RETURN t.id AS created_id
             "#,
         )
         .param("id", transition.id.to_string())
@@ -439,9 +432,8 @@ impl Neo4jClient {
         .param("trigger", transition.trigger.clone())
         .param("guard", transition.guard.clone().unwrap_or_default());
 
-        let _ = self
-            .graph
-            .execute(q)
+        self.graph
+            .run(q)
             .await
             .context("Failed to upsert protocol transition")?;
 
@@ -497,9 +489,8 @@ impl Neo4jClient {
         )
         .param("id", transition_id.to_string());
 
-        let _ = self
-            .graph
-            .execute(delete_q)
+        self.graph
+            .run(delete_q)
             .await
             .context("Failed to delete protocol transition")?;
 
@@ -641,7 +632,7 @@ impl Neo4jClient {
             )
             .param("run_id", run.id.to_string())
             .param("plan_id", plan_id.to_string());
-            let _ = self.graph.execute(link_q).await;
+            let _ = self.graph.run(link_q).await;
         }
 
         // Link to task if present
@@ -655,7 +646,7 @@ impl Neo4jClient {
             )
             .param("run_id", run.id.to_string())
             .param("task_id", task_id.to_string());
-            let _ = self.graph.execute(link_q).await;
+            let _ = self.graph.run(link_q).await;
         }
 
         Ok(())
@@ -692,7 +683,6 @@ impl Neo4jClient {
                 r.status = $status,
                 r.completed_at = $completed_at,
                 r.error = $error
-            RETURN r.id AS updated_id
             "#,
         )
         .param("id", run.id.to_string())
@@ -707,9 +697,8 @@ impl Neo4jClient {
         )
         .param("error", run.error.clone().unwrap_or_default());
 
-        let _ = self
-            .graph
-            .execute(q)
+        self.graph
+            .run(q)
             .await
             .context("Failed to update protocol run")?;
 
@@ -813,9 +802,8 @@ impl Neo4jClient {
         )
         .param("id", run_id.to_string());
 
-        let _ = self
-            .graph
-            .execute(delete_q)
+        self.graph
+            .run(delete_q)
             .await
             .context("Failed to delete protocol run")?;
 
