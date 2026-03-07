@@ -1193,7 +1193,7 @@ impl ChatManager {
     ) -> String {
         use super::prompt::{
             assemble_prompt, context_to_json, context_to_markdown, fetch_project_context,
-            BASE_SYSTEM_PROMPT, TOOL_REFERENCE,
+            truncate_dynamic_context_default, BASE_SYSTEM_PROMPT, TOOL_REFERENCE,
         };
 
         // No project → base prompt + tool reference only
@@ -1272,7 +1272,37 @@ impl ChatManager {
             context_to_markdown(&ctx, Some(user_message))
         };
 
-        let prompt = assemble_prompt(BASE_SYSTEM_PROMPT, &dynamic_section);
+        // Load session continuity context (previous session, active work)
+        let continuity_section = {
+            let graph = self.graph.clone();
+            let slug_owned = slug.to_string();
+            match super::continuity::load_session_context(&graph, &slug_owned).await {
+                Ok(resume) if resume.has_content() => {
+                    debug!(
+                        "[continuity] Injecting session context ({}ms)",
+                        resume.load_time_ms
+                    );
+                    resume.to_markdown()
+                }
+                Ok(_) => String::new(),
+                Err(e) => {
+                    warn!("[continuity] Failed to load session context: {}", e);
+                    String::new()
+                }
+            }
+        };
+
+        let full_dynamic = if continuity_section.is_empty() {
+            dynamic_section
+        } else {
+            format!("{}\n\n{}", continuity_section, dynamic_section)
+        };
+
+        // Smart truncation: cap dynamic context to ~2500 tokens (~10k chars)
+        // to keep total system prompt under ~8000 tokens
+        let truncated_dynamic = truncate_dynamic_context_default(&full_dynamic);
+
+        let prompt = assemble_prompt(BASE_SYSTEM_PROMPT, &truncated_dynamic);
         // Append exhaustive tool reference as final section
         format!("{}\n\n---\n\n{}", prompt, TOOL_REFERENCE)
     }
@@ -3135,6 +3165,35 @@ impl ChatManager {
             if !assistant_text.is_empty() {
                 let mut mm = mm.lock().await;
                 mm.record_assistant_message(&assistant_text);
+
+                // Auto add_discussed: extract entities from response and mark as DISCUSSED (async)
+                if let Some(uuid) = session_uuid {
+                    let project_id = {
+                        // Resolve project_id from session's project_slug
+                        match graph.get_chat_session(uuid).await {
+                            Ok(Some(node)) => {
+                                if let Some(ref slug) = node.project_slug {
+                                    graph
+                                        .get_project_by_slug(slug)
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .map(|p| p.id)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    };
+                    super::feedback::spawn_feedback(
+                        graph.clone(),
+                        uuid,
+                        project_id,
+                        assistant_text.clone(),
+                        super::feedback::SessionDiscussedCache::new(),
+                    );
+                }
 
                 // Store pending messages via ContextInjector
                 if let Some(ref injector) = context_injector {

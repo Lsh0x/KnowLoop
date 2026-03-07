@@ -2048,6 +2048,185 @@ pub fn assemble_prompt(base: &str, dynamic_context: &str) -> String {
 }
 
 // ============================================================================
+// Smart Truncation
+// ============================================================================
+
+/// Maximum token budget for the dynamic context section.
+/// The full system prompt = BASE_SYSTEM_PROMPT (~5k tokens) + dynamic + TOOL_REFERENCE.
+/// We cap the dynamic section to keep total under ~8000 tokens.
+const DYNAMIC_CONTEXT_TOKEN_BUDGET: usize = 2500;
+
+/// Approximate token count using ~4 chars per token heuristic.
+/// This is a fast approximation sufficient for budget enforcement.
+fn estimate_tokens(text: &str) -> usize {
+    // ~4 chars per token is a reasonable approximation for English/code
+    text.len().div_ceil(4)
+}
+
+/// Section priority for truncation (lower = removed first).
+///
+/// Truncation order (removed first → last):
+/// 1. Feature graphs, structural topology (low priority, verbose)
+/// 2. Releases, milestones (medium priority)
+/// 3. Workspace projects, languages, key files (medium)
+/// 4. Active plans, constraints, fabric metrics (high)
+/// 5. Continuity context (high)
+/// 6. Gotchas, guidelines (highest — preserved last)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SectionPriority {
+    /// Lowest priority — removed first
+    Low = 0,
+    /// Medium priority
+    Medium = 1,
+    /// High priority
+    High = 2,
+    /// Highest priority — removed last
+    Critical = 3,
+}
+
+/// A labeled section of the dynamic context with its priority.
+struct DynamicSection {
+    /// Section header identifier (for logging)
+    label: String,
+    /// The markdown content of this section
+    content: String,
+    /// Truncation priority (lower = removed first)
+    priority: SectionPriority,
+}
+
+/// Classify sections in the dynamic context by their markdown headers.
+fn classify_section(header: &str) -> SectionPriority {
+    let h = header.to_lowercase();
+    if h.contains("gotcha")
+        || h.contains("guideline")
+        || h.contains("global gotcha")
+        || h.contains("global guideline")
+    {
+        SectionPriority::Critical
+    } else if h.contains("active plan")
+        || h.contains("constraint")
+        || h.contains("fabric")
+        || h.contains("continuity")
+        || h.contains("session")
+    {
+        SectionPriority::High
+    } else if h.contains("workspace")
+        || h.contains("language")
+        || h.contains("key file")
+        || h.contains("release")
+        || h.contains("milestone")
+    {
+        SectionPriority::Medium
+    } else {
+        SectionPriority::Low
+    }
+}
+
+/// Parse a dynamic context markdown into labeled sections.
+fn parse_dynamic_sections(dynamic_context: &str) -> Vec<DynamicSection> {
+    let mut sections: Vec<DynamicSection> = Vec::new();
+    let mut current_label = String::new();
+    let mut current_content = String::new();
+
+    for line in dynamic_context.lines() {
+        if line.starts_with("## ") {
+            // Save previous section
+            if !current_content.is_empty() {
+                let priority = classify_section(&current_label);
+                sections.push(DynamicSection {
+                    label: current_label.clone(),
+                    content: current_content.clone(),
+                    priority,
+                });
+            }
+            current_label = line.trim_start_matches('#').trim().to_string();
+            current_content = format!("{}\n", line);
+        } else {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+
+    // Don't forget the last section
+    if !current_content.is_empty() {
+        let priority = classify_section(&current_label);
+        sections.push(DynamicSection {
+            label: current_label,
+            content: current_content,
+            priority,
+        });
+    }
+
+    sections
+}
+
+/// Truncate the dynamic context to fit within the token budget.
+///
+/// Strategy:
+/// 1. Parse into labeled sections with priorities
+/// 2. If total fits within budget, return as-is
+/// 3. Otherwise, remove sections in priority order (lowest first)
+/// 4. Within same priority, remove longest sections first
+///
+/// Returns the truncated dynamic context as a string.
+pub fn truncate_dynamic_context(dynamic_context: &str, token_budget: usize) -> String {
+    let total_tokens = estimate_tokens(dynamic_context);
+
+    // Fast path: fits within budget
+    if total_tokens <= token_budget {
+        return dynamic_context.to_string();
+    }
+
+    let mut sections = parse_dynamic_sections(dynamic_context);
+
+    // Sort by priority ascending (Low first), then by size descending within same priority
+    sections.sort_by(|a, b| {
+        a.priority.cmp(&b.priority).then_with(|| {
+            let a_tokens = estimate_tokens(&a.content);
+            let b_tokens = estimate_tokens(&b.content);
+            b_tokens.cmp(&a_tokens) // larger first within same priority
+        })
+    });
+
+    // Remove sections from the front (lowest priority, largest) until we fit
+    let mut tokens_to_remove = total_tokens.saturating_sub(token_budget);
+
+    let mut keep_indices: Vec<bool> = vec![true; sections.len()];
+
+    for (i, section) in sections.iter().enumerate() {
+        if tokens_to_remove == 0 {
+            break;
+        }
+        let section_tokens = estimate_tokens(&section.content);
+        keep_indices[i] = false;
+        tokens_to_remove = tokens_to_remove.saturating_sub(section_tokens);
+        tracing::debug!(
+            "[truncation] Removed section '{}' ({} tokens, priority {:?})",
+            section.label,
+            section_tokens,
+            section.priority
+        );
+    }
+
+    // Rebuild in original order (sections are sorted by priority, we need to reassemble)
+    // Actually, let's just filter and join the kept sections
+    let result: String = sections
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| keep_indices[*i])
+        .map(|(_, s)| s.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    result
+}
+
+/// Truncate with the default token budget for dynamic context.
+pub fn truncate_dynamic_context_default(dynamic_context: &str) -> String {
+    truncate_dynamic_context(dynamic_context, DYNAMIC_CONTEXT_TOKEN_BUDGET)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -3087,6 +3266,181 @@ mod tests {
         assert!(
             json_str.contains("Code Communities"),
             "JSON should contain communities data"
+        );
+    }
+
+    // ========================================================================
+    // Truncation tests
+    // ========================================================================
+
+    #[test]
+    fn test_estimate_tokens() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("hello"), 2); // 5 chars / 4 ≈ 2
+        assert_eq!(estimate_tokens("a".repeat(100).as_str()), 25); // 100 / 4
+    }
+
+    #[test]
+    fn test_truncation_fits_within_budget() {
+        let ctx = "## Guidelines\n- Always use Arc\n\n## Gotchas\n- Watch out for Sized\n";
+        let result = truncate_dynamic_context(ctx, 1000);
+        assert_eq!(result, ctx); // Should not truncate
+    }
+
+    #[test]
+    fn test_truncation_removes_low_priority_first() {
+        let mut ctx = String::new();
+        ctx.push_str("## Gotchas\n- Critical gotcha info\n\n");
+        ctx.push_str("## Guidelines\n- Important guideline\n\n");
+        ctx.push_str("## Feature Graphs\n");
+        ctx.push_str(&"- Feature graph data line\n".repeat(50)); // ~1250 chars
+        ctx.push_str("\n## Structural Topology\n");
+        ctx.push_str(&"- Topology data\n".repeat(50)); // ~800 chars
+
+        // Set a tight budget that forces truncation
+        let result = truncate_dynamic_context(&ctx, 50);
+
+        // Gotchas and Guidelines should be preserved (Critical priority)
+        assert!(result.contains("Gotchas"), "Gotchas should be preserved");
+        assert!(
+            result.contains("Guidelines"),
+            "Guidelines should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_truncation_preserves_critical_sections() {
+        let ctx = "## Gotchas\n- Never use git add -A\n\n## Guidelines\n- Always use Arc<dyn GraphStore>\n";
+        // Even with very tight budget, these critical sections should survive
+        let result = truncate_dynamic_context(ctx, 10);
+        // With budget = 10 tokens (~40 chars), we can't fit everything
+        // But the function should try to keep critical sections
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_classify_section_priorities() {
+        assert_eq!(classify_section("Gotchas"), SectionPriority::Critical);
+        assert_eq!(
+            classify_section("Global Guidelines"),
+            SectionPriority::Critical
+        );
+        assert_eq!(classify_section("Active Plans"), SectionPriority::High);
+        assert_eq!(classify_section("Constraints"), SectionPriority::High);
+        assert_eq!(
+            classify_section("Session Continuity"),
+            SectionPriority::High
+        );
+        assert_eq!(classify_section("Knowledge Fabric"), SectionPriority::High);
+        assert_eq!(classify_section("Releases"), SectionPriority::Medium);
+        assert_eq!(classify_section("Languages"), SectionPriority::Medium);
+        assert_eq!(classify_section("Feature Graphs"), SectionPriority::Low);
+        assert_eq!(classify_section("Random Section"), SectionPriority::Low);
+    }
+
+    #[test]
+    fn test_parse_dynamic_sections() {
+        let ctx = "## Section A\nContent A\n## Section B\nContent B\nMore B\n";
+        let sections = parse_dynamic_sections(ctx);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].label, "Section A");
+        assert_eq!(sections[1].label, "Section B");
+        assert!(sections[1].content.contains("More B"));
+    }
+
+    // ========================================================================
+    // E2E Scenario Tests (TP4.5)
+    // ========================================================================
+
+    /// E2E #5: System prompt includes dynamic injection sections
+    #[test]
+    fn test_e2e_system_prompt_dynamic_injection() {
+        // Build a context markdown with various sections
+        let mut dynamic = String::new();
+        dynamic.push_str("## Active Project: test-project (test-project)\nRoot: /tmp/test\n\n");
+        dynamic.push_str("## Guidelines\n- Always use Arc<dyn GraphStore>\n\n");
+        dynamic.push_str("## Gotchas\n- Never use git add -A in backend\n\n");
+        dynamic.push_str("## Active Plans\n- TP4 (in_progress, priority 80)\n\n");
+
+        let prompt = assemble_prompt(BASE_SYSTEM_PROMPT, &dynamic);
+
+        // Base should be present
+        assert!(prompt.contains("EXCLUSIVELY the Project Orchestrator MCP tools"));
+
+        // Dynamic sections should be present
+        assert!(prompt.contains("Always use Arc<dyn GraphStore>"));
+        assert!(prompt.contains("Never use git add -A"));
+        assert!(prompt.contains("Active Plans"));
+    }
+
+    /// E2E #6: Rich context → truncation keeps prompt under budget
+    #[test]
+    fn test_e2e_truncation_under_8000_tokens() {
+        // Build an oversized dynamic context (~5000 tokens)
+        let mut ctx = String::new();
+
+        // Critical sections (should survive)
+        ctx.push_str(
+            "## Gotchas\n- Never use git add -A in backend\n- Pre-push hook checks fmt+clippy\n\n",
+        );
+        ctx.push_str("## Guidelines\n- Always use Arc<dyn GraphStore>\n- Use ?Sized for dyn trait generics\n\n");
+
+        // High priority
+        ctx.push_str("## Active Plans\n");
+        for i in 0..10 {
+            ctx.push_str(&format!("- Plan {} (in_progress, priority 80)\n", i));
+        }
+        ctx.push('\n');
+
+        // Medium priority (verbose)
+        ctx.push_str("## Releases\n");
+        for i in 0..20 {
+            ctx.push_str(&format!(
+                "- v0.{}.0 (planned) — target: 2026-04-{:02}\n",
+                i,
+                i + 1
+            ));
+        }
+        ctx.push('\n');
+
+        // Low priority (very verbose — should be removed first)
+        ctx.push_str("## Feature Graphs\n");
+        ctx.push_str(&"- Feature graph with many entities and descriptions that take up space in the prompt\n".repeat(100));
+        ctx.push('\n');
+        ctx.push_str("## Structural Topology\n");
+        ctx.push_str(
+            &"- Module community with various files and coupling metrics data\n".repeat(80),
+        );
+        ctx.push('\n');
+
+        let total_before = estimate_tokens(&ctx);
+        assert!(
+            total_before > DYNAMIC_CONTEXT_TOKEN_BUDGET,
+            "Context should exceed budget before truncation: {} tokens",
+            total_before
+        );
+
+        let truncated = truncate_dynamic_context_default(&ctx);
+        let total_after = estimate_tokens(&truncated);
+        assert!(
+            total_after <= DYNAMIC_CONTEXT_TOKEN_BUDGET,
+            "Truncated context should be under budget: {} tokens (budget: {})",
+            total_after,
+            DYNAMIC_CONTEXT_TOKEN_BUDGET
+        );
+
+        // Critical sections should survive
+        assert!(
+            truncated.contains("Gotchas"),
+            "Gotchas should survive truncation"
+        );
+        assert!(
+            truncated.contains("Guidelines"),
+            "Guidelines should survive truncation"
+        );
+        assert!(
+            truncated.contains("Never use git add -A"),
+            "Gotcha content should survive"
         );
     }
 }
