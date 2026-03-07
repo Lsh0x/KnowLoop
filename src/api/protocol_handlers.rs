@@ -225,7 +225,7 @@ pub async fn create_protocol(
     if let Some(ref tm) = body.trigger_mode {
         protocol.trigger_mode = tm
             .parse::<crate::protocol::TriggerMode>()
-            .map_err(|e| AppError::BadRequest(e))?;
+            .map_err(AppError::BadRequest)?;
     }
     protocol.trigger_config = body.trigger_config.clone();
 
@@ -421,7 +421,7 @@ pub async fn update_protocol(
     if let Some(trigger_mode_str) = body.trigger_mode {
         protocol.trigger_mode = trigger_mode_str
             .parse::<crate::protocol::TriggerMode>()
-            .map_err(|e| AppError::BadRequest(e))?;
+            .map_err(AppError::BadRequest)?;
     }
     if let Some(trigger_config) = body.trigger_config {
         protocol.trigger_config = Some(trigger_config);
