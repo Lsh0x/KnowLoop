@@ -147,6 +147,83 @@ async fn trigger_protocols_for_event(
 }
 
 // ============================================================================
+// Orphan Run Recovery (server startup)
+// ============================================================================
+
+/// Maximum age for a Running run before it's considered orphaned (1 hour).
+const ORPHAN_RUN_MAX_AGE_SECS: i64 = 3600;
+
+/// Recover orphaned protocol runs at server startup.
+///
+/// Scans all projects for `ProtocolRun` nodes with `status = running` and
+/// `started_at` older than [`ORPHAN_RUN_MAX_AGE_SECS`]. These runs were
+/// likely interrupted by a server crash or restart and will never complete
+/// on their own.
+///
+/// Each orphaned run is marked as `Failed` with the error message
+/// "Recovered: server restarted during execution".
+///
+/// This function should be called once at server startup, before spawning
+/// the scheduler or handling any requests.
+pub async fn recover_orphaned_runs(store: &dyn GraphStore) -> anyhow::Result<u32> {
+    let projects = store.list_projects().await?;
+    let now = chrono::Utc::now();
+    let mut total_recovered = 0u32;
+
+    for project in &projects {
+        // List all protocols for this project
+        let (protocols, _) = store.list_protocols(project.id, None, 100, 0).await?;
+
+        for protocol in &protocols {
+            // List running runs for this protocol
+            let (running_runs, _) = store
+                .list_protocol_runs(
+                    protocol.id,
+                    Some(crate::protocol::RunStatus::Running),
+                    100,
+                    0,
+                )
+                .await?;
+
+            for run in &running_runs {
+                let age_secs = (now - run.started_at).num_seconds();
+                if age_secs > ORPHAN_RUN_MAX_AGE_SECS {
+                    // Mark as failed
+                    let mut recovered_run = run.clone();
+                    recovered_run.fail("Recovered: server restarted during execution");
+
+                    if let Err(e) = store.update_protocol_run(&recovered_run).await {
+                        tracing::warn!(
+                            run_id = %run.id,
+                            protocol_id = %protocol.id,
+                            "Failed to recover orphaned run: {}", e
+                        );
+                    } else {
+                        tracing::info!(
+                            run_id = %run.id,
+                            protocol_id = %protocol.id,
+                            protocol_name = %protocol.name,
+                            age_secs,
+                            "Recovered orphaned protocol run"
+                        );
+                        total_recovered += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if total_recovered > 0 {
+        tracing::info!(
+            count = total_recovered,
+            "Recovered {total_recovered} orphaned protocol run(s)"
+        );
+    }
+
+    Ok(total_recovered)
+}
+
+// ============================================================================
 // Periodic Scheduler
 // ============================================================================
 
@@ -625,6 +702,104 @@ mod tests {
         assert_eq!(schedule_interval_secs("weekly"), Some(604800));
         assert_eq!(schedule_interval_secs("unknown"), None);
     }
+
+    // ====================================================================
+    // Recovery tests
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_recover_orphaned_run() {
+        let store = MockGraphStore::new();
+        let (_, protocol) = setup_event_triggered_protocol(
+            &store,
+            TriggerMode::Event,
+            vec!["post_sync".to_string()],
+        )
+        .await;
+
+        // Create a run that's been "running" for 2 hours (orphaned)
+        let mut run = crate::protocol::ProtocolRun::new(
+            protocol.id,
+            protocol.entry_state,
+            "Start",
+        );
+        run.started_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        store.create_protocol_run(&run).await.unwrap();
+
+        let count = recover_orphaned_runs(&store).await.unwrap();
+        assert_eq!(count, 1);
+
+        // Verify run is now Failed
+        let updated = store.get_protocol_run(run.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, crate::protocol::RunStatus::Failed);
+        assert_eq!(
+            updated.error.as_deref(),
+            Some("Recovered: server restarted during execution")
+        );
+        assert!(updated.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_recover_skips_recent_runs() {
+        let store = MockGraphStore::new();
+        let (_, protocol) = setup_event_triggered_protocol(
+            &store,
+            TriggerMode::Event,
+            vec!["post_sync".to_string()],
+        )
+        .await;
+
+        // Create a run that's been running for 5 minutes (not orphaned)
+        let mut run = crate::protocol::ProtocolRun::new(
+            protocol.id,
+            protocol.entry_state,
+            "Start",
+        );
+        run.started_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+        store.create_protocol_run(&run).await.unwrap();
+
+        let count = recover_orphaned_runs(&store).await.unwrap();
+        assert_eq!(count, 0);
+
+        // Run should still be Running
+        let updated = store.get_protocol_run(run.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, crate::protocol::RunStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_recover_skips_completed_runs() {
+        let store = MockGraphStore::new();
+        let (_, protocol) = setup_event_triggered_protocol(
+            &store,
+            TriggerMode::Event,
+            vec!["post_sync".to_string()],
+        )
+        .await;
+
+        // Create an old but already-completed run
+        let mut run = crate::protocol::ProtocolRun::new(
+            protocol.id,
+            protocol.entry_state,
+            "Start",
+        );
+        run.started_at = chrono::Utc::now() - chrono::Duration::hours(5);
+        run.complete();
+        store.create_protocol_run(&run).await.unwrap();
+
+        let count = recover_orphaned_runs(&store).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_recover_no_projects() {
+        let store = MockGraphStore::new();
+        let count = recover_orphaned_runs(&store).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    // ====================================================================
+    // Scheduler tests
+    // ====================================================================
 
     #[tokio::test]
     async fn test_scheduled_trigger_daily_due() {

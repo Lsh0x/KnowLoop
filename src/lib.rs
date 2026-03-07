@@ -1096,6 +1096,18 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         orchestrator.clone(),
     );
 
+    // Recover orphaned protocol runs from previous server instance
+    match crate::protocol::hooks::recover_orphaned_runs(orchestrator.neo4j()).await {
+        Ok(count) => {
+            if count > 0 {
+                tracing::info!("Protocol recovery: marked {count} orphaned run(s) as failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Protocol recovery failed (non-fatal): {}", e);
+        }
+    }
+
     // Spawn the protocol scheduler (hourly evaluation of scheduled protocols)
     crate::protocol::hooks::spawn_protocol_scheduler(orchestrator.neo4j_arc());
 
