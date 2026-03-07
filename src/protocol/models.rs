@@ -323,8 +323,211 @@ impl ProtocolTransition {
 }
 
 // ============================================================================
+// ProtocolRun (FSM Runtime)
+// ============================================================================
+
+/// Status of a protocol execution run.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// The run is actively progressing through states
+    #[default]
+    Running,
+    /// The run reached a terminal state successfully
+    Completed,
+    /// The run was aborted due to an error
+    Failed,
+    /// The run was manually cancelled
+    Cancelled,
+}
+
+impl fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => write!(f, "running"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+impl FromStr for RunStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("Unknown run status: {}", s)),
+        }
+    }
+}
+
+/// A state visit record in a protocol run's history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateVisit {
+    /// The state that was visited
+    pub state_id: Uuid,
+    /// The state name (denormalized for convenience)
+    pub state_name: String,
+    /// When this state was entered
+    pub entered_at: DateTime<Utc>,
+    /// The trigger that caused entry (None for the initial state)
+    pub trigger: Option<String>,
+}
+
+/// A protocol run — an instance of a protocol FSM being executed.
+///
+/// Tracks the current state, history of visited states, and execution metadata.
+/// A run progresses through states via transitions triggered by events.
+///
+/// # Neo4j Relations
+/// ```text
+/// (ProtocolRun)-[:INSTANCE_OF]->(Protocol)     — the protocol being executed
+/// (ProtocolRun)-[:CURRENT_STATE]->(ProtocolState) — current position in FSM
+/// (ProtocolRun)-[:LINKED_TO_PLAN]->(Plan)      — optional plan context
+/// (ProtocolRun)-[:LINKED_TO_TASK]->(Task)      — optional task context
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolRun {
+    /// Unique identifier
+    pub id: Uuid,
+    /// The protocol being executed
+    pub protocol_id: Uuid,
+    /// Optional plan context (e.g., wave-execution runs against a plan)
+    pub plan_id: Option<Uuid>,
+    /// Optional task context
+    pub task_id: Option<Uuid>,
+    /// Current state in the FSM
+    pub current_state: Uuid,
+    /// Ordered history of visited states
+    #[serde(default)]
+    pub states_visited: Vec<StateVisit>,
+    /// Execution status
+    #[serde(default)]
+    pub status: RunStatus,
+    /// When the run was started
+    pub started_at: DateTime<Utc>,
+    /// When the run completed (reached terminal state, failed, or cancelled)
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Optional error message if status is Failed
+    pub error: Option<String>,
+}
+
+impl ProtocolRun {
+    /// Create a new running protocol execution.
+    pub fn new(
+        protocol_id: Uuid,
+        entry_state_id: Uuid,
+        entry_state_name: impl Into<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            protocol_id,
+            plan_id: None,
+            task_id: None,
+            current_state: entry_state_id,
+            states_visited: vec![StateVisit {
+                state_id: entry_state_id,
+                state_name: entry_state_name.into(),
+                entered_at: now,
+                trigger: None,
+            }],
+            status: RunStatus::Running,
+            started_at: now,
+            completed_at: None,
+            error: None,
+        }
+    }
+
+    /// Returns true if the run is still active.
+    pub fn is_active(&self) -> bool {
+        self.status == RunStatus::Running
+    }
+
+    /// Returns true if the run has finished (completed, failed, or cancelled).
+    pub fn is_finished(&self) -> bool {
+        !self.is_active()
+    }
+
+    /// Record a state transition.
+    pub fn visit_state(
+        &mut self,
+        state_id: Uuid,
+        state_name: impl Into<String>,
+        trigger: impl Into<String>,
+    ) {
+        self.current_state = state_id;
+        self.states_visited.push(StateVisit {
+            state_id,
+            state_name: state_name.into(),
+            entered_at: Utc::now(),
+            trigger: Some(trigger.into()),
+        });
+    }
+
+    /// Mark the run as completed (reached terminal state).
+    pub fn complete(&mut self) {
+        self.status = RunStatus::Completed;
+        self.completed_at = Some(Utc::now());
+    }
+
+    /// Mark the run as failed with an error message.
+    pub fn fail(&mut self, error: impl Into<String>) {
+        self.status = RunStatus::Failed;
+        self.completed_at = Some(Utc::now());
+        self.error = Some(error.into());
+    }
+
+    /// Mark the run as cancelled.
+    pub fn cancel(&mut self) {
+        self.status = RunStatus::Cancelled;
+        self.completed_at = Some(Utc::now());
+    }
+}
+
+/// Result of a transition attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionResult {
+    /// Whether the transition was successful
+    pub success: bool,
+    /// The new current state (after transition)
+    pub current_state: Uuid,
+    /// Name of the new current state
+    pub current_state_name: String,
+    /// Whether the run is now completed (reached terminal state)
+    pub run_completed: bool,
+    /// The updated run status
+    pub status: RunStatus,
+    /// Error message if transition failed
+    pub error: Option<String>,
+}
+
+// ============================================================================
 // DTOs
 // ============================================================================
+
+/// Request to start a protocol run
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartRunRequest {
+    /// The protocol to execute
+    pub protocol_id: Uuid,
+    /// Optional plan context
+    pub plan_id: Option<Uuid>,
+    /// Optional task context
+    pub task_id: Option<Uuid>,
+}
+
+/// Request to fire a transition on a running protocol
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FireTransitionRequest {
+    /// The trigger event to fire
+    pub trigger: String,
+}
 
 /// Request to create a new protocol
 #[derive(Debug, Clone, Serialize, Deserialize)]

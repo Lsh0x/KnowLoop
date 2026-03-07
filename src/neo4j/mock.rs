@@ -132,6 +132,7 @@ pub struct MockGraphStore {
     pub protocols: RwLock<HashMap<Uuid, crate::protocol::Protocol>>,
     pub protocol_states: RwLock<HashMap<Uuid, crate::protocol::ProtocolState>>,
     pub protocol_transitions: RwLock<HashMap<Uuid, crate::protocol::ProtocolTransition>>,
+    pub protocol_runs: RwLock<HashMap<Uuid, crate::protocol::ProtocolRun>>,
 
     // Analysis profiles (keyed by profile id String)
     pub analysis_profiles: RwLock<HashMap<String, crate::graph::models::AnalysisProfile>>,
@@ -219,6 +220,7 @@ impl MockGraphStore {
             protocols: RwLock::new(HashMap::new()),
             protocol_states: RwLock::new(HashMap::new()),
             protocol_transitions: RwLock::new(HashMap::new()),
+            protocol_runs: RwLock::new(HashMap::new()),
             analysis_profiles: RwLock::new(HashMap::new()),
             topology_rules: RwLock::new(HashMap::new()),
             mock_has_context_cards: std::sync::atomic::AtomicBool::new(false),
@@ -7911,6 +7913,72 @@ impl GraphStore for MockGraphStore {
             .write()
             .await
             .remove(&transition_id)
+            .is_some())
+    }
+
+    // ========================================================================
+    // ProtocolRun operations (FSM Runtime)
+    // ========================================================================
+
+    async fn create_protocol_run(
+        &self,
+        run: &crate::protocol::ProtocolRun,
+    ) -> anyhow::Result<()> {
+        self.protocol_runs
+            .write()
+            .await
+            .insert(run.id, run.clone());
+        Ok(())
+    }
+
+    async fn get_protocol_run(
+        &self,
+        run_id: Uuid,
+    ) -> anyhow::Result<Option<crate::protocol::ProtocolRun>> {
+        Ok(self.protocol_runs.read().await.get(&run_id).cloned())
+    }
+
+    async fn update_protocol_run(
+        &self,
+        run: &crate::protocol::ProtocolRun,
+    ) -> anyhow::Result<()> {
+        let mut store = self.protocol_runs.write().await;
+        if store.contains_key(&run.id) {
+            store.insert(run.id, run.clone());
+            Ok(())
+        } else {
+            anyhow::bail!("ProtocolRun not found: {}", run.id)
+        }
+    }
+
+    async fn list_protocol_runs(
+        &self,
+        protocol_id: Uuid,
+        status: Option<crate::protocol::RunStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::protocol::ProtocolRun>, usize)> {
+        let store = self.protocol_runs.read().await;
+        let mut filtered: Vec<_> = store
+            .values()
+            .filter(|r| {
+                r.protocol_id == protocol_id
+                    && status.as_ref().map_or(true, |s| r.status == *s)
+            })
+            .cloned()
+            .collect();
+        filtered.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        let total = filtered.len();
+        let page = filtered.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn delete_protocol_run(&self, run_id: Uuid) -> anyhow::Result<bool> {
+        Ok(self
+            .protocol_runs
+            .write()
+            .await
+            .remove(&run_id)
             .is_some())
     }
 }

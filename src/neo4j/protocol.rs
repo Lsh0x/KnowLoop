@@ -4,7 +4,10 @@
 //! entities on the Neo4j graph.
 
 use super::client::Neo4jClient;
-use crate::protocol::{Protocol, ProtocolCategory, ProtocolState, ProtocolTransition};
+use crate::protocol::{
+    Protocol, ProtocolCategory, ProtocolRun, ProtocolState, ProtocolTransition, RunStatus,
+    StateVisit,
+};
 use anyhow::{Context, Result};
 use neo4rs::query;
 use uuid::Uuid;
@@ -451,6 +454,297 @@ impl Neo4jClient {
         let _ = self.graph.execute(delete_q)
             .await
             .context("Failed to delete protocol transition")?;
+
+        Ok(true)
+    }
+
+    // ========================================================================
+    // ProtocolRun CRUD (FSM Runtime)
+    // ========================================================================
+
+    /// Convert a Neo4j node to a [`ProtocolRun`].
+    pub(crate) fn node_to_protocol_run(node: &neo4rs::Node) -> Result<ProtocolRun> {
+        let states_visited_json: String = node
+            .get("states_visited_json")
+            .unwrap_or_else(|_| "[]".to_string());
+        let states_visited: Vec<StateVisit> =
+            serde_json::from_str(&states_visited_json).unwrap_or_default();
+
+        Ok(ProtocolRun {
+            id: node.get::<String>("id")?.parse()?,
+            protocol_id: node.get::<String>("protocol_id")?.parse()?,
+            plan_id: node
+                .get::<String>("plan_id")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse().ok()),
+            task_id: node
+                .get::<String>("task_id")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse().ok()),
+            current_state: node.get::<String>("current_state")?.parse()?,
+            states_visited,
+            status: node
+                .get::<String>("status")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default(),
+            started_at: {
+                let raw = node.get::<String>("started_at")?;
+                raw.parse().unwrap_or_else(|_| chrono::Utc::now())
+            },
+            completed_at: node
+                .get::<String>("completed_at")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse().ok()),
+            error: node
+                .get::<String>("error")
+                .ok()
+                .filter(|s| !s.is_empty()),
+        })
+    }
+
+    /// Create a new protocol run node with INSTANCE_OF relationship to its protocol.
+    pub async fn create_protocol_run(&self, run: &ProtocolRun) -> Result<()> {
+        let states_visited_json = serde_json::to_string(&run.states_visited)?;
+
+        let q = query(
+            r#"
+            MATCH (proto:Protocol {id: $protocol_id})
+            CREATE (r:ProtocolRun {
+                id: $id,
+                protocol_id: $protocol_id,
+                plan_id: $plan_id,
+                task_id: $task_id,
+                current_state: $current_state,
+                states_visited_json: $states_visited_json,
+                status: $status,
+                started_at: $started_at,
+                completed_at: $completed_at,
+                error: $error
+            })
+            CREATE (r)-[:INSTANCE_OF]->(proto)
+            RETURN r.id AS created_id
+            "#,
+        )
+        .param("id", run.id.to_string())
+        .param("protocol_id", run.protocol_id.to_string())
+        .param(
+            "plan_id",
+            run.plan_id.map(|u| u.to_string()).unwrap_or_default(),
+        )
+        .param(
+            "task_id",
+            run.task_id.map(|u| u.to_string()).unwrap_or_default(),
+        )
+        .param("current_state", run.current_state.to_string())
+        .param("states_visited_json", states_visited_json)
+        .param("status", run.status.to_string())
+        .param("started_at", run.started_at.to_rfc3339())
+        .param(
+            "completed_at",
+            run.completed_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+        )
+        .param("error", run.error.clone().unwrap_or_default());
+
+        let _ = self
+            .graph
+            .execute(q)
+            .await
+            .context("Failed to create protocol run")?;
+
+        // Link to plan if present
+        if let Some(plan_id) = &run.plan_id {
+            let link_q = query(
+                r#"
+                MATCH (r:ProtocolRun {id: $run_id})
+                MATCH (p:Plan {id: $plan_id})
+                MERGE (r)-[:LINKED_TO_PLAN]->(p)
+                "#,
+            )
+            .param("run_id", run.id.to_string())
+            .param("plan_id", plan_id.to_string());
+            let _ = self.graph.execute(link_q).await;
+        }
+
+        // Link to task if present
+        if let Some(task_id) = &run.task_id {
+            let link_q = query(
+                r#"
+                MATCH (r:ProtocolRun {id: $run_id})
+                MATCH (t:Task {id: $task_id})
+                MERGE (r)-[:LINKED_TO_TASK]->(t)
+                "#,
+            )
+            .param("run_id", run.id.to_string())
+            .param("task_id", task_id.to_string());
+            let _ = self.graph.execute(link_q).await;
+        }
+
+        Ok(())
+    }
+
+    /// Get a protocol run by ID.
+    pub async fn get_protocol_run(&self, run_id: Uuid) -> Result<Option<ProtocolRun>> {
+        let q = query(
+            r#"
+            MATCH (r:ProtocolRun {id: $id})
+            RETURN r
+            "#,
+        )
+        .param("id", run_id.to_string());
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            let node: neo4rs::Node = row.get("r")?;
+            Ok(Some(Self::node_to_protocol_run(&node)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Update an existing protocol run.
+    pub async fn update_protocol_run(&self, run: &ProtocolRun) -> Result<()> {
+        let states_visited_json = serde_json::to_string(&run.states_visited)?;
+
+        let q = query(
+            r#"
+            MATCH (r:ProtocolRun {id: $id})
+            SET r.current_state = $current_state,
+                r.states_visited_json = $states_visited_json,
+                r.status = $status,
+                r.completed_at = $completed_at,
+                r.error = $error
+            RETURN r.id AS updated_id
+            "#,
+        )
+        .param("id", run.id.to_string())
+        .param("current_state", run.current_state.to_string())
+        .param("states_visited_json", states_visited_json)
+        .param("status", run.status.to_string())
+        .param(
+            "completed_at",
+            run.completed_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+        )
+        .param("error", run.error.clone().unwrap_or_default());
+
+        let _ = self
+            .graph
+            .execute(q)
+            .await
+            .context("Failed to update protocol run")?;
+
+        Ok(())
+    }
+
+    /// List protocol runs for a protocol with optional status filter and pagination.
+    pub async fn list_protocol_runs(
+        &self,
+        protocol_id: Uuid,
+        status: Option<RunStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<ProtocolRun>, usize)> {
+        // Count query
+        let count_cypher = if status.is_some() {
+            r#"
+            MATCH (r:ProtocolRun {protocol_id: $protocol_id, status: $status})
+            RETURN count(r) AS total
+            "#
+        } else {
+            r#"
+            MATCH (r:ProtocolRun {protocol_id: $protocol_id})
+            RETURN count(r) AS total
+            "#
+        };
+
+        let mut count_q = query(count_cypher).param("protocol_id", protocol_id.to_string());
+        if let Some(ref s) = status {
+            count_q = count_q.param("status", s.to_string());
+        }
+
+        let mut count_result = self.graph.execute(count_q).await?;
+        let total: usize = if let Some(row) = count_result.next().await? {
+            row.get::<i64>("total").unwrap_or(0) as usize
+        } else {
+            0
+        };
+
+        if total == 0 {
+            return Ok((vec![], 0));
+        }
+
+        // List query
+        let list_cypher = if status.is_some() {
+            r#"
+            MATCH (r:ProtocolRun {protocol_id: $protocol_id, status: $status})
+            RETURN r
+            ORDER BY r.started_at DESC
+            SKIP $offset LIMIT $limit
+            "#
+        } else {
+            r#"
+            MATCH (r:ProtocolRun {protocol_id: $protocol_id})
+            RETURN r
+            ORDER BY r.started_at DESC
+            SKIP $offset LIMIT $limit
+            "#
+        };
+
+        let mut list_q = query(list_cypher)
+            .param("protocol_id", protocol_id.to_string())
+            .param("offset", offset as i64)
+            .param("limit", limit as i64);
+        if let Some(ref s) = status {
+            list_q = list_q.param("status", s.to_string());
+        }
+
+        let mut result = self.graph.execute(list_q).await?;
+        let mut runs = Vec::new();
+        while let Some(row) = result.next().await? {
+            let node: neo4rs::Node = row.get("r")?;
+            runs.push(Self::node_to_protocol_run(&node)?);
+        }
+
+        Ok((runs, total))
+    }
+
+    /// Delete a protocol run.
+    pub async fn delete_protocol_run(&self, run_id: Uuid) -> Result<bool> {
+        let check_q = query(
+            r#"
+            MATCH (r:ProtocolRun {id: $id})
+            RETURN r.id AS found_id
+            "#,
+        )
+        .param("id", run_id.to_string());
+
+        let mut check_result = self.graph.execute(check_q).await?;
+        let exists = check_result.next().await?.is_some();
+
+        if !exists {
+            return Ok(false);
+        }
+
+        let delete_q = query(
+            r#"
+            MATCH (r:ProtocolRun {id: $id})
+            DETACH DELETE r
+            "#,
+        )
+        .param("id", run_id.to_string());
+
+        let _ = self
+            .graph
+            .execute(delete_q)
+            .await
+            .context("Failed to delete protocol run")?;
 
         Ok(true)
     }

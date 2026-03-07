@@ -21,6 +21,7 @@
 //! (ProtocolState)-[:REFERENCES]->(Note)
 //! ```
 
+pub mod engine;
 pub mod models;
 
 pub use models::*;

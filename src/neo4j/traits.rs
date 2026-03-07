@@ -14,7 +14,7 @@ use crate::notes::{
 };
 use crate::parser::FunctionCall;
 use crate::plan::models::{TaskDetails, UpdateTaskRequest};
-use crate::protocol::{Protocol, ProtocolState, ProtocolTransition};
+use crate::protocol::{Protocol, ProtocolRun, ProtocolState, ProtocolTransition, RunStatus};
 use crate::skills::{ActivatedSkillContext, SkillNode, SkillStatus};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -2291,4 +2291,31 @@ pub trait GraphStore: Send + Sync {
 
     /// Delete a protocol transition.
     async fn delete_protocol_transition(&self, transition_id: Uuid) -> Result<bool>;
+
+    // ========================================================================
+    // ProtocolRun operations (FSM Runtime)
+    // ========================================================================
+
+    /// Create a new protocol run node with INSTANCE_OF relationship to its protocol.
+    async fn create_protocol_run(&self, run: &ProtocolRun) -> Result<()>;
+
+    /// Get a protocol run by ID.
+    async fn get_protocol_run(&self, run_id: Uuid) -> Result<Option<ProtocolRun>>;
+
+    /// Update an existing protocol run (current_state, states_visited, status, etc.).
+    async fn update_protocol_run(&self, run: &ProtocolRun) -> Result<()>;
+
+    /// List protocol runs for a protocol with optional status filter and pagination.
+    /// Returns (runs, total_count).
+    async fn list_protocol_runs(
+        &self,
+        protocol_id: Uuid,
+        status: Option<RunStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<ProtocolRun>, usize)>;
+
+    /// Delete a protocol run.
+    /// Returns true if the run existed and was deleted.
+    async fn delete_protocol_run(&self, run_id: Uuid) -> Result<bool>;
 }

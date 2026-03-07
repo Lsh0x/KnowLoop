@@ -2715,4 +2715,44 @@ impl GraphStore for Neo4jClient {
     ) -> anyhow::Result<bool> {
         self.delete_protocol_transition(transition_id).await
     }
+
+    // ========================================================================
+    // ProtocolRun operations (FSM Runtime)
+    // ========================================================================
+
+    async fn create_protocol_run(
+        &self,
+        run: &crate::protocol::ProtocolRun,
+    ) -> anyhow::Result<()> {
+        self.create_protocol_run(run).await
+    }
+
+    async fn get_protocol_run(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> anyhow::Result<Option<crate::protocol::ProtocolRun>> {
+        self.get_protocol_run(run_id).await
+    }
+
+    async fn update_protocol_run(
+        &self,
+        run: &crate::protocol::ProtocolRun,
+    ) -> anyhow::Result<()> {
+        self.update_protocol_run(run).await
+    }
+
+    async fn list_protocol_runs(
+        &self,
+        protocol_id: uuid::Uuid,
+        status: Option<crate::protocol::RunStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::protocol::ProtocolRun>, usize)> {
+        self.list_protocol_runs(protocol_id, status, limit, offset)
+            .await
+    }
+
+    async fn delete_protocol_run(&self, run_id: uuid::Uuid) -> anyhow::Result<bool> {
+        self.delete_protocol_run(run_id).await
+    }
 }
