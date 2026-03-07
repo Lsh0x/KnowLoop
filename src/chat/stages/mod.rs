@@ -4,6 +4,8 @@
 //! registered in the pipeline at startup.
 
 pub mod knowledge_injection;
+#[cfg(test)]
+mod pipeline_e2e_tests;
 pub mod skill_activation;
 pub mod status_injection;
 
