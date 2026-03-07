@@ -351,6 +351,7 @@ impl ToolHandler {
             ("protocol", "transition") => "fire_protocol_transition",
             ("protocol", "cancel_run") => "cancel_protocol_run",
             ("protocol", "fail_run") => "fail_protocol_run",
+            ("protocol", "report_progress") => "report_protocol_progress",
             ("protocol", "delete_run") => "delete_protocol_run",
 
             // Reasoning Tree
@@ -3858,6 +3859,42 @@ impl ToolHandler {
                     )
                     .await?;
                 Ok(Some(result))
+            }
+
+            "report_protocol_progress" => {
+                let run_id = extract_id(args, "run_id")?;
+                let state_name = extract_string(args, "state_name")?;
+                let sub_action = extract_string(args, "sub_action")?;
+                let processed = args
+                    .get("processed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let total = args
+                    .get("total")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let elapsed_ms = args
+                    .get("elapsed_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let body = json!({
+                    "state_name": state_name,
+                    "sub_action": sub_action,
+                    "processed": processed,
+                    "total": total,
+                    "elapsed_ms": elapsed_ms,
+                });
+                let _result = http
+                    .post(
+                        &format!("/api/protocols/runs/{}/progress", run_id),
+                        &body,
+                    )
+                    .await?;
+                Ok(Some(json!({
+                    "accepted": true,
+                    "run_id": run_id.to_string(),
+                    "progress": format!("{}/{}", processed, total),
+                })))
             }
 
             "delete_protocol_run" => {

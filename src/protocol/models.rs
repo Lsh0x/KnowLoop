@@ -581,6 +581,60 @@ impl ProtocolRun {
     }
 }
 
+/// Progress report for a long-running protocol state.
+///
+/// Emitted as a WebSocket event during states that perform multiple
+/// sub-actions (e.g., BACKFILL running backfill_synapses, update_energy, etc.).
+/// The frontend FSM Viewer can display a progress bar per state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolRunProgress {
+    /// The run being reported on
+    pub run_id: Uuid,
+    /// Current state name (e.g., "BACKFILL")
+    pub state_name: String,
+    /// Current sub-action being executed (e.g., "backfill_synapses")
+    pub sub_action: String,
+    /// Number of sub-actions processed so far
+    pub processed: usize,
+    /// Total number of sub-actions
+    pub total: usize,
+    /// Human-readable progress display (e.g., "3/7")
+    pub display: String,
+    /// Milliseconds elapsed since the state was entered
+    pub elapsed_ms: u64,
+}
+
+impl ProtocolRunProgress {
+    /// Create a new progress report.
+    pub fn new(
+        run_id: Uuid,
+        state_name: impl Into<String>,
+        sub_action: impl Into<String>,
+        processed: usize,
+        total: usize,
+        elapsed_ms: u64,
+    ) -> Self {
+        Self {
+            run_id,
+            state_name: state_name.into(),
+            sub_action: sub_action.into(),
+            processed,
+            total,
+            display: format!("{processed}/{total}"),
+            elapsed_ms,
+        }
+    }
+
+    /// Returns a percentage (0-100).
+    pub fn percentage(&self) -> u8 {
+        if self.total == 0 {
+            0
+        } else {
+            ((self.processed as f64 / self.total as f64) * 100.0).min(100.0) as u8
+        }
+    }
+}
+
 /// Result of a transition attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitionResult {

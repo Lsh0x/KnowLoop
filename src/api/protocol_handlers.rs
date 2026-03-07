@@ -883,6 +883,68 @@ pub async fn fail_run(
     Ok(Json(run))
 }
 
+/// Report progress on a running protocol state
+///
+/// POST /api/protocols/runs/:run_id/progress
+///
+/// Emits a WebSocket progress event for the FSM Viewer to display.
+/// Only accepted for runs with status `running`.
+pub async fn report_progress(
+    State(state): State<OrchestratorState>,
+    Path(run_id): Path<Uuid>,
+    Json(body): Json<ReportProgressBody>,
+) -> Result<StatusCode, AppError> {
+    // Verify the run exists and is active
+    let run = state
+        .orchestrator
+        .neo4j()
+        .get_protocol_run(run_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound(format!("ProtocolRun {} not found", run_id)))?;
+
+    if !run.is_active() {
+        return Err(AppError::BadRequest(format!(
+            "Cannot report progress on a {} run",
+            run.status
+        )));
+    }
+
+    let progress = protocol::ProtocolRunProgress::new(
+        run_id,
+        &body.state_name,
+        &body.sub_action,
+        body.processed,
+        body.total,
+        body.elapsed_ms,
+    );
+
+    // Emit progress event via WebSocket
+    state.event_bus.emit_progress(
+        crate::events::EntityType::ProtocolRun,
+        &run_id.to_string(),
+        serde_json::to_value(&progress).unwrap_or_default(),
+        None,
+    );
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReportProgressBody {
+    /// Current state name (e.g., "BACKFILL")
+    pub state_name: String,
+    /// Current sub-action (e.g., "backfill_synapses")
+    pub sub_action: String,
+    /// Number of sub-actions completed so far
+    pub processed: usize,
+    /// Total number of sub-actions
+    pub total: usize,
+    /// Milliseconds elapsed since the state was entered
+    #[serde(default)]
+    pub elapsed_ms: u64,
+}
+
 /// Delete a protocol run
 ///
 /// DELETE /api/protocols/runs/:run_id

@@ -984,13 +984,13 @@ fn skill_tool() -> ToolDefinition {
 fn protocol_tool() -> ToolDefinition {
     ToolDefinition {
         name: "protocol".to_string(),
-        description: "Manage protocols (Pattern Federation FSMs). Actions: list, create, get, update, delete, add_state, delete_state, list_states, add_transition, delete_transition, list_transitions, link_to_skill, start_run, get_run, list_runs, transition, cancel_run, fail_run, delete_run".to_string(),
+        description: "Manage protocols (Pattern Federation FSMs). Actions: list, create, get, update, delete, add_state, delete_state, list_states, add_transition, delete_transition, list_transitions, link_to_skill, start_run, get_run, list_runs, transition, cancel_run, fail_run, report_progress, delete_run".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["list", "create", "get", "update", "delete", "add_state", "delete_state", "list_states", "add_transition", "delete_transition", "list_transitions", "link_to_skill", "start_run", "get_run", "list_runs", "transition", "cancel_run", "fail_run", "delete_run"],
+                    "enum": ["list", "create", "get", "update", "delete", "add_state", "delete_state", "list_states", "add_transition", "delete_transition", "list_transitions", "link_to_skill", "start_run", "get_run", "list_runs", "transition", "cancel_run", "fail_run", "report_progress", "delete_run"],
                     "description": "Operation to perform"
                 },
                 "protocol_id": {"type": "string", "description": "Protocol UUID (get/update/delete/add_state/delete_state/list_states/add_transition/delete_transition/list_transitions/link_to_skill/start_run/list_runs)"},
@@ -1008,7 +1008,12 @@ fn protocol_tool() -> ToolDefinition {
                 "to_state": {"type": "string", "description": "Target state UUID (add_transition)"},
                 "trigger": {"type": "string", "description": "Transition trigger (add_transition/transition)"},
                 "guard": {"type": "string", "description": "Optional guard condition (add_transition)"},
-                "run_id": {"type": "string", "description": "Protocol run UUID (get_run/transition/cancel_run/fail_run/delete_run)"},
+                "run_id": {"type": "string", "description": "Protocol run UUID (get_run/transition/cancel_run/fail_run/report_progress/delete_run)"},
+                "state_name": {"type": "string", "description": "Current state name (report_progress)"},
+                "sub_action": {"type": "string", "description": "Current sub-action being executed (report_progress)"},
+                "processed": {"type": "integer", "description": "Number of sub-actions completed (report_progress)"},
+                "total": {"type": "integer", "description": "Total number of sub-actions (report_progress)"},
+                "elapsed_ms": {"type": "integer", "description": "Milliseconds elapsed since state entry (report_progress)"},
                 "plan_id": {"type": "string", "description": "Plan UUID (start_run — optional context)"},
                 "task_id": {"type": "string", "description": "Task UUID (start_run — optional context)"},
                 "error": {"type": "string", "description": "Error message (fail_run)"},

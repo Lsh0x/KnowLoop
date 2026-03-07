@@ -890,6 +890,10 @@ fn protected_routes() -> Router<OrchestratorState> {
             "/api/protocols/runs/{run_id}/fail",
             post(protocol_handlers::fail_run),
         )
+        .route(
+            "/api/protocols/runs/{run_id}/progress",
+            post(protocol_handlers::report_progress),
+        )
         // ================================================================
         // Reasoning Tree
         // ================================================================
