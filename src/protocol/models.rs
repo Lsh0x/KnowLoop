@@ -94,6 +94,79 @@ impl FromStr for StateType {
     }
 }
 
+/// Trigger mode for automatic protocol execution.
+///
+/// Determines how a protocol can be started:
+/// - **Manual**: Only via explicit `protocol(start_run)` — the default
+/// - **Event**: Triggered automatically by system events (post_sync, post_import, etc.)
+/// - **Scheduled**: Triggered on a periodic schedule (hourly, daily, weekly)
+/// - **Auto**: Combines Event + Scheduled — triggered by both events and schedule
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerMode {
+    /// Only via explicit start_run
+    #[default]
+    Manual,
+    /// Triggered by system events
+    Event,
+    /// Triggered on a periodic schedule
+    Scheduled,
+    /// Event + Scheduled combined
+    Auto,
+}
+
+impl fmt::Display for TriggerMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Manual => write!(f, "manual"),
+            Self::Event => write!(f, "event"),
+            Self::Scheduled => write!(f, "scheduled"),
+            Self::Auto => write!(f, "auto"),
+        }
+    }
+}
+
+impl FromStr for TriggerMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "manual" => Ok(Self::Manual),
+            "event" => Ok(Self::Event),
+            "scheduled" => Ok(Self::Scheduled),
+            "auto" => Ok(Self::Auto),
+            _ => Err(format!("Unknown trigger mode: {}", s)),
+        }
+    }
+}
+
+impl TriggerMode {
+    /// Returns true if this mode responds to events.
+    pub fn listens_to_events(&self) -> bool {
+        matches!(self, Self::Event | Self::Auto)
+    }
+
+    /// Returns true if this mode responds to scheduling.
+    pub fn is_scheduled(&self) -> bool {
+        matches!(self, Self::Scheduled | Self::Auto)
+    }
+}
+
+/// Configuration for automatic protocol triggers.
+///
+/// Specifies which events and/or schedule should trigger the protocol.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TriggerConfig {
+    /// System events that trigger this protocol (e.g., "post_sync", "post_import", "post_plan_complete")
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// Periodic schedule: "hourly", "daily", "weekly"
+    pub schedule: Option<String>,
+    /// Optional conditions that must be met (reserved for future guard expressions)
+    #[serde(default)]
+    pub conditions: Vec<String>,
+}
+
 // ============================================================================
 // Protocol
 // ============================================================================
@@ -132,6 +205,13 @@ pub struct Protocol {
     /// Classification: system (auto-triggered) or business (agent-driven)
     #[serde(default)]
     pub protocol_category: ProtocolCategory,
+    /// How this protocol is triggered (manual, event, scheduled, auto)
+    #[serde(default)]
+    pub trigger_mode: TriggerMode,
+    /// Configuration for event/scheduled triggers
+    pub trigger_config: Option<TriggerConfig>,
+    /// When this protocol was last auto-triggered (for scheduling dedup)
+    pub last_triggered_at: Option<DateTime<Utc>>,
     /// When this protocol was created
     pub created_at: DateTime<Utc>,
     /// When this protocol was last modified
@@ -155,6 +235,9 @@ impl Protocol {
             entry_state,
             terminal_states: vec![],
             protocol_category: ProtocolCategory::Business,
+            trigger_mode: TriggerMode::Manual,
+            trigger_config: None,
+            last_triggered_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -415,6 +498,13 @@ pub struct ProtocolRun {
     pub completed_at: Option<DateTime<Utc>>,
     /// Optional error message if status is Failed
     pub error: Option<String>,
+    /// How this run was triggered: "manual", "event:post_sync", "schedule:daily", etc.
+    #[serde(default = "default_triggered_by")]
+    pub triggered_by: String,
+}
+
+fn default_triggered_by() -> String {
+    "manual".to_string()
 }
 
 impl ProtocolRun {
@@ -441,6 +531,7 @@ impl ProtocolRun {
             started_at: now,
             completed_at: None,
             error: None,
+            triggered_by: "manual".to_string(),
         }
     }
 
@@ -542,6 +633,10 @@ pub struct CreateProtocolRequest {
     pub skill_id: Option<Uuid>,
     /// Classification
     pub protocol_category: Option<ProtocolCategory>,
+    /// Trigger mode (manual, event, scheduled, auto)
+    pub trigger_mode: Option<TriggerMode>,
+    /// Trigger configuration (events, schedule, conditions)
+    pub trigger_config: Option<TriggerConfig>,
     /// States to create (must include exactly one Start state)
     pub states: Vec<CreateProtocolStateRequest>,
     /// Transitions to create
@@ -581,6 +676,8 @@ pub struct UpdateProtocolRequest {
     pub description: Option<String>,
     pub skill_id: Option<Option<Uuid>>,
     pub protocol_category: Option<ProtocolCategory>,
+    pub trigger_mode: Option<TriggerMode>,
+    pub trigger_config: Option<TriggerConfig>,
 }
 
 // ============================================================================

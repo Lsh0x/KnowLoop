@@ -1019,6 +1019,13 @@ pub async fn sync_directory(
                 }
             }
         });
+
+        // Spawn event-triggered protocol runs (post_sync)
+        crate::protocol::hooks::spawn_event_triggered_protocols(
+            state.orchestrator.neo4j_arc(),
+            pid,
+            "post_sync",
+        );
     }
 
     Ok(Json(SyncResponse {
@@ -1630,6 +1637,13 @@ pub async fn create_commit(
                 },
             );
         }
+
+        // Side-effect 4: Event-triggered protocol runs (post_sync)
+        crate::protocol::hooks::spawn_event_triggered_protocols(
+            orchestrator.neo4j_arc(),
+            pid,
+            "post_sync",
+        );
     }
 
     Ok(Json(CreateCommitResponse {

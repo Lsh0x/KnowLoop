@@ -50,6 +50,10 @@ pub struct CreateProtocolBody {
     pub description: Option<String>,
     pub skill_id: Option<Uuid>,
     pub protocol_category: Option<String>,
+    /// Trigger mode (manual, event, scheduled, auto)
+    pub trigger_mode: Option<String>,
+    /// Trigger configuration (events, schedule, conditions)
+    pub trigger_config: Option<crate::protocol::TriggerConfig>,
     /// Optional inline states to create with the protocol
     pub states: Option<Vec<CreateStateInline>>,
     /// Optional inline transitions to create with the protocol
@@ -80,6 +84,8 @@ pub struct UpdateProtocolBody {
     pub name: Option<String>,
     pub description: Option<String>,
     pub protocol_category: Option<String>,
+    pub trigger_mode: Option<String>,
+    pub trigger_config: Option<crate::protocol::TriggerConfig>,
 }
 
 /// Request body for adding a state
@@ -216,6 +222,12 @@ pub async fn create_protocol(
     protocol.description = body.description.unwrap_or_default();
     protocol.skill_id = body.skill_id;
     protocol.protocol_category = category;
+    if let Some(ref tm) = body.trigger_mode {
+        protocol.trigger_mode = tm
+            .parse::<crate::protocol::TriggerMode>()
+            .map_err(|e| AppError::BadRequest(e))?;
+    }
+    protocol.trigger_config = body.trigger_config.clone();
 
     // Create inline states
     let mut created_states = Vec::new();
@@ -405,6 +417,14 @@ pub async fn update_protocol(
         protocol.protocol_category = category_str
             .parse::<ProtocolCategory>()
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    }
+    if let Some(trigger_mode_str) = body.trigger_mode {
+        protocol.trigger_mode = trigger_mode_str
+            .parse::<crate::protocol::TriggerMode>()
+            .map_err(|e| AppError::BadRequest(e))?;
+    }
+    if let Some(trigger_config) = body.trigger_config {
+        protocol.trigger_config = Some(trigger_config);
     }
     protocol.updated_at = chrono::Utc::now();
 
@@ -680,6 +700,7 @@ pub async fn start_run(
         protocol_id,
         body.plan_id,
         body.task_id,
+        None, // manual trigger
     )
     .await
     .map_err(|e| {

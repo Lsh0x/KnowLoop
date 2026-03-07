@@ -303,6 +303,13 @@ pub async fn sync_project(
     // Refresh auto-built feature graphs in background (best-effort)
     state.orchestrator.spawn_refresh_feature_graphs(project.id);
 
+    // Spawn event-triggered protocol runs (post_sync)
+    crate::protocol::hooks::spawn_event_triggered_protocols(
+        state.orchestrator.neo4j_arc(),
+        project.id,
+        "post_sync",
+    );
+
     Ok(Json(SyncProjectResponse {
         files_synced: result.files_synced,
         files_skipped: result.files_skipped,

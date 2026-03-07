@@ -22,6 +22,7 @@
 //! ```
 
 pub mod engine;
+pub mod hooks;
 pub mod models;
 
 pub use models::*;

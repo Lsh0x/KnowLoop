@@ -42,6 +42,21 @@ impl Neo4jClient {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_default(),
+            trigger_mode: node
+                .get::<String>("trigger_mode")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default(),
+            trigger_config: node
+                .get::<String>("trigger_config_json")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            last_triggered_at: node
+                .get::<String>("last_triggered_at")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse().ok()),
             created_at: {
                 let raw = node.get::<String>("created_at")?;
                 raw.parse().unwrap_or_else(|_| chrono::Utc::now())
@@ -106,6 +121,9 @@ impl Neo4jClient {
                 proto.entry_state = $entry_state,
                 proto.terminal_states_json = $terminal_states_json,
                 proto.protocol_category = $protocol_category,
+                proto.trigger_mode = $trigger_mode,
+                proto.trigger_config_json = $trigger_config_json,
+                proto.last_triggered_at = $last_triggered_at,
                 proto.created_at = datetime($created_at),
                 proto.updated_at = datetime($updated_at)
             MERGE (proto)-[:BELONGS_TO]->(p)
@@ -123,6 +141,22 @@ impl Neo4jClient {
         .param("entry_state", protocol.entry_state.to_string())
         .param("terminal_states_json", terminal_states_json)
         .param("protocol_category", protocol.protocol_category.to_string())
+        .param("trigger_mode", protocol.trigger_mode.to_string())
+        .param(
+            "trigger_config_json",
+            protocol
+                .trigger_config
+                .as_ref()
+                .map(|c| serde_json::to_string(c).unwrap_or_default())
+                .unwrap_or_default(),
+        )
+        .param(
+            "last_triggered_at",
+            protocol
+                .last_triggered_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+        )
         .param("created_at", protocol.created_at.to_rfc3339())
         .param("updated_at", protocol.updated_at.to_rfc3339());
 
@@ -503,6 +537,9 @@ impl Neo4jClient {
                 .get::<String>("error")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            triggered_by: node
+                .get::<String>("triggered_by")
+                .unwrap_or_else(|_| "manual".to_string()),
         })
     }
 
@@ -523,7 +560,8 @@ impl Neo4jClient {
                 status: $status,
                 started_at: $started_at,
                 completed_at: $completed_at,
-                error: $error
+                error: $error,
+                triggered_by: $triggered_by
             })
             CREATE (r)-[:INSTANCE_OF]->(proto)
             RETURN r.id AS created_id
@@ -549,7 +587,8 @@ impl Neo4jClient {
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_default(),
         )
-        .param("error", run.error.clone().unwrap_or_default());
+        .param("error", run.error.clone().unwrap_or_default())
+        .param("triggered_by", run.triggered_by.clone());
 
         let _ = self
             .graph
