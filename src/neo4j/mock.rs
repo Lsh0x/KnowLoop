@@ -7990,6 +7990,21 @@ impl GraphStore for MockGraphStore {
     async fn delete_protocol_run(&self, run_id: Uuid) -> anyhow::Result<bool> {
         Ok(self.protocol_runs.write().await.remove(&run_id).is_some())
     }
+
+    // SI — System Inference: audit knowledge gaps
+    async fn audit_knowledge_gaps(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::models::AuditGapsReport> {
+        Ok(crate::neo4j::models::AuditGapsReport {
+            total_gaps: 0,
+            orphan_notes: vec![],
+            decisions_without_affects: vec![],
+            commits_without_touches: vec![],
+            skills_without_members: vec![],
+            relationship_type_counts: vec![],
+        })
+    }
 }
 
 #[cfg(test)]

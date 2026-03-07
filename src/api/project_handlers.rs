@@ -889,6 +889,13 @@ pub async fn get_project_graph(
                     "category": protocol.protocol_category.to_string(),
                     "description": protocol.description,
                     "skill_id": protocol.skill_id.map(|s| s.to_string()),
+                    "relevance_vector": protocol.relevance_vector.as_ref().map(|rv| serde_json::json!({
+                        "phase": rv.phase,
+                        "structure": rv.structure,
+                        "domain": rv.domain,
+                        "resource": rv.resource,
+                        "lifecycle": rv.lifecycle,
+                    })),
                 })),
             });
             node_ids.insert(protocol.id.to_string());

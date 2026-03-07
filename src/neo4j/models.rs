@@ -1016,6 +1016,30 @@ pub struct CouplingMetrics {
     pub most_coupled_file: Option<String>,
 }
 
+/// Knowledge graph audit report — gaps found in entity relations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditGapsReport {
+    /// Total gaps found across all categories
+    pub total_gaps: usize,
+    /// Notes without any LINKED_TO relations to code entities
+    pub orphan_notes: Vec<String>,
+    /// Decisions without AFFECTS relations
+    pub decisions_without_affects: Vec<String>,
+    /// Commits without TOUCHES relations to files
+    pub commits_without_touches: Vec<String>,
+    /// Skills without HAS_MEMBER relations
+    pub skills_without_members: Vec<String>,
+    /// Relationship types in the graph with their counts
+    pub relationship_type_counts: Vec<RelTypeCount>,
+}
+
+/// A relationship type and its count in the graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelTypeCount {
+    pub rel_type: String,
+    pub count: i64,
+}
+
 /// GDS metrics for a single node (file or function).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeGdsMetrics {

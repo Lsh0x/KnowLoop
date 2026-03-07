@@ -394,6 +394,8 @@ impl ToolHandler {
             ("admin", "detect_skills") => "detect_skills",
             ("admin", "maintain_skills") => "maintain_skills",
             ("admin", "auto_anchor_notes") => "auto_anchor_notes",
+            ("admin", "audit_gaps") => "audit_gaps",
+            ("admin", "persist_health_report") => "persist_health_report",
             ("admin", "install_hooks") => "install_hooks",
 
             _ => {
@@ -1993,6 +1995,28 @@ impl ToolHandler {
                 }
                 let result = http
                     .post("/api/admin/reinforce-isomorphic", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "audit_gaps" => {
+                let mut body = serde_json::Map::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                let result = http
+                    .post("/api/admin/audit-gaps", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "persist_health_report" => {
+                let mut body = serde_json::Map::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                let result = http
+                    .post("/api/admin/persist-health-report", &Value::Object(body))
                     .await?;
                 Ok(Some(result))
             }

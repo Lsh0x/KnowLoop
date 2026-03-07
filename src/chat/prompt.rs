@@ -721,7 +721,7 @@ Explore and analyze code. Actions: search, search_project, search_workspace, get
 | check_file_topology | `project_slug` (req), `file_path` (req), `new_imports` (req, array) | Check if new imports would violate rules |
 
 ## admin
-Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_builtin_calls, migrate_calls_confidence, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, reindex_decisions, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric, detect_skills, maintain_skills, install_hooks
+Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_builtin_calls, migrate_calls_confidence, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, reindex_decisions, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric, detect_skills, maintain_skills, audit_gaps, persist_health_report, install_hooks
 
 | Action | Key Parameters | Description |
 |--------|---------------|-------------|
@@ -749,6 +749,8 @@ Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status
 | bootstrap_knowledge_fabric | `project_id` | Bootstrap knowledge fabric |
 | detect_skills | `project_id` | Detect emergent skills |
 | maintain_skills | `level` (hourly/daily/weekly/full) | Run skill maintenance |
+| audit_gaps | `project_id` (req) | Audit knowledge graph gaps: orphan notes, decisions without AFFECTS, commits without TOUCHES, skills without members. Returns structured AuditGapsReport with counts and relationship type inventory. Used by system-inference protocol (AUDIT_GAPS state). |
+| persist_health_report | `project_id` (req) | Run health + audit_gaps + risk_assessment, persist combined report as Note (type: observation, tags: health-check, auto-generated, date). Includes delta analysis vs previous health-check note. Used by system-inference protocol (HEALTH_CHECK state). |
 | install_hooks | `project_id`, `cwd`, `port` | **Deprecated** — hooks are now automatic via SDK |
 
 ## skill

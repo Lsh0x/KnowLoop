@@ -2743,4 +2743,12 @@ impl GraphStore for Neo4jClient {
     async fn delete_protocol_run(&self, run_id: uuid::Uuid) -> anyhow::Result<bool> {
         self.delete_protocol_run(run_id).await
     }
+
+    // SI — System Inference: audit knowledge gaps
+    async fn audit_knowledge_gaps(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::models::AuditGapsReport> {
+        self.audit_knowledge_gaps(project_id).await
+    }
 }

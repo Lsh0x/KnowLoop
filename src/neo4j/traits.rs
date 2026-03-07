@@ -2318,4 +2318,12 @@ pub trait GraphStore: Send + Sync {
     /// Delete a protocol run.
     /// Returns true if the run existed and was deleted.
     async fn delete_protocol_run(&self, run_id: Uuid) -> Result<bool>;
+
+    // ========================================================================
+    // System Inference — Audit Gaps
+    // ========================================================================
+
+    /// Audit the knowledge graph for gaps: orphan notes, decisions without AFFECTS,
+    /// commits without TOUCHES, skills without members.
+    async fn audit_knowledge_gaps(&self, project_id: Uuid) -> Result<AuditGapsReport>;
 }
