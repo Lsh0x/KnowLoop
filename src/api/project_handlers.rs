@@ -388,7 +388,7 @@ pub async fn search_project_code(
 // ============================================================================
 
 /// Allowed layer names (whitelist per security constraint)
-const VALID_LAYERS: &[&str] = &["code", "knowledge", "fabric", "neural", "skills"];
+const VALID_LAYERS: &[&str] = &["code", "knowledge", "fabric", "neural", "skills", "behavioral"];
 
 /// A node in the project graph visualization
 #[derive(Debug, Clone, Serialize)]
@@ -852,6 +852,117 @@ pub async fn get_project_graph(
         );
     }
 
+    // ---- Behavioral Layer (Protocol FSMs + HAS_STATE/HAS_TRANSITION edges) ----
+    if requested_layers.contains(&"behavioral".to_string()) {
+        let mut behavioral_node_count = 0usize;
+        let mut behavioral_edge_count = 0usize;
+
+        let (protocols, _) = neo4j
+            .list_protocols(project.id, None, limit, 0)
+            .await
+            .unwrap_or_default();
+
+        for protocol in &protocols {
+            if behavioral_node_count >= limit {
+                break;
+            }
+            all_nodes.push(GraphNode {
+                id: protocol.id.to_string(),
+                node_type: "protocol".to_string(),
+                label: protocol.name.clone(),
+                layer: "behavioral".to_string(),
+                attributes: Some(serde_json::json!({
+                    "category": protocol.protocol_category.to_string(),
+                    "description": protocol.description,
+                    "skill_id": protocol.skill_id.map(|s| s.to_string()),
+                })),
+            });
+            node_ids.insert(protocol.id.to_string());
+            behavioral_node_count += 1;
+
+            // HAS_STATE edges (protocol → state)
+            let states = neo4j
+                .get_protocol_states(protocol.id)
+                .await
+                .unwrap_or_default();
+
+            for state in &states {
+                if behavioral_node_count >= limit {
+                    break;
+                }
+                all_nodes.push(GraphNode {
+                    id: state.id.to_string(),
+                    node_type: "protocol_state".to_string(),
+                    label: state.name.clone(),
+                    layer: "behavioral".to_string(),
+                    attributes: Some(serde_json::json!({
+                        "state_type": state.state_type.to_string(),
+                        "action": state.action,
+                    })),
+                });
+                node_ids.insert(state.id.to_string());
+                behavioral_node_count += 1;
+
+                all_edges.push(GraphEdge {
+                    source: protocol.id.to_string(),
+                    target: state.id.to_string(),
+                    edge_type: "HAS_STATE".to_string(),
+                    layer: "behavioral".to_string(),
+                    attributes: None,
+                });
+                behavioral_edge_count += 1;
+            }
+
+            // HAS_TRANSITION edges (protocol → transition, with from/to state refs)
+            let transitions = neo4j
+                .get_protocol_transitions(protocol.id)
+                .await
+                .unwrap_or_default();
+
+            for transition in &transitions {
+                // Transition edges rendered as from_state → to_state
+                let from_str = transition.from_state.to_string();
+                let to_str = transition.to_state.to_string();
+                if node_ids.contains(&from_str) && node_ids.contains(&to_str) {
+                    all_edges.push(GraphEdge {
+                        source: from_str,
+                        target: to_str,
+                        edge_type: "TRANSITION".to_string(),
+                        layer: "behavioral".to_string(),
+                        attributes: Some(serde_json::json!({
+                            "trigger": transition.trigger,
+                            "guard": transition.guard,
+                        })),
+                    });
+                    behavioral_edge_count += 1;
+                }
+            }
+
+            // BELONGS_TO_SKILL edge (protocol → skill, if linked)
+            if let Some(skill_id) = protocol.skill_id {
+                let skill_str = skill_id.to_string();
+                if node_ids.contains(&skill_str) {
+                    all_edges.push(GraphEdge {
+                        source: protocol.id.to_string(),
+                        target: skill_str,
+                        edge_type: "BELONGS_TO_SKILL".to_string(),
+                        layer: "behavioral".to_string(),
+                        attributes: None,
+                    });
+                    behavioral_edge_count += 1;
+                }
+            }
+        }
+
+        stats.insert(
+            "behavioral".to_string(),
+            LayerStats {
+                nodes: behavioral_node_count,
+                edges: behavioral_edge_count,
+            },
+        );
+    }
+
     Ok(Json(ProjectGraphResponse {
         nodes: all_nodes,
         edges: all_edges,
@@ -915,6 +1026,17 @@ pub struct SkillsLayerSummary {
     pub total_activations: i64,
 }
 
+/// Behavioral layer metrics (Pattern Federation)
+#[derive(Debug, Clone, Serialize)]
+pub struct BehavioralLayerSummary {
+    pub protocols: usize,
+    pub states: usize,
+    pub transitions: usize,
+    pub system_protocols: usize,
+    pub business_protocols: usize,
+    pub skill_linked: usize,
+}
+
 /// Full intelligence summary response
 #[derive(Debug, Clone, Serialize)]
 pub struct IntelligenceSummaryResponse {
@@ -923,6 +1045,7 @@ pub struct IntelligenceSummaryResponse {
     pub fabric: FabricLayerSummary,
     pub neural: NeuralLayerSummary,
     pub skills: SkillsLayerSummary,
+    pub behavioral: BehavioralLayerSummary,
 }
 
 /// GET /api/projects/:slug/intelligence/summary
@@ -960,6 +1083,7 @@ pub async fn get_intelligence_summary(
         co_change_res,
         neural_res,
         skills_all_res,
+        protocols_res,
     ) = tokio::join!(
         neo4j.count_project_files(pid),
         neo4j.get_language_stats_for_project(pid),
@@ -971,6 +1095,7 @@ pub async fn get_intelligence_summary(
         neo4j.get_co_change_graph(pid, 1, 100_000),
         neo4j.get_neural_metrics(pid),
         neo4j.list_skills(pid, None, 1000, 0),
+        neo4j.list_protocols(pid, None, 10_000, 0),
     );
 
     // === Code layer ===
@@ -1066,12 +1191,50 @@ pub async fn get_intelligence_summary(
         total_activations,
     };
 
+    // === Behavioral layer (Protocol Federation) ===
+    let (all_protocols, _protocols_total) = protocols_res.unwrap_or((vec![], 0));
+
+    // Count states and transitions across all protocols (fire in parallel)
+    let mut total_states = 0usize;
+    let mut total_transitions = 0usize;
+    for proto in &all_protocols {
+        let (states_res, transitions_res) = tokio::join!(
+            neo4j.get_protocol_states(proto.id),
+            neo4j.get_protocol_transitions(proto.id),
+        );
+        total_states += states_res.map(|s| s.len()).unwrap_or(0);
+        total_transitions += transitions_res.map(|t| t.len()).unwrap_or(0);
+    }
+
+    let system_count = all_protocols
+        .iter()
+        .filter(|p| p.protocol_category == crate::protocol::ProtocolCategory::System)
+        .count();
+    let business_count = all_protocols
+        .iter()
+        .filter(|p| p.protocol_category == crate::protocol::ProtocolCategory::Business)
+        .count();
+    let skill_linked_count = all_protocols
+        .iter()
+        .filter(|p| p.skill_id.is_some())
+        .count();
+
+    let behavioral = BehavioralLayerSummary {
+        protocols: all_protocols.len(),
+        states: total_states,
+        transitions: total_transitions,
+        system_protocols: system_count,
+        business_protocols: business_count,
+        skill_linked: skill_linked_count,
+    };
+
     Ok(Json(IntelligenceSummaryResponse {
         code,
         knowledge,
         fabric,
         neural,
         skills,
+        behavioral,
     }))
 }
 

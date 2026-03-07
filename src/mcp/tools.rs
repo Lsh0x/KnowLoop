@@ -350,7 +350,7 @@ fn project_tool() -> ToolDefinition {
                 "offset": {"type": "integer", "description": "Skip items (list)"},
                 "sort_by": {"type": "string", "description": "Sort field (list)"},
                 "sort_order": {"type": "string", "description": "asc or desc (list)"},
-                "layers": {"type": "string", "description": "Comma-separated layers: code,knowledge,fabric,neural,skills (get_graph, default: code)"},
+                "layers": {"type": "string", "description": "Comma-separated layers: code,knowledge,fabric,neural,skills,behavioral (get_graph, default: code)"},
                 "community": {"type": "integer", "description": "Filter by community_id (get_graph)"}
             })),
             required: Some(vec!["action".to_string()]),
