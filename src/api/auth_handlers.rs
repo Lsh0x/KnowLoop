@@ -554,7 +554,9 @@ pub async fn oidc_login(
         ));
     }
 
-    let client = OidcClient::from_auth_config_sync(auth_config).map_err(AppError::Internal)?;
+    let client = OidcClient::from_auth_config(auth_config)
+        .await
+        .map_err(AppError::Internal)?;
 
     let auth_url = match state.validate_origin(query.origin.as_deref())? {
         Some(origin) => {
@@ -588,7 +590,9 @@ pub async fn oidc_callback(
     }
 
     // 1. Build OIDC client and exchange code (redirect_uri must match the one used in auth URL)
-    let client = OidcClient::from_auth_config_sync(auth_config).map_err(AppError::Internal)?;
+    let client = OidcClient::from_auth_config(auth_config)
+        .await
+        .map_err(AppError::Internal)?;
 
     let oidc_user = match state.validate_origin(req.origin.as_deref())? {
         Some(origin) => {

@@ -388,10 +388,23 @@ pub async fn get_plan(
     Ok(Json(details))
 }
 
-/// Update plan status
+/// Update plan status (kept for backwards compatibility with status-only requests)
 #[derive(Deserialize)]
 pub struct UpdatePlanStatusRequest {
     pub status: PlanStatus,
+}
+
+/// Full plan update request (title, description, priority, and optionally status)
+#[derive(Deserialize)]
+pub struct UpdatePlanFullRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i32>,
+    #[serde(default)]
+    pub status: Option<PlanStatus>,
 }
 
 /// Request to link a plan to a project
@@ -425,13 +438,34 @@ pub async fn unlink_plan_from_project(
 pub async fn update_plan_status(
     State(state): State<OrchestratorState>,
     Path(plan_id): Path<Uuid>,
-    Json(req): Json<UpdatePlanStatusRequest>,
+    Json(req): Json<UpdatePlanFullRequest>,
 ) -> Result<StatusCode, AppError> {
-    state
-        .orchestrator
-        .plan_manager()
-        .update_plan_status(plan_id, req.status)
-        .await?;
+    // Handle status change if provided
+    if let Some(status) = req.status {
+        state
+            .orchestrator
+            .plan_manager()
+            .update_plan_status(plan_id, status)
+            .await?;
+    }
+
+    // Handle field updates (title, description, priority)
+    let plan_update = UpdatePlanRequest {
+        title: req.title,
+        description: req.description,
+        priority: req.priority,
+    };
+    if plan_update.title.is_some()
+        || plan_update.description.is_some()
+        || plan_update.priority.is_some()
+    {
+        state
+            .orchestrator
+            .plan_manager()
+            .update_plan(plan_id, plan_update)
+            .await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1244,11 +1278,18 @@ pub async fn update_step(
     Path(step_id): Path<Uuid>,
     Json(req): Json<UpdateStepRequest>,
 ) -> Result<StatusCode, AppError> {
-    if let Some(status) = req.status {
+    if let Some(status) = req.status.clone() {
         state
             .orchestrator
             .plan_manager()
             .update_step_status(step_id, status)
+            .await?;
+    }
+    if req.description.is_some() || req.verification.is_some() {
+        state
+            .orchestrator
+            .plan_manager()
+            .update_step(step_id, &req)
             .await?;
     }
     Ok(StatusCode::NO_CONTENT)

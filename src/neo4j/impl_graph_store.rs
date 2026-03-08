@@ -11,7 +11,7 @@ use super::traits::GraphStore;
 use crate::notes::{
     EntityType, Note, NoteAnchor, NoteFilters, NoteImportance, NoteStatus, PropagatedNote,
 };
-use crate::plan::models::{TaskDetails, UpdateTaskRequest};
+use crate::plan::models::{TaskDetails, UpdatePlanRequest, UpdateStepRequest, UpdateTaskRequest};
 
 #[async_trait]
 impl GraphStore for Neo4jClient {
@@ -83,8 +83,10 @@ impl GraphStore for Neo4jClient {
         name: Option<String>,
         description: Option<String>,
         metadata: Option<serde_json::Value>,
+        slug: Option<String>,
     ) -> anyhow::Result<()> {
-        self.update_workspace(id, name, description, metadata).await
+        self.update_workspace(id, name, description, metadata, slug)
+            .await
     }
 
     async fn delete_workspace(&self, id: Uuid) -> anyhow::Result<()> {
@@ -897,6 +899,10 @@ impl GraphStore for Neo4jClient {
             .await
     }
 
+    async fn update_plan(&self, id: Uuid, updates: &UpdatePlanRequest) -> anyhow::Result<()> {
+        self.update_plan(id, updates).await
+    }
+
     async fn update_plan_status(&self, id: Uuid, status: PlanStatus) -> anyhow::Result<()> {
         self.update_plan_status(id, status).await
     }
@@ -1023,6 +1029,10 @@ impl GraphStore for Neo4jClient {
 
     async fn get_task_steps(&self, task_id: Uuid) -> anyhow::Result<Vec<StepNode>> {
         self.get_task_steps(task_id).await
+    }
+
+    async fn update_step(&self, step_id: Uuid, updates: &UpdateStepRequest) -> anyhow::Result<()> {
+        self.update_step(step_id, updates).await
     }
 
     async fn update_step_status(&self, step_id: Uuid, status: StepStatus) -> anyhow::Result<()> {

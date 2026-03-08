@@ -54,7 +54,7 @@ static CARGO_TEST_PATTERN: LazyLock<Regex> =
 ///
 /// ```
 /// use serde_json::json;
-/// use crate::skills::hook_extractor::extract_pattern;
+/// use project_orchestrator::skills::hook_extractor::extract_pattern;
 ///
 /// // Grep tool → extract pattern field
 /// let input = json!({"pattern": "reinforce_synapses", "path": "src/"});

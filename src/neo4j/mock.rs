@@ -9,7 +9,7 @@ use crate::neo4j::traits::GraphStore;
 use crate::notes::{
     EntityType, Note, NoteAnchor, NoteFilters, NoteImportance, NoteStatus, PropagatedNote,
 };
-use crate::plan::models::{TaskDetails, UpdateTaskRequest};
+use crate::plan::models::{TaskDetails, UpdatePlanRequest, UpdateStepRequest, UpdateTaskRequest};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -504,6 +504,7 @@ impl GraphStore for MockGraphStore {
         name: Option<String>,
         description: Option<String>,
         metadata: Option<serde_json::Value>,
+        slug: Option<String>,
     ) -> Result<()> {
         if let Some(w) = self.workspaces.write().await.get_mut(&id) {
             if let Some(n) = name {
@@ -514,6 +515,9 @@ impl GraphStore for MockGraphStore {
             }
             if let Some(m) = metadata {
                 w.metadata = m;
+            }
+            if let Some(s) = slug {
+                w.slug = s;
             }
             w.updated_at = Some(Utc::now());
         }
@@ -2912,6 +2916,21 @@ impl GraphStore for MockGraphStore {
         Ok((paginate(&filtered, limit, offset), total))
     }
 
+    async fn update_plan(&self, id: Uuid, updates: &UpdatePlanRequest) -> Result<()> {
+        if let Some(p) = self.plans.write().await.get_mut(&id) {
+            if let Some(title) = &updates.title {
+                p.title = title.clone();
+            }
+            if let Some(description) = &updates.description {
+                p.description = description.clone();
+            }
+            if let Some(priority) = updates.priority {
+                p.priority = priority;
+            }
+        }
+        Ok(())
+    }
+
     async fn update_plan_status(&self, id: Uuid, status: PlanStatus) -> Result<()> {
         if let Some(p) = self.plans.write().await.get_mut(&id) {
             p.status = status;
@@ -3502,6 +3521,9 @@ impl GraphStore for MockGraphStore {
             if let Some(complexity) = updates.actual_complexity {
                 t.actual_complexity = Some(complexity);
             }
+            if let Some(complexity) = updates.estimated_complexity {
+                t.estimated_complexity = Some(complexity);
+            }
             t.updated_at = Some(Utc::now());
         }
         Ok(())
@@ -3590,6 +3612,19 @@ impl GraphStore for MockGraphStore {
             ids.iter().filter_map(|id| steps.get(id).cloned()).collect();
         result.sort_by_key(|s| s.order);
         Ok(result)
+    }
+
+    async fn update_step(&self, step_id: Uuid, updates: &UpdateStepRequest) -> Result<()> {
+        if let Some(s) = self.steps.write().await.get_mut(&step_id) {
+            if let Some(description) = &updates.description {
+                s.description = description.clone();
+            }
+            if let Some(verification) = &updates.verification {
+                s.verification = Some(verification.clone());
+            }
+            s.updated_at = Some(Utc::now());
+        }
+        Ok(())
     }
 
     async fn update_step_status(&self, step_id: Uuid, status: StepStatus) -> Result<()> {

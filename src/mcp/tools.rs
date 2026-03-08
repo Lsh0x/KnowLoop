@@ -362,21 +362,21 @@ fn project_tool() -> ToolDefinition {
 fn plan_tool() -> ToolDefinition {
     ToolDefinition {
         name: "plan".to_string(),
-        description: "Manage plans. Actions: list, create, get, update_status, delete, link_to_project, unlink_from_project, get_dependency_graph, get_critical_path, get_waves".to_string(),
+        description: "Manage plans. Actions: list, create, get, update, update_status, delete, link_to_project, unlink_from_project, get_dependency_graph, get_critical_path, get_waves".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["list", "create", "get", "update_status", "delete", "link_to_project", "unlink_from_project", "get_dependency_graph", "get_critical_path", "get_waves"],
+                    "enum": ["list", "create", "get", "update", "update_status", "delete", "link_to_project", "unlink_from_project", "get_dependency_graph", "get_critical_path", "get_waves"],
                     "description": "Operation to perform"
                 },
-                "plan_id": {"type": "string", "description": "Plan UUID (get/update_status/delete/link_to_project/unlink_from_project/get_dependency_graph/get_critical_path/get_waves)"},
+                "plan_id": {"type": "string", "description": "Plan UUID (get/update/update_status/delete/link_to_project/unlink_from_project/get_dependency_graph/get_critical_path/get_waves)"},
                 "project_id": {"type": "string", "description": "Project UUID (create/link_to_project/unlink_from_project/list)"},
-                "title": {"type": "string", "description": "Plan title (create)"},
-                "description": {"type": "string", "description": "Plan description (create)"},
-                "priority": {"type": "integer", "description": "Priority 1-100 (create)"},
-                "status": {"type": "string", "description": "New status (update_status): draft, approved, in_progress, completed, cancelled"},
+                "title": {"type": "string", "description": "Plan title (create/update)"},
+                "description": {"type": "string", "description": "Plan description (create/update)"},
+                "priority": {"type": "integer", "description": "Priority 1-100 (create/update)"},
+                "status": {"type": "string", "description": "New status (update/update_status): draft, approved, in_progress, completed, cancelled"},
                 "search": {"type": "string", "description": "Search filter (list)"},
                 "limit": {"type": "integer", "description": "Max items (list)"},
                 "offset": {"type": "integer", "description": "Skip items (list)"},
@@ -439,8 +439,8 @@ fn step_tool() -> ToolDefinition {
                 },
                 "step_id": {"type": "string", "description": "Step UUID (update/get/delete)"},
                 "task_id": {"type": "string", "description": "Task UUID (list/create/get_progress)"},
-                "description": {"type": "string", "description": "Step description (create)"},
-                "verification": {"type": "string", "description": "How to verify (create)"},
+                "description": {"type": "string", "description": "Step description (create/update)"},
+                "verification": {"type": "string", "description": "How to verify (create/update)"},
                 "status": {"type": "string", "description": "New status (update): pending, in_progress, completed, skipped"}
             })),
             required: Some(vec!["action".to_string()]),
@@ -633,7 +633,8 @@ fn workspace_tool() -> ToolDefinition {
                     "enum": ["list", "create", "get", "update", "delete", "get_overview", "list_projects", "add_project", "remove_project", "get_topology"],
                     "description": "Operation to perform"
                 },
-                "slug": {"type": "string", "description": "Workspace slug"},
+                "slug": {"type": "string", "description": "Workspace slug (identifier)"},
+                "new_slug": {"type": "string", "description": "New slug value (update)"},
                 "name": {"type": "string", "description": "Workspace name (create/update)"},
                 "description": {"type": "string", "description": "Description (create/update)"},
                 "project_id": {"type": "string", "description": "Project UUID (add_project/remove_project)"},

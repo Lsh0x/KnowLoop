@@ -136,21 +136,45 @@ chat:
 #     password_hash: "change-me"   # Will be hashed at startup
 #
 #   # ── OIDC auth (generic OpenID Connect) ──────────────────────────
-#   # Works with Google, Microsoft, Okta, Keycloak, or any OIDC provider.
+#   # Works with Google, Microsoft, Okta, Keycloak, Cognito, or any OIDC provider.
+#   #
+#   # Two configuration modes:
+#   #   Option A: discovery_url — auto-fetches endpoints (requires async startup)
+#   #   Option B: explicit endpoints — no network call at startup
+#   #
+#   # ── Example 1: Google (with discovery) ──────────────────────────
 #   oidc:
-#     # Option A: Auto-discover endpoints from the provider
 #     discovery_url: "https://accounts.google.com/.well-known/openid-configuration"
-#
-#     # Option B: Specify endpoints manually (if no discovery)
-#     # auth_endpoint: "https://accounts.google.com/o/oauth2/v2/auth"
-#     # token_endpoint: "https://oauth2.googleapis.com/token"
-#     # userinfo_endpoint: "https://www.googleapis.com/oauth2/v3/userinfo"
-#
 #     client_id: "YOUR_CLIENT_ID.apps.googleusercontent.com"
 #     client_secret: "YOUR_CLIENT_SECRET"
-#     redirect_uri: "http://localhost:3000/auth/callback"
+#     redirect_uri: "http://localhost:8080/auth/callback"
 #     provider_name: "Google"          # Shown on the login button
-#     scopes: "openid email profile"   # Default scopes
+#     provider_key: "google"           # URL-safe identifier (optional)
+#     scopes: "openid email profile"
+#
+#   # ── Example 2: Google (with explicit endpoints) ─────────────────
+#   # oidc:
+#   #   auth_endpoint: "https://accounts.google.com/o/oauth2/v2/auth"
+#   #   token_endpoint: "https://oauth2.googleapis.com/token"
+#   #   userinfo_endpoint: "https://www.googleapis.com/oauth2/v3/userinfo"
+#   #   client_id: "YOUR_CLIENT_ID.apps.googleusercontent.com"
+#   #   client_secret: "YOUR_CLIENT_SECRET"
+#   #   redirect_uri: "http://localhost:8080/auth/callback"
+#   #   provider_name: "Google"
+#   #   provider_key: "google"
+#   #   scopes: "openid email profile"
+#
+#   # ── Example 3: AWS Cognito (with discovery) ─────────────────────
+#   # Replace ${region} and ${poolId} with your Cognito User Pool values.
+#   # Note: discovery_url requires async client creation at startup.
+#   # oidc:
+#   #   discovery_url: "https://cognito-idp.${region}.amazonaws.com/${poolId}/.well-known/openid-configuration"
+#   #   client_id: "YOUR_COGNITO_APP_CLIENT_ID"
+#   #   client_secret: "YOUR_COGNITO_APP_CLIENT_SECRET"
+#   #   redirect_uri: "http://localhost:8080/auth/callback"
+#   #   provider_name: "AWS Cognito"
+#   #   provider_key: "cognito"
+#   #   scopes: "openid email profile"
 #
 #   # ── Legacy Google OAuth (backward compatible) ───────────────────
 #   # These fields still work but are deprecated. Prefer the "oidc" section.

@@ -16,11 +16,32 @@ const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v3/userinfo";
 
-/// User information retrieved from an OIDC provider after successful auth.
+/// Raw OIDC userinfo response — tolerant of provider-specific claim differences.
+///
+/// Different providers return different claim names:
+/// - Google: `sub`, `email`, `name`, `picture`
+/// - Cognito: `sub`, `email`, `username`, `cognito:username` (no `name` or `picture`)
+/// - Microsoft: `sub`, `email`, `name` (or `preferred_username`)
+/// - Okta: `sub`, `email`, `name`, `given_name`, `family_name`
 #[derive(Debug, Clone, Deserialize)]
+struct RawOidcUserInfo {
+    sub: String,
+    email: Option<String>,
+    name: Option<String>,
+    picture: Option<String>,
+    /// Cognito uses `username`
+    username: Option<String>,
+    /// Some providers use `preferred_username`
+    preferred_username: Option<String>,
+    /// Fallback: build name from given + family
+    given_name: Option<String>,
+    family_name: Option<String>,
+}
+
+/// User information retrieved from an OIDC provider after successful auth.
+#[derive(Debug, Clone)]
 pub struct OidcUserInfo {
     /// Provider's unique user identifier (the "sub" claim)
-    #[serde(rename = "sub")]
     pub external_id: String,
     /// User's email address
     pub email: String,
@@ -28,6 +49,37 @@ pub struct OidcUserInfo {
     pub name: String,
     /// URL to the user's profile picture
     pub picture: Option<String>,
+}
+
+impl RawOidcUserInfo {
+    /// Convert raw provider-specific claims into a normalized OidcUserInfo.
+    fn normalize(self) -> Result<OidcUserInfo> {
+        let email = self.email.ok_or_else(|| {
+            anyhow::anyhow!("OIDC userinfo response missing 'email' claim")
+        })?;
+
+        // Resolve display name from multiple possible claims
+        let name = self
+            .name
+            .or(self.preferred_username)
+            .or(self.username)
+            .or_else(|| {
+                match (&self.given_name, &self.family_name) {
+                    (Some(g), Some(f)) => Some(format!("{} {}", g, f)),
+                    (Some(g), None) => Some(g.clone()),
+                    (None, Some(f)) => Some(f.clone()),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_string());
+
+        Ok(OidcUserInfo {
+            external_id: self.sub,
+            email,
+            name,
+            picture: self.picture,
+        })
+    }
 }
 
 /// OIDC discovery document (subset of fields we need).
@@ -194,13 +246,26 @@ impl OidcClient {
     ///
     /// Used for dynamic origin-based redirect URIs (e.g. desktop vs web access).
     pub fn auth_url_with_redirect(&self, redirect_uri: &str) -> String {
-        format!(
-            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
+        let mut url = format!(
+            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}",
             self.auth_endpoint,
             urlencoding::encode(&self.client_id),
             urlencoding::encode(redirect_uri),
             urlencoding::encode(&self.scopes),
-        )
+        );
+
+        // Google-specific parameters — other providers (Cognito, Okta, etc.) don't
+        // support `access_type` and may reject or ignore it.
+        if self.is_google_provider() {
+            url.push_str("&access_type=offline&prompt=consent");
+        }
+
+        url
+    }
+
+    /// Returns true if this client is configured for Google (legacy or explicit).
+    fn is_google_provider(&self) -> bool {
+        self.auth_endpoint.contains("accounts.google.com")
     }
 
     /// Exchange an authorization code for user information using the configured redirect_uri.
@@ -273,12 +338,21 @@ impl OidcClient {
             bail!("OIDC userinfo fetch failed ({}): {}", status, body);
         }
 
-        let user_info: OidcUserInfo = userinfo_response
-            .json()
+        // Parse into tolerant RawOidcUserInfo first, then normalize.
+        // Log the raw body on parse failure to aid debugging provider differences.
+        let body = userinfo_response
+            .text()
             .await
-            .context("Failed to parse OIDC userinfo response")?;
+            .context("Failed to read OIDC userinfo response body")?;
 
-        Ok(user_info)
+        let raw: RawOidcUserInfo = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "Failed to parse OIDC userinfo response (provider: {}). Raw body: {}",
+                self.provider_name, body
+            )
+        })?;
+
+        raw.normalize()
     }
 }
 
@@ -384,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_oidc_userinfo_deserialization() {
+    fn test_oidc_userinfo_google_format() {
         let json = r#"{
             "sub": "1234567890",
             "email": "alice@company.com",
@@ -392,14 +466,12 @@ mod tests {
             "picture": "https://example.com/photo.jpg"
         }"#;
 
-        let user: OidcUserInfo = serde_json::from_str(json).expect("should deserialize");
+        let raw: RawOidcUserInfo = serde_json::from_str(json).expect("should deserialize");
+        let user = raw.normalize().expect("should normalize");
         assert_eq!(user.external_id, "1234567890");
         assert_eq!(user.email, "alice@company.com");
         assert_eq!(user.name, "Alice Dupont");
-        assert_eq!(
-            user.picture.as_deref(),
-            Some("https://example.com/photo.jpg")
-        );
+        assert_eq!(user.picture.as_deref(), Some("https://example.com/photo.jpg"));
     }
 
     #[test]
@@ -410,9 +482,56 @@ mod tests {
             "name": "Bob"
         }"#;
 
-        let user: OidcUserInfo = serde_json::from_str(json).expect("should deserialize");
+        let raw: RawOidcUserInfo = serde_json::from_str(json).expect("should deserialize");
+        let user = raw.normalize().expect("should normalize");
         assert_eq!(user.external_id, "1234567890");
+        assert_eq!(user.name, "Bob");
         assert!(user.picture.is_none());
+    }
+
+    #[test]
+    fn test_oidc_userinfo_cognito_format() {
+        // Cognito returns username instead of name, no picture
+        let json = r#"{
+            "sub": "abc-def-123",
+            "email": "user@example.com",
+            "email_verified": "true",
+            "username": "user@example.com"
+        }"#;
+
+        let raw: RawOidcUserInfo = serde_json::from_str(json).expect("should deserialize");
+        let user = raw.normalize().expect("should normalize");
+        assert_eq!(user.external_id, "abc-def-123");
+        assert_eq!(user.email, "user@example.com");
+        assert_eq!(user.name, "user@example.com"); // Falls back to username
+        assert!(user.picture.is_none());
+    }
+
+    #[test]
+    fn test_oidc_userinfo_given_family_name() {
+        let json = r#"{
+            "sub": "xyz",
+            "email": "jane@corp.com",
+            "given_name": "Jane",
+            "family_name": "Doe"
+        }"#;
+
+        let raw: RawOidcUserInfo = serde_json::from_str(json).expect("should deserialize");
+        let user = raw.normalize().expect("should normalize");
+        assert_eq!(user.name, "Jane Doe");
+    }
+
+    #[test]
+    fn test_oidc_userinfo_email_fallback_for_name() {
+        // No name-related claims at all — falls back to email local part
+        let json = r#"{
+            "sub": "999",
+            "email": "anon@example.com"
+        }"#;
+
+        let raw: RawOidcUserInfo = serde_json::from_str(json).expect("should deserialize");
+        let user = raw.normalize().expect("should normalize");
+        assert_eq!(user.name, "anon");
     }
 
     #[test]
@@ -433,6 +552,44 @@ mod tests {
         assert!(
             default_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fcallback")
         );
+    }
+
+    #[test]
+    fn test_oidc_auth_url_google_has_offline_access() {
+        let config = test_auth_config();
+        let client = OidcClient::from_legacy_google(&config).unwrap();
+        let url = client.auth_url();
+
+        // Google-specific params should be present
+        assert!(url.contains("access_type=offline"));
+        assert!(url.contains("prompt=consent"));
+    }
+
+    #[test]
+    fn test_oidc_auth_url_non_google_omits_google_params() {
+        let config = OidcConfig {
+            provider_key: Some("custom".to_string()),
+            provider_name: "Cognito".to_string(),
+            client_id: "cognito-id".to_string(),
+            client_secret: "cognito-secret".to_string(),
+            redirect_uri: "http://localhost:3000/auth/callback".to_string(),
+            auth_endpoint: Some("https://mypool.auth.eu-west-1.amazoncognito.com/oauth2/authorize".to_string()),
+            token_endpoint: Some("https://mypool.auth.eu-west-1.amazoncognito.com/oauth2/token".to_string()),
+            userinfo_endpoint: Some("https://mypool.auth.eu-west-1.amazoncognito.com/oauth2/userInfo".to_string()),
+            scopes: "openid email profile".to_string(),
+            discovery_url: None,
+        };
+
+        let client = OidcClient::from_config(&config).unwrap();
+        let url = client.auth_url();
+
+        // Google-specific params should NOT be present for Cognito
+        assert!(!url.contains("access_type=offline"), "Cognito URL should not contain access_type=offline");
+        assert!(!url.contains("prompt=consent"), "Cognito URL should not contain prompt=consent");
+        // Standard OIDC params should be present
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("client_id=cognito-id"));
+        assert!(url.contains("scope=openid"));
     }
 
     #[test]
