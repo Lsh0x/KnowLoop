@@ -986,6 +986,13 @@ impl GraphStore for Neo4jClient {
         self.get_plan_critical_path(plan_id).await
     }
 
+    async fn compute_waves(
+        &self,
+        plan_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::plan::WaveComputationResult> {
+        self.compute_waves(plan_id).await
+    }
+
     async fn get_next_available_task(&self, plan_id: Uuid) -> anyhow::Result<Option<TaskNode>> {
         self.get_next_available_task(plan_id).await
     }
@@ -2635,5 +2642,173 @@ impl GraphStore for Neo4jClient {
         project_id: uuid::Uuid,
     ) -> anyhow::Result<Vec<super::models::NoteEmbeddingPoint>> {
         self.get_note_embeddings_for_project(project_id).await
+    }
+
+    // ========================================================================
+    // Protocol operations (Pattern Federation)
+    // ========================================================================
+
+    async fn upsert_protocol(&self, protocol: &crate::protocol::Protocol) -> anyhow::Result<()> {
+        self.upsert_protocol(protocol).await
+    }
+
+    async fn get_protocol(
+        &self,
+        id: uuid::Uuid,
+    ) -> anyhow::Result<Option<crate::protocol::Protocol>> {
+        self.get_protocol(id).await
+    }
+
+    async fn list_protocols(
+        &self,
+        project_id: uuid::Uuid,
+        category: Option<crate::protocol::ProtocolCategory>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::protocol::Protocol>, usize)> {
+        self.list_protocols(project_id, category, limit, offset)
+            .await
+    }
+
+    async fn delete_protocol(&self, id: uuid::Uuid) -> anyhow::Result<bool> {
+        self.delete_protocol(id).await
+    }
+
+    async fn upsert_protocol_state(
+        &self,
+        state: &crate::protocol::ProtocolState,
+    ) -> anyhow::Result<()> {
+        self.upsert_protocol_state(state).await
+    }
+
+    async fn get_protocol_states(
+        &self,
+        protocol_id: uuid::Uuid,
+    ) -> anyhow::Result<Vec<crate::protocol::ProtocolState>> {
+        self.get_protocol_states(protocol_id).await
+    }
+
+    async fn delete_protocol_state(&self, state_id: uuid::Uuid) -> anyhow::Result<bool> {
+        self.delete_protocol_state(state_id).await
+    }
+
+    async fn upsert_protocol_transition(
+        &self,
+        transition: &crate::protocol::ProtocolTransition,
+    ) -> anyhow::Result<()> {
+        self.upsert_protocol_transition(transition).await
+    }
+
+    async fn get_protocol_transitions(
+        &self,
+        protocol_id: uuid::Uuid,
+    ) -> anyhow::Result<Vec<crate::protocol::ProtocolTransition>> {
+        self.get_protocol_transitions(protocol_id).await
+    }
+
+    async fn delete_protocol_transition(&self, transition_id: uuid::Uuid) -> anyhow::Result<bool> {
+        self.delete_protocol_transition(transition_id).await
+    }
+
+    // ========================================================================
+    // ProtocolRun operations (FSM Runtime)
+    // ========================================================================
+
+    async fn create_protocol_run(&self, run: &crate::protocol::ProtocolRun) -> anyhow::Result<()> {
+        self.create_protocol_run(run).await
+    }
+
+    async fn get_protocol_run(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> anyhow::Result<Option<crate::protocol::ProtocolRun>> {
+        self.get_protocol_run(run_id).await
+    }
+
+    async fn update_protocol_run(&self, run: &crate::protocol::ProtocolRun) -> anyhow::Result<()> {
+        self.update_protocol_run(run).await
+    }
+
+    async fn list_protocol_runs(
+        &self,
+        protocol_id: uuid::Uuid,
+        status: Option<crate::protocol::RunStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::protocol::ProtocolRun>, usize)> {
+        self.list_protocol_runs(protocol_id, status, limit, offset)
+            .await
+    }
+
+    async fn delete_protocol_run(&self, run_id: uuid::Uuid) -> anyhow::Result<bool> {
+        self.delete_protocol_run(run_id).await
+    }
+
+    // SI — System Inference: audit knowledge gaps
+    async fn audit_knowledge_gaps(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::models::AuditGapsReport> {
+        self.audit_knowledge_gaps(project_id).await
+    }
+
+    // ========================================================================
+    // Registry operations (Skill Registry)
+    // ========================================================================
+
+    async fn upsert_published_skill(
+        &self,
+        published: &crate::skills::registry::PublishedSkill,
+    ) -> anyhow::Result<()> {
+        self.upsert_published_skill(published).await
+    }
+
+    async fn get_published_skill(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<crate::skills::registry::PublishedSkill>> {
+        self.get_published_skill(id).await
+    }
+
+    async fn search_published_skills(
+        &self,
+        search_query: Option<&str>,
+        min_trust: Option<f64>,
+        tags: Option<&[String]>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::skills::registry::PublishedSkill>, usize)> {
+        self.search_published_skills(search_query, min_trust, tags, limit, offset)
+            .await
+    }
+
+    async fn increment_published_skill_imports(&self, id: Uuid) -> anyhow::Result<()> {
+        self.increment_published_skill_imports(id).await
+    }
+
+    // ========================================================================
+    // Graph visualization helpers
+    // ========================================================================
+
+    async fn list_project_symbols(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String, String, Option<String>, Option<i64>)>> {
+        self.list_project_symbols(project_id, limit).await
+    }
+
+    async fn get_project_inheritance_edges(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        self.get_project_inheritance_edges(project_id).await
+    }
+
+    async fn get_project_constraints(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<(crate::neo4j::models::ConstraintNode, Uuid)>> {
+        self.get_project_constraints(project_id).await
     }
 }

@@ -22,6 +22,7 @@ pub enum EntityType {
     Component,
     Note,
     ChatSession,
+    ProtocolRun,
 }
 
 /// The CRUD action performed
@@ -33,6 +34,8 @@ pub enum CrudAction {
     Deleted,
     Linked,
     Unlinked,
+    /// In-flight progress update for long-running operations (e.g., protocol state execution)
+    Progress,
 }
 
 /// A related entity for Linked/Unlinked actions
@@ -156,6 +159,25 @@ pub trait EventEmitter: Send + Sync {
         }
         self.emit(event);
     }
+
+    /// Emit a Progress event for long-running operations.
+    ///
+    /// Used by protocol runs to report intermediate progress during
+    /// long-running states (e.g., backfill, inference, health checks).
+    fn emit_progress(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        payload: serde_json::Value,
+        project_id: Option<String>,
+    ) {
+        let mut event =
+            CrudEvent::new(entity_type, CrudAction::Progress, entity_id).with_payload(payload);
+        if let Some(pid) = project_id {
+            event = event.with_project_id(pid);
+        }
+        self.emit(event);
+    }
 }
 
 impl CrudEvent {
@@ -243,6 +265,7 @@ mod tests {
             CrudAction::Deleted,
             CrudAction::Linked,
             CrudAction::Unlinked,
+            CrudAction::Progress,
         ];
 
         for variant in &variants {

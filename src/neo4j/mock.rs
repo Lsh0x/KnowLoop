@@ -128,6 +128,15 @@ pub struct MockGraphStore {
     /// skill_id -> Vec<(entity_type, entity_id)>
     pub skill_members: RwLock<HashMap<Uuid, Vec<(String, Uuid)>>>,
 
+    // Protocol stores (Pattern Federation)
+    pub protocols: RwLock<HashMap<Uuid, crate::protocol::Protocol>>,
+    pub protocol_states: RwLock<HashMap<Uuid, crate::protocol::ProtocolState>>,
+    pub protocol_transitions: RwLock<HashMap<Uuid, crate::protocol::ProtocolTransition>>,
+    pub protocol_runs: RwLock<HashMap<Uuid, crate::protocol::ProtocolRun>>,
+
+    // Registry (published skills)
+    pub published_skills: RwLock<HashMap<Uuid, crate::skills::registry::PublishedSkill>>,
+
     // Analysis profiles (keyed by profile id String)
     pub analysis_profiles: RwLock<HashMap<String, crate::graph::models::AnalysisProfile>>,
 
@@ -211,6 +220,11 @@ impl MockGraphStore {
             function_embeddings: RwLock::new(HashMap::new()),
             skills: RwLock::new(HashMap::new()),
             skill_members: RwLock::new(HashMap::new()),
+            protocols: RwLock::new(HashMap::new()),
+            protocol_states: RwLock::new(HashMap::new()),
+            protocol_transitions: RwLock::new(HashMap::new()),
+            protocol_runs: RwLock::new(HashMap::new()),
+            published_skills: RwLock::new(HashMap::new()),
             analysis_profiles: RwLock::new(HashMap::new()),
             topology_rules: RwLock::new(HashMap::new()),
             mock_has_context_cards: std::sync::atomic::AtomicBool::new(false),
@@ -3245,6 +3259,176 @@ impl GraphStore for MockGraphStore {
             .iter()
             .filter_map(|id| task_map.get(id).cloned().cloned())
             .collect())
+    }
+
+    async fn compute_waves(
+        &self,
+        plan_id: Uuid,
+    ) -> Result<crate::neo4j::plan::WaveComputationResult> {
+        use crate::neo4j::plan::*;
+        use std::collections::{HashSet, VecDeque};
+
+        let (tasks, edges) = self.get_plan_dependency_graph(plan_id).await?;
+
+        if tasks.is_empty() {
+            return Ok(WaveComputationResult {
+                waves: vec![],
+                summary: WaveSummary {
+                    total_tasks: 0,
+                    total_waves: 0,
+                    max_parallel: 0,
+                    critical_path_length: 0,
+                    dependency_edges: 0,
+                    conflicts_detected: 0,
+                },
+                conflicts: vec![],
+                edges: vec![],
+            });
+        }
+
+        let task_map: HashMap<Uuid, &TaskNode> = tasks.iter().map(|t| (t.id, t)).collect();
+        let mut deps_of: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
+        let mut dependents_of: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
+        let mut in_degree: HashMap<Uuid, usize> = HashMap::new();
+
+        for task in &tasks {
+            in_degree.insert(task.id, 0);
+            deps_of.insert(task.id, HashSet::new());
+            dependents_of.insert(task.id, HashSet::new());
+        }
+
+        for &(from, to) in &edges {
+            if task_map.contains_key(&from) && task_map.contains_key(&to) {
+                deps_of.entry(from).or_default().insert(to);
+                dependents_of.entry(to).or_default().insert(from);
+                *in_degree.entry(from).or_default() += 1;
+            }
+        }
+
+        let mut queue: VecDeque<Uuid> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+
+        let mut waves: Vec<Wave> = Vec::new();
+        let mut processed_count = 0;
+
+        while !queue.is_empty() {
+            let current_level: Vec<Uuid> = queue.drain(..).collect();
+            let wave_number = waves.len() + 1;
+            let mut wave_tasks: Vec<WaveTask> = Vec::new();
+
+            for &task_id in &current_level {
+                processed_count += 1;
+                if let Some(task) = task_map.get(&task_id) {
+                    wave_tasks.push(WaveTask {
+                        id: task.id,
+                        title: task.title.clone(),
+                        status: format!("{:?}", task.status),
+                        priority: task.priority,
+                        affected_files: task.affected_files.clone(),
+                        depends_on: deps_of
+                            .get(&task_id)
+                            .map(|s| s.iter().copied().collect())
+                            .unwrap_or_default(),
+                    });
+                }
+                if let Some(dependents) = dependents_of.get(&task_id) {
+                    for &dep_id in dependents {
+                        if let Some(deg) = in_degree.get_mut(&dep_id) {
+                            *deg -= 1;
+                            if *deg == 0 {
+                                queue.push_back(dep_id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let task_count = wave_tasks.len();
+            waves.push(Wave {
+                wave_number,
+                tasks: wave_tasks,
+                task_count,
+                split_from_conflicts: false,
+            });
+        }
+
+        if processed_count < tasks.len() {
+            anyhow::bail!("Cycle detected in dependency graph!");
+        }
+
+        // Conflict splitting (simplified for mock — same logic as real impl)
+        let mut all_conflicts: Vec<FileConflict> = Vec::new();
+        let mut split_waves: Vec<Wave> = Vec::new();
+        let mut wave_counter = 0usize;
+
+        for wave in &waves {
+            let mut has_conflicts = false;
+            for i in 0..wave.tasks.len() {
+                let files_a: HashSet<&str> = wave.tasks[i]
+                    .affected_files
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+                if files_a.is_empty() {
+                    continue;
+                }
+                for j in (i + 1)..wave.tasks.len() {
+                    let shared: Vec<String> = wave.tasks[j]
+                        .affected_files
+                        .iter()
+                        .filter(|f| files_a.contains(f.as_str()))
+                        .cloned()
+                        .collect();
+                    if !shared.is_empty() {
+                        has_conflicts = true;
+                        all_conflicts.push(FileConflict {
+                            task_a: wave.tasks[i].id,
+                            task_b: wave.tasks[j].id,
+                            shared_files: shared,
+                        });
+                    }
+                }
+            }
+            if !has_conflicts {
+                wave_counter += 1;
+                split_waves.push(Wave {
+                    wave_number: wave_counter,
+                    tasks: wave.tasks.clone(),
+                    task_count: wave.task_count,
+                    split_from_conflicts: false,
+                });
+            } else {
+                // Simple split: put each conflicting task in its own sub-wave
+                for t in &wave.tasks {
+                    wave_counter += 1;
+                    split_waves.push(Wave {
+                        wave_number: wave_counter,
+                        tasks: vec![t.clone()],
+                        task_count: 1,
+                        split_from_conflicts: true,
+                    });
+                }
+            }
+        }
+
+        let max_parallel = split_waves.iter().map(|w| w.task_count).max().unwrap_or(0);
+
+        Ok(WaveComputationResult {
+            waves: split_waves.clone(),
+            summary: WaveSummary {
+                total_tasks: tasks.len(),
+                total_waves: split_waves.len(),
+                max_parallel,
+                critical_path_length: split_waves.len(),
+                dependency_edges: edges.len(),
+                conflicts_detected: all_conflicts.len(),
+            },
+            conflicts: all_conflicts,
+            edges,
+        })
     }
 
     async fn get_next_available_task(&self, plan_id: Uuid) -> Result<Option<TaskNode>> {
@@ -7612,6 +7796,342 @@ impl GraphStore for MockGraphStore {
             }
         }
         Ok(points)
+    }
+
+    // ========================================================================
+    // Protocol operations (Pattern Federation)
+    // ========================================================================
+
+    async fn upsert_protocol(&self, protocol: &crate::protocol::Protocol) -> anyhow::Result<()> {
+        // Validate project exists
+        let projects = self.projects.read().await;
+        if !projects.is_empty() && !projects.contains_key(&protocol.project_id) {
+            anyhow::bail!(
+                "Project not found: {}. Cannot create protocol in non-existent project.",
+                protocol.project_id
+            );
+        }
+        drop(projects);
+        self.protocols
+            .write()
+            .await
+            .insert(protocol.id, protocol.clone());
+        Ok(())
+    }
+
+    async fn get_protocol(&self, id: Uuid) -> anyhow::Result<Option<crate::protocol::Protocol>> {
+        Ok(self.protocols.read().await.get(&id).cloned())
+    }
+
+    async fn list_protocols(
+        &self,
+        project_id: Uuid,
+        category: Option<crate::protocol::ProtocolCategory>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::protocol::Protocol>, usize)> {
+        let store = self.protocols.read().await;
+        let mut filtered: Vec<_> = store
+            .values()
+            .filter(|p| {
+                p.project_id == project_id
+                    && category.as_ref().is_none_or(|c| p.protocol_category == *c)
+            })
+            .cloned()
+            .collect();
+        filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let total = filtered.len();
+        let page = filtered.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn delete_protocol(&self, id: Uuid) -> anyhow::Result<bool> {
+        let existed = self.protocols.write().await.remove(&id).is_some();
+        if existed {
+            // Remove associated states and transitions
+            self.protocol_states
+                .write()
+                .await
+                .retain(|_, s| s.protocol_id != id);
+            self.protocol_transitions
+                .write()
+                .await
+                .retain(|_, t| t.protocol_id != id);
+        }
+        Ok(existed)
+    }
+
+    async fn upsert_protocol_state(
+        &self,
+        state: &crate::protocol::ProtocolState,
+    ) -> anyhow::Result<()> {
+        self.protocol_states
+            .write()
+            .await
+            .insert(state.id, state.clone());
+        Ok(())
+    }
+
+    async fn get_protocol_states(
+        &self,
+        protocol_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::protocol::ProtocolState>> {
+        let store = self.protocol_states.read().await;
+        let mut states: Vec<_> = store
+            .values()
+            .filter(|s| s.protocol_id == protocol_id)
+            .cloned()
+            .collect();
+        states.sort_by(|a, b| a.state_type.to_string().cmp(&b.state_type.to_string()));
+        Ok(states)
+    }
+
+    async fn delete_protocol_state(&self, state_id: Uuid) -> anyhow::Result<bool> {
+        Ok(self
+            .protocol_states
+            .write()
+            .await
+            .remove(&state_id)
+            .is_some())
+    }
+
+    async fn upsert_protocol_transition(
+        &self,
+        transition: &crate::protocol::ProtocolTransition,
+    ) -> anyhow::Result<()> {
+        self.protocol_transitions
+            .write()
+            .await
+            .insert(transition.id, transition.clone());
+        Ok(())
+    }
+
+    async fn get_protocol_transitions(
+        &self,
+        protocol_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::protocol::ProtocolTransition>> {
+        let store = self.protocol_transitions.read().await;
+        let mut transitions: Vec<_> = store
+            .values()
+            .filter(|t| t.protocol_id == protocol_id)
+            .cloned()
+            .collect();
+        transitions.sort_by(|a, b| a.trigger.cmp(&b.trigger));
+        Ok(transitions)
+    }
+
+    async fn delete_protocol_transition(&self, transition_id: Uuid) -> anyhow::Result<bool> {
+        Ok(self
+            .protocol_transitions
+            .write()
+            .await
+            .remove(&transition_id)
+            .is_some())
+    }
+
+    // ========================================================================
+    // ProtocolRun operations (FSM Runtime)
+    // ========================================================================
+
+    async fn create_protocol_run(&self, run: &crate::protocol::ProtocolRun) -> anyhow::Result<()> {
+        let mut store = self.protocol_runs.write().await;
+
+        // Atomic concurrency guard: reject if a Running run already exists
+        // for this protocol. Check and insert happen within the same write
+        // lock, so there's no TOCTOU window.
+        let has_running = store.values().any(|r| {
+            r.protocol_id == run.protocol_id && r.status == crate::protocol::RunStatus::Running
+        });
+        if has_running {
+            anyhow::bail!(
+                "Skipped: concurrent run already running for protocol {}",
+                run.protocol_id
+            );
+        }
+
+        store.insert(run.id, run.clone());
+        Ok(())
+    }
+
+    async fn get_protocol_run(
+        &self,
+        run_id: Uuid,
+    ) -> anyhow::Result<Option<crate::protocol::ProtocolRun>> {
+        Ok(self.protocol_runs.read().await.get(&run_id).cloned())
+    }
+
+    async fn update_protocol_run(&self, run: &crate::protocol::ProtocolRun) -> anyhow::Result<()> {
+        let mut store = self.protocol_runs.write().await;
+        if let std::collections::hash_map::Entry::Occupied(mut e) = store.entry(run.id) {
+            e.insert(run.clone());
+            Ok(())
+        } else {
+            anyhow::bail!("ProtocolRun not found: {}", run.id)
+        }
+    }
+
+    async fn list_protocol_runs(
+        &self,
+        protocol_id: Uuid,
+        status: Option<crate::protocol::RunStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::protocol::ProtocolRun>, usize)> {
+        let store = self.protocol_runs.read().await;
+        let mut filtered: Vec<_> = store
+            .values()
+            .filter(|r| {
+                r.protocol_id == protocol_id && status.as_ref().is_none_or(|s| r.status == *s)
+            })
+            .cloned()
+            .collect();
+        filtered.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        let total = filtered.len();
+        let page = filtered.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn delete_protocol_run(&self, run_id: Uuid) -> anyhow::Result<bool> {
+        Ok(self.protocol_runs.write().await.remove(&run_id).is_some())
+    }
+
+    // SI — System Inference: audit knowledge gaps
+    async fn audit_knowledge_gaps(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::models::AuditGapsReport> {
+        Ok(crate::neo4j::models::AuditGapsReport {
+            total_gaps: 0,
+            orphan_notes: vec![],
+            decisions_without_affects: vec![],
+            commits_without_touches: vec![],
+            skills_without_members: vec![],
+            relationship_type_counts: vec![],
+        })
+    }
+
+    // ========================================================================
+    // Registry operations (Skill Registry)
+    // ========================================================================
+
+    async fn upsert_published_skill(
+        &self,
+        published: &crate::skills::registry::PublishedSkill,
+    ) -> anyhow::Result<()> {
+        self.published_skills
+            .write()
+            .await
+            .insert(published.id, published.clone());
+        Ok(())
+    }
+
+    async fn get_published_skill(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<crate::skills::registry::PublishedSkill>> {
+        Ok(self.published_skills.read().await.get(&id).cloned())
+    }
+
+    async fn search_published_skills(
+        &self,
+        search_query: Option<&str>,
+        min_trust: Option<f64>,
+        tags: Option<&[String]>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::skills::registry::PublishedSkill>, usize)> {
+        let store = self.published_skills.read().await;
+        let mut filtered: Vec<_> = store
+            .values()
+            .filter(|ps| {
+                // Search filter
+                if let Some(q) = search_query {
+                    let q_lower = q.to_lowercase();
+                    if !ps.name.to_lowercase().contains(&q_lower)
+                        && !ps.description.to_lowercase().contains(&q_lower)
+                    {
+                        return false;
+                    }
+                }
+                // Min trust filter
+                if let Some(mt) = min_trust {
+                    if ps.trust_score < mt {
+                        return false;
+                    }
+                }
+                // Tags filter (AND logic)
+                if let Some(t) = tags {
+                    for tag in t {
+                        if !ps.tags.contains(tag) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        // Sort by trust_score DESC, then published_at DESC
+        filtered.sort_by(|a, b| {
+            b.trust_score
+                .partial_cmp(&a.trust_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.published_at.cmp(&a.published_at))
+        });
+
+        let total = filtered.len();
+        let page = filtered.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn increment_published_skill_imports(&self, id: Uuid) -> anyhow::Result<()> {
+        let mut store = self.published_skills.write().await;
+        if let Some(ps) = store.get_mut(&id) {
+            ps.import_count += 1;
+            Ok(())
+        } else {
+            anyhow::bail!("PublishedSkill not found: {}", id)
+        }
+    }
+
+    // ========================================================================
+    // Graph visualization helpers
+    // ========================================================================
+
+    async fn list_project_symbols(
+        &self,
+        _project_id: Uuid,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String, String, Option<String>, Option<i64>)>> {
+        // Mock: return symbols from functions stored in mock
+        let functions = self.functions.read().await;
+        let mut symbols = Vec::new();
+        for (id, func) in functions.iter() {
+            symbols.push((
+                id.clone(),
+                func.name.clone(),
+                "function".to_string(),
+                func.file_path.clone(),
+                Some(format!("{:?}", func.visibility).to_lowercase()),
+                Some(func.line_start as i64),
+            ));
+        }
+        Ok(symbols)
+    }
+
+    async fn get_project_inheritance_edges(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        Ok(vec![])
+    }
+
+    async fn get_project_constraints(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<Vec<(crate::neo4j::models::ConstraintNode, Uuid)>> {
+        Ok(vec![])
     }
 }
 

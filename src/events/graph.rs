@@ -27,6 +27,8 @@ pub enum GraphLayer {
     Neural,
     /// Skills: emergent knowledge clusters
     Skills,
+    /// Behavioral: protocols, states, transitions (Pattern Federation)
+    Behavioral,
     /// Project management: plans, tasks, milestones
     Pm,
 }

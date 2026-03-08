@@ -11,6 +11,7 @@ use crate::neo4j::models::{
     DecisionTimelineEntry, MilestoneNode, MilestoneStatus, PlanNode, PlanStatus, ReleaseNode,
     ReleaseStatus, StepNode, TaskNode, TaskWithPlan,
 };
+use crate::neo4j::plan::WaveComputationResult;
 use crate::orchestrator::{FileWatcher, Orchestrator};
 use crate::plan::models::*;
 use crate::AuthConfig;
@@ -51,6 +52,9 @@ pub struct ServerState {
     /// In-memory store for ephemeral WebSocket auth tickets.
     /// Used as a fallback when cookies are not sent on WS upgrades (WKWebView).
     pub ws_ticket_store: Arc<super::ws_auth::WsTicketStore>,
+    /// Remote skill registry URL (optional — enables cross-instance skill search).
+    /// When set, registry search merges local + remote results.
+    pub registry_remote_url: Option<String>,
 }
 
 /// Shared orchestrator state
@@ -1018,6 +1022,13 @@ pub async fn sync_directory(
                 }
             }
         });
+
+        // Spawn event-triggered protocol runs (post_sync)
+        crate::protocol::hooks::spawn_event_triggered_protocols(
+            state.orchestrator.neo4j_arc(),
+            pid,
+            "post_sync",
+        );
     }
 
     Ok(Json(SyncResponse {
@@ -1629,6 +1640,13 @@ pub async fn create_commit(
                 },
             );
         }
+
+        // Side-effect 4: Event-triggered protocol runs (post_sync)
+        crate::protocol::hooks::spawn_event_triggered_protocols(
+            orchestrator.neo4j_arc(),
+            pid,
+            "post_sync",
+        );
     }
 
     Ok(Json(CreateCommitResponse {
@@ -1960,6 +1978,182 @@ pub async fn update_fabric_scores(
         "churn_scores_computed": churn_count,
         "knowledge_density_computed": density_count,
         "risk_scores_computed": risk_count,
+    })))
+}
+
+/// POST /api/admin/audit-gaps
+///
+/// Audit the knowledge graph for a project and return a structured report
+/// of gaps: orphan notes, decisions without AFFECTS, commits without TOUCHES,
+/// skills without members, and relationship type inventory.
+/// Used by the system-inference protocol (AUDIT_GAPS state).
+pub async fn audit_gaps(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<FabricProjectRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project_id = body.project_id;
+
+    // Verify project exists
+    state
+        .orchestrator
+        .neo4j()
+        .get_project(project_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", project_id)))?;
+
+    let report = state
+        .orchestrator
+        .neo4j()
+        .audit_knowledge_gaps(project_id)
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(serde_json::to_value(report).unwrap()))
+}
+
+/// POST /api/admin/persist-health-report
+///
+/// Run health diagnostics (health + knowledge_gaps + risk_assessment) and
+/// persist the result as a Note (type: observation, tags: health-check).
+/// Compares with previous health-check note for delta analysis.
+/// Used by the system-inference protocol (HEALTH_CHECK state).
+pub async fn persist_health_report(
+    State(state): State<OrchestratorState>,
+    Json(body): Json<FabricProjectRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project_id = body.project_id;
+
+    // Verify project exists
+    let project = state
+        .orchestrator
+        .neo4j()
+        .get_project(project_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", project_id)))?;
+
+    // 1. Collect health data
+    let health = state
+        .orchestrator
+        .neo4j()
+        .get_code_health_report(project_id, 200)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let gaps = state
+        .orchestrator
+        .neo4j()
+        .audit_knowledge_gaps(project_id)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    // 2. Build report content
+    let report = serde_json::json!({
+        "date": today,
+        "project": project.name,
+        "health": {
+            "god_functions": health.god_functions.len(),
+            "orphan_files": health.orphan_files.len(),
+            "coupling": health.coupling_metrics,
+        },
+        "gaps": {
+            "total": gaps.total_gaps,
+            "orphan_notes": gaps.orphan_notes.len(),
+            "decisions_without_affects": gaps.decisions_without_affects.len(),
+            "commits_without_touches": gaps.commits_without_touches.len(),
+            "skills_without_members": gaps.skills_without_members.len(),
+        },
+        "relationship_types": gaps.relationship_type_counts.len(),
+    });
+
+    let content = format!(
+        "## Health Report — {}\n\n### Code Health\n- God functions: {}\n- Orphan files: {}\n\n### Knowledge Gaps\n- Total gaps: {}\n- Orphan notes (no links): {}\n- Decisions without AFFECTS: {}\n- Commits without TOUCHES: {}\n- Skills without members: {}\n\n### Raw Data\n```json\n{}\n```",
+        today,
+        health.god_functions.len(),
+        health.orphan_files.len(),
+        gaps.total_gaps,
+        gaps.orphan_notes.len(),
+        gaps.decisions_without_affects.len(),
+        gaps.commits_without_touches.len(),
+        gaps.skills_without_members.len(),
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
+
+    // 3. Search for previous health-check note to compute delta
+    use crate::notes::models::{
+        CreateNoteRequest, EntityType, LinkNoteRequest, NoteFilters, NoteImportance, NoteType,
+    };
+    let filters = NoteFilters {
+        tags: Some(vec!["health-check".to_string()]),
+        ..Default::default()
+    };
+    let previous_notes = state
+        .orchestrator
+        .note_manager()
+        .search_notes("health-check", &filters)
+        .await
+        .unwrap_or_default();
+
+    let delta = if let Some(prev_hit) = previous_notes.first() {
+        // Try to extract previous gap count from content
+        let prev_gaps: Option<usize> = prev_hit
+            .note
+            .content
+            .lines()
+            .find(|l| l.contains("Total gaps:"))
+            .and_then(|l| l.split(':').next_back())
+            .and_then(|s| s.trim().parse().ok());
+
+        prev_gaps.map(|prev| serde_json::json!({
+            "previous_total_gaps": prev,
+            "current_total_gaps": gaps.total_gaps,
+            "delta": gaps.total_gaps as i64 - prev as i64,
+            "trend": if gaps.total_gaps < prev { "improving" } else if gaps.total_gaps > prev { "degrading" } else { "stable" },
+        }))
+    } else {
+        None
+    };
+
+    // 4. Create the note
+    let create_req = CreateNoteRequest {
+        project_id: Some(project_id),
+        note_type: NoteType::Observation,
+        content,
+        importance: Some(NoteImportance::Medium),
+        scope: None,
+        tags: Some(vec![
+            "health-check".to_string(),
+            "auto-generated".to_string(),
+            today.clone(),
+        ]),
+        anchors: None,
+        assertion_rule: None,
+    };
+    let note = state
+        .orchestrator
+        .note_manager()
+        .create_note(create_req, "system-inference")
+        .await
+        .map_err(AppError::Internal)?;
+
+    // 5. Link note to project
+    let link_req = LinkNoteRequest {
+        entity_type: EntityType::Project,
+        entity_id: project_id.to_string(),
+    };
+    let _ = state
+        .orchestrator
+        .note_manager()
+        .link_note_to_entity(note.id, &link_req)
+        .await;
+
+    Ok(Json(serde_json::json!({
+        "note_id": note.id.to_string(),
+        "report": report,
+        "delta": delta,
     })))
 }
 
@@ -3079,6 +3273,16 @@ pub async fn get_plan_critical_path(
     Ok(Json(CriticalPathResponse { tasks, length }))
 }
 
+/// Get execution waves for a plan (topological sort + level grouping)
+pub async fn get_plan_waves(
+    State(state): State<OrchestratorState>,
+    Path(plan_id): Path<Uuid>,
+) -> Result<Json<WaveComputationResult>, AppError> {
+    let result = state.orchestrator.neo4j().compute_waves(plan_id).await?;
+
+    Ok(Json(result))
+}
+
 // ============================================================================
 // Roadmap
 // ============================================================================
@@ -3471,6 +3675,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         (create_router(state), milestone.id, task1.id, task2.id)
     }
@@ -3674,6 +3879,7 @@ mod tests {
             server_port,
             public_url: public_url.map(|s| s.to_string()),
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         }
     }
 
@@ -3824,6 +4030,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }

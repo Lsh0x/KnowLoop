@@ -11,7 +11,9 @@ use super::hook_handlers;
 use super::note_handlers;
 use super::profile_handlers;
 use super::project_handlers;
+use super::protocol_handlers;
 use super::reason_handlers;
+use super::registry_handlers;
 use super::skill_handlers;
 use super::workspace_handlers;
 use super::ws_chat_handler;
@@ -283,6 +285,7 @@ fn protected_routes() -> Router<OrchestratorState> {
             "/api/plans/{plan_id}/critical-path",
             get(handlers::get_plan_critical_path),
         )
+        .route("/api/plans/{plan_id}/waves", get(handlers::get_plan_waves))
         // Constraints
         .route(
             "/api/plans/{plan_id}/constraints",
@@ -831,6 +834,95 @@ fn protected_routes() -> Router<OrchestratorState> {
             get(skill_handlers::get_skill_health),
         )
         // ================================================================
+        // Skill Registry (Pattern Federation)
+        // ================================================================
+        .route(
+            "/api/registry/publish",
+            post(registry_handlers::publish_skill),
+        )
+        .route(
+            "/api/registry/search",
+            get(registry_handlers::search_registry),
+        )
+        .route(
+            "/api/registry/{id}",
+            get(registry_handlers::get_published_skill),
+        )
+        .route(
+            "/api/registry/{id}/import",
+            post(registry_handlers::import_from_registry),
+        )
+        // ================================================================
+        // Protocols (Pattern Federation)
+        // ================================================================
+        .route(
+            "/api/protocols",
+            get(protocol_handlers::list_protocols).post(protocol_handlers::create_protocol),
+        )
+        .route(
+            "/api/protocols/route",
+            get(protocol_handlers::route_protocols),
+        )
+        .route(
+            "/api/protocols/compose",
+            post(protocol_handlers::compose_protocol),
+        )
+        .route(
+            "/api/protocols/simulate",
+            post(protocol_handlers::simulate_activation),
+        )
+        .route(
+            "/api/protocols/{protocol_id}",
+            get(protocol_handlers::get_protocol)
+                .put(protocol_handlers::update_protocol)
+                .delete(protocol_handlers::delete_protocol),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/states",
+            get(protocol_handlers::list_states).post(protocol_handlers::add_state),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/states/{state_id}",
+            axum::routing::delete(protocol_handlers::delete_state),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/transitions",
+            get(protocol_handlers::list_transitions).post(protocol_handlers::add_transition),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/transitions/{transition_id}",
+            axum::routing::delete(protocol_handlers::delete_transition),
+        )
+        .route(
+            "/api/protocols/{protocol_id}/link-skill",
+            post(protocol_handlers::link_to_skill),
+        )
+        // Protocol Runs (FSM Runtime)
+        .route(
+            "/api/protocols/{protocol_id}/runs",
+            get(protocol_handlers::list_runs).post(protocol_handlers::start_run),
+        )
+        .route(
+            "/api/protocols/runs/{run_id}",
+            get(protocol_handlers::get_run).delete(protocol_handlers::delete_run),
+        )
+        .route(
+            "/api/protocols/runs/{run_id}/transition",
+            post(protocol_handlers::fire_transition),
+        )
+        .route(
+            "/api/protocols/runs/{run_id}/cancel",
+            post(protocol_handlers::cancel_run),
+        )
+        .route(
+            "/api/protocols/runs/{run_id}/fail",
+            post(protocol_handlers::fail_run),
+        )
+        .route(
+            "/api/protocols/runs/{run_id}/progress",
+            post(protocol_handlers::report_progress),
+        )
+        // ================================================================
         // Reasoning Tree
         // ================================================================
         .route("/api/reason", post(reason_handlers::reason))
@@ -921,6 +1013,11 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/admin/bootstrap-knowledge-fabric",
             post(handlers::bootstrap_knowledge_fabric),
+        )
+        .route("/api/admin/audit-gaps", post(handlers::audit_gaps))
+        .route(
+            "/api/admin/persist-health-report",
+            post(handlers::persist_health_report),
         )
         .route(
             "/api/admin/reinforce-isomorphic",
@@ -1116,6 +1213,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }
@@ -1140,6 +1238,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }

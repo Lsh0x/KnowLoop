@@ -1764,4 +1764,129 @@ impl Neo4jClient {
             Ok(false)
         }
     }
+
+    // ========================================================================
+    // Audit Gaps — Knowledge graph gap detection for system-inference protocol
+    // ========================================================================
+
+    /// Audit the knowledge graph for a project and return a structured gap report.
+    /// Detects: orphan notes, decisions without AFFECTS, commits without TOUCHES,
+    /// skills without members, and dynamic relationship type inventory.
+    pub async fn audit_knowledge_gaps(&self, project_id: Uuid) -> Result<AuditGapsReport> {
+        let pid = project_id.to_string();
+
+        // 1. Notes without any LINKED_TO relations
+        let orphan_notes_q = query(
+            r#"
+            MATCH (n:KnowledgeNote {project_id: $pid})
+            WHERE NOT (n)-[:LINKED_TO]->()
+            RETURN n.id AS id, left(n.content, 80) AS preview
+            LIMIT 100
+            "#,
+        )
+        .param("pid", pid.clone());
+
+        let mut orphan_notes = Vec::new();
+        let mut rows = self.graph.execute(orphan_notes_q).await?;
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get("id").unwrap_or_default();
+            let preview: String = row.get("preview").unwrap_or_default();
+            orphan_notes.push(format!("{} — {}", &id[..8.min(id.len())], preview));
+        }
+
+        // 2. Decisions without AFFECTS relations
+        let decisions_q = query(
+            r#"
+            MATCH (d:Decision)
+            WHERE d.project_id = $pid
+            AND NOT (d)-[:AFFECTS]->()
+            RETURN d.id AS id, left(d.description, 80) AS preview
+            LIMIT 100
+            "#,
+        )
+        .param("pid", pid.clone());
+
+        let mut decisions_without_affects = Vec::new();
+        let mut rows = self.graph.execute(decisions_q).await?;
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get("id").unwrap_or_default();
+            let preview: String = row.get("preview").unwrap_or_default();
+            decisions_without_affects.push(format!("{} — {}", &id[..8.min(id.len())], preview));
+        }
+
+        // 3. Commits without TOUCHES relations
+        let commits_q = query(
+            r#"
+            MATCH (c:Commit {project_id: $pid})
+            WHERE NOT (c)-[:TOUCHES]->()
+            RETURN c.hash AS hash, left(c.message, 80) AS msg
+            LIMIT 100
+            "#,
+        )
+        .param("pid", pid.clone());
+
+        let mut commits_without_touches = Vec::new();
+        let mut rows = self.graph.execute(commits_q).await?;
+        while let Some(row) = rows.next().await? {
+            let hash: String = row.get("hash").unwrap_or_default();
+            let msg: String = row.get("msg").unwrap_or_default();
+            commits_without_touches.push(format!("{} — {}", &hash[..8.min(hash.len())], msg));
+        }
+
+        // 4. Skills without HAS_MEMBER relations
+        let skills_q = query(
+            r#"
+            MATCH (s:Skill {project_id: $pid})
+            WHERE NOT (s)-[:HAS_MEMBER]->()
+            RETURN s.id AS id, s.name AS name
+            LIMIT 50
+            "#,
+        )
+        .param("pid", pid.clone());
+
+        let mut skills_without_members = Vec::new();
+        let mut rows = self.graph.execute(skills_q).await?;
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get("id").unwrap_or_default();
+            let name: String = row.get("name").unwrap_or_default();
+            skills_without_members.push(format!("{} — {}", &id[..8.min(id.len())], name));
+        }
+
+        // 5. Dynamic relationship type inventory with actual counts
+        let rel_types_q = query(
+            r#"
+            CALL db.relationshipTypes() YIELD relationshipType AS rel_type
+            CALL {
+                WITH rel_type
+                MATCH ()-[r]->() WHERE type(r) = rel_type
+                RETURN count(r) AS cnt
+            }
+            RETURN rel_type, cnt
+            ORDER BY rel_type
+            "#,
+        );
+
+        let mut relationship_type_counts = Vec::new();
+        if let Ok(mut rows) = self.graph.execute(rel_types_q).await {
+            while let Some(row) = rows.next().await? {
+                let rel_type: String = row.get("rel_type").unwrap_or_default();
+                let count: i64 = row.get("cnt").unwrap_or(0);
+                relationship_type_counts.push(RelTypeCount { rel_type, count });
+            }
+        }
+
+        let total_gaps = orphan_notes.len()
+            + decisions_without_affects.len()
+            + commits_without_touches.len()
+            + skills_without_members.len();
+
+        Ok(AuditGapsReport {
+            total_gaps,
+            orphan_notes,
+            decisions_without_affects,
+            commits_without_touches,
+            skills_without_members,
+            relationship_type_counts,
+        })
+    }
 }

@@ -14,6 +14,7 @@ use crate::notes::{
 };
 use crate::parser::FunctionCall;
 use crate::plan::models::{TaskDetails, UpdateTaskRequest};
+use crate::protocol::{Protocol, ProtocolRun, ProtocolState, ProtocolTransition, RunStatus};
 use crate::skills::{ActivatedSkillContext, SkillNode, SkillStatus};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -777,6 +778,12 @@ pub trait GraphStore: Send + Sync {
 
     /// Find critical path in a plan (longest chain of dependencies)
     async fn get_plan_critical_path(&self, plan_id: Uuid) -> Result<Vec<TaskNode>>;
+
+    /// Compute execution waves for a plan (topological sort + level grouping)
+    async fn compute_waves(
+        &self,
+        plan_id: Uuid,
+    ) -> Result<crate::neo4j::plan::WaveComputationResult>;
 
     /// Get next available task (no unfinished dependencies)
     async fn get_next_available_task(&self, plan_id: Uuid) -> Result<Option<TaskNode>>;
@@ -2241,4 +2248,138 @@ pub trait GraphStore: Send + Sync {
         &self,
         project_id: Uuid,
     ) -> Result<Vec<NoteEmbeddingPoint>>;
+
+    // ========================================================================
+    // Protocol operations (Pattern Federation)
+    // ========================================================================
+
+    /// Create a new protocol with its BELONGS_TO relationship to project.
+    /// Also creates HAS_STATE and HAS_TRANSITION relationships for sub-entities.
+    async fn upsert_protocol(&self, protocol: &Protocol) -> Result<()>;
+
+    /// Get a protocol by ID, including its states and transitions.
+    async fn get_protocol(&self, id: Uuid) -> Result<Option<Protocol>>;
+
+    /// List protocols for a project with optional category filter and pagination.
+    /// Returns (protocols, total_count).
+    async fn list_protocols(
+        &self,
+        project_id: Uuid,
+        category: Option<crate::protocol::ProtocolCategory>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<Protocol>, usize)>;
+
+    /// Delete a protocol and all its states, transitions, and relationships.
+    /// Returns true if the protocol existed and was deleted.
+    async fn delete_protocol(&self, id: Uuid) -> Result<bool>;
+
+    /// Upsert a protocol state and create its HAS_STATE relationship.
+    async fn upsert_protocol_state(&self, state: &ProtocolState) -> Result<()>;
+
+    /// Get all states for a protocol.
+    async fn get_protocol_states(&self, protocol_id: Uuid) -> Result<Vec<ProtocolState>>;
+
+    /// Delete a protocol state and its relationships.
+    async fn delete_protocol_state(&self, state_id: Uuid) -> Result<bool>;
+
+    /// Upsert a protocol transition and create its HAS_TRANSITION relationship.
+    async fn upsert_protocol_transition(&self, transition: &ProtocolTransition) -> Result<()>;
+
+    /// Get all transitions for a protocol.
+    async fn get_protocol_transitions(&self, protocol_id: Uuid) -> Result<Vec<ProtocolTransition>>;
+
+    /// Delete a protocol transition.
+    async fn delete_protocol_transition(&self, transition_id: Uuid) -> Result<bool>;
+
+    // ========================================================================
+    // ProtocolRun operations (FSM Runtime)
+    // ========================================================================
+
+    /// Create a new protocol run node with INSTANCE_OF relationship to its protocol.
+    async fn create_protocol_run(&self, run: &ProtocolRun) -> Result<()>;
+
+    /// Get a protocol run by ID.
+    async fn get_protocol_run(&self, run_id: Uuid) -> Result<Option<ProtocolRun>>;
+
+    /// Update an existing protocol run (current_state, states_visited, status, etc.).
+    async fn update_protocol_run(&self, run: &ProtocolRun) -> Result<()>;
+
+    /// List protocol runs for a protocol with optional status filter and pagination.
+    /// Returns (runs, total_count).
+    async fn list_protocol_runs(
+        &self,
+        protocol_id: Uuid,
+        status: Option<RunStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<ProtocolRun>, usize)>;
+
+    /// Delete a protocol run.
+    /// Returns true if the run existed and was deleted.
+    async fn delete_protocol_run(&self, run_id: Uuid) -> Result<bool>;
+
+    // ========================================================================
+    // System Inference — Audit Gaps
+    // ========================================================================
+
+    /// Audit the knowledge graph for gaps: orphan notes, decisions without AFFECTS,
+    /// commits without TOUCHES, skills without members.
+    async fn audit_knowledge_gaps(&self, project_id: Uuid) -> Result<AuditGapsReport>;
+
+    // ========================================================================
+    // Skill Registry
+    // ========================================================================
+
+    /// Create or update a published skill in the registry.
+    async fn upsert_published_skill(
+        &self,
+        published: &crate::skills::registry::PublishedSkill,
+    ) -> Result<()>;
+
+    /// Get a published skill by ID.
+    async fn get_published_skill(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<crate::skills::registry::PublishedSkill>>;
+
+    /// Search published skills with optional filters.
+    /// Returns (matching entries, total count).
+    async fn search_published_skills(
+        &self,
+        query: Option<&str>,
+        min_trust: Option<f64>,
+        tags: Option<&[String]>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<crate::skills::registry::PublishedSkill>, usize)>;
+
+    /// Increment the import count for a published skill.
+    async fn increment_published_skill_imports(&self, id: Uuid) -> Result<()>;
+
+    // ========================================================================
+    // Graph visualization helpers (sub-file symbols, inheritance, constraints)
+    // ========================================================================
+
+    /// List all sub-file symbols (Function, Struct, Trait, Enum) for a project.
+    /// Returns tuples of (id, name, symbol_type, file_path, visibility, line_start).
+    async fn list_project_symbols(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String, String, Option<String>, Option<i64>)>>;
+
+    /// List EXTENDS and IMPLEMENTS edges between structs/traits in a project.
+    /// Returns (source_id, target_id, relation_type).
+    async fn get_project_inheritance_edges(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(String, String, String)>>;
+
+    /// Get all constraints for a project (via Project → Plan → Constraint).
+    /// Returns (constraint, plan_id) pairs for graph visualization.
+    async fn get_project_constraints(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(crate::neo4j::models::ConstraintNode, Uuid)>>;
 }

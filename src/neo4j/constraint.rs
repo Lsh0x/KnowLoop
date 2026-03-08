@@ -78,6 +78,57 @@ impl Neo4jClient {
         Ok(constraints)
     }
 
+    /// Get all constraints for a project (via Project → Plan → Constraint).
+    /// Returns (constraint, plan_id) pairs for graph visualization.
+    pub async fn get_project_constraints(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(ConstraintNode, Uuid)>> {
+        let q = query(
+            r#"
+            MATCH (p:Project {id: $project_id})<-[:BELONGS_TO_PROJECT]-(plan:Plan)
+                  -[:CONSTRAINED_BY]->(c:Constraint)
+            RETURN c.id AS id, c.constraint_type AS constraint_type,
+                   c.description AS description, c.enforced_by AS enforced_by,
+                   plan.id AS plan_id
+            "#,
+        )
+        .param("project_id", project_id.to_string());
+
+        let mut result = self.graph.execute(q).await?;
+        let mut constraints = Vec::new();
+
+        while let Some(row) = result.next().await? {
+            let id_str: String = row.get("id").unwrap_or_default();
+            let plan_id_str: String = row.get("plan_id").unwrap_or_default();
+            let id = id_str.parse::<Uuid>().unwrap_or_default();
+            let plan_id = plan_id_str.parse::<Uuid>().unwrap_or_default();
+            if id.is_nil() {
+                continue;
+            }
+            constraints.push((
+                ConstraintNode {
+                    id,
+                    constraint_type: serde_json::from_str(&format!(
+                        "\"{}\"",
+                        row.get::<String>("constraint_type")
+                            .unwrap_or_default()
+                            .to_lowercase()
+                    ))
+                    .unwrap_or(ConstraintType::Other),
+                    description: row.get("description").unwrap_or_default(),
+                    enforced_by: row
+                        .get::<String>("enforced_by")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                },
+                plan_id,
+            ));
+        }
+
+        Ok(constraints)
+    }
+
     /// Get a single constraint by ID
     pub async fn get_constraint(&self, constraint_id: Uuid) -> Result<Option<ConstraintNode>> {
         let q = query(

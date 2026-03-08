@@ -63,6 +63,7 @@ impl ToolHandler {
             "admin",
             "skill",
             "analysis_profile",
+            "protocol",
         ];
 
         if !mega_tools.contains(&name) {
@@ -109,6 +110,7 @@ impl ToolHandler {
             ("plan", "unlink_from_project") => "unlink_plan_from_project",
             ("plan", "get_dependency_graph") => "get_dependency_graph",
             ("plan", "get_critical_path") => "get_critical_path",
+            ("plan", "get_waves") => "get_waves",
 
             // Task
             ("task", "list") => "list_tasks",
@@ -330,6 +332,31 @@ impl ToolHandler {
             ("skill", "import") => "import_skill",
             ("skill", "get_health") => "get_skill_health",
 
+            // Protocol (Pattern Federation)
+            ("protocol", "list") => "list_protocols",
+            ("protocol", "create") => "create_protocol",
+            ("protocol", "get") => "get_protocol",
+            ("protocol", "update") => "update_protocol",
+            ("protocol", "delete") => "delete_protocol",
+            ("protocol", "add_state") => "add_protocol_state",
+            ("protocol", "delete_state") => "delete_protocol_state",
+            ("protocol", "list_states") => "list_protocol_states",
+            ("protocol", "add_transition") => "add_protocol_transition",
+            ("protocol", "delete_transition") => "delete_protocol_transition",
+            ("protocol", "list_transitions") => "list_protocol_transitions",
+            ("protocol", "link_to_skill") => "link_protocol_to_skill",
+            ("protocol", "start_run") => "start_protocol_run",
+            ("protocol", "get_run") => "get_protocol_run",
+            ("protocol", "list_runs") => "list_protocol_runs",
+            ("protocol", "transition") => "fire_protocol_transition",
+            ("protocol", "cancel_run") => "cancel_protocol_run",
+            ("protocol", "fail_run") => "fail_protocol_run",
+            ("protocol", "report_progress") => "report_protocol_progress",
+            ("protocol", "delete_run") => "delete_protocol_run",
+            ("protocol", "route") => "route_protocols",
+            ("protocol", "compose") => "compose_protocol",
+            ("protocol", "simulate") => "simulate_protocol",
+
             // Reasoning Tree
             ("reasoning", "reason") => "reason",
             ("reasoning", "reason_feedback") => "reason_feedback",
@@ -367,6 +394,8 @@ impl ToolHandler {
             ("admin", "detect_skills") => "detect_skills",
             ("admin", "maintain_skills") => "maintain_skills",
             ("admin", "auto_anchor_notes") => "auto_anchor_notes",
+            ("admin", "audit_gaps") => "audit_gaps",
+            ("admin", "persist_health_report") => "persist_health_report",
             ("admin", "install_hooks") => "install_hooks",
 
             _ => {
@@ -669,6 +698,12 @@ impl ToolHandler {
                 let result = http
                     .get(&format!("/api/plans/{}/critical-path", plan_id))
                     .await?;
+                Ok(Some(result))
+            }
+
+            "get_waves" => {
+                let plan_id = extract_id(args, "plan_id")?;
+                let result = http.get(&format!("/api/plans/{}/waves", plan_id)).await?;
                 Ok(Some(result))
             }
 
@@ -1960,6 +1995,28 @@ impl ToolHandler {
                 }
                 let result = http
                     .post("/api/admin/reinforce-isomorphic", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "audit_gaps" => {
+                let mut body = serde_json::Map::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                let result = http
+                    .post("/api/admin/audit-gaps", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "persist_health_report" => {
+                let mut body = serde_json::Map::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    body.insert("project_id".to_string(), Value::String(pid.to_string()));
+                }
+                let result = http
+                    .post("/api/admin/persist-health-report", &Value::Object(body))
                     .await?;
                 Ok(Some(result))
             }
@@ -3573,6 +3630,367 @@ impl ToolHandler {
                 Ok(Some(result))
             }
 
+            // ── Protocol (Pattern Federation) (12 tools) ───────────────
+            "list_protocols" => {
+                let project_id = extract_id(args, "project_id")?;
+                let mut query = vec![("project_id".to_string(), project_id)];
+                if let Some(cat) = args.get("category").and_then(|v| v.as_str()) {
+                    query.push(("category".to_string(), cat.to_string()));
+                }
+                if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+                    query.push(("limit".to_string(), l.to_string()));
+                }
+                if let Some(o) = args.get("offset").and_then(|v| v.as_i64()) {
+                    query.push(("offset".to_string(), o.to_string()));
+                }
+                let result = http.get_with_query("/api/protocols", &query).await?;
+                Ok(Some(result))
+            }
+
+            "create_protocol" => {
+                let result = http.post("/api/protocols", args).await?;
+                Ok(Some(result))
+            }
+
+            "get_protocol" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let result = http.get(&format!("/api/protocols/{}", protocol_id)).await?;
+                Ok(Some(result))
+            }
+
+            "update_protocol" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let mut body = serde_json::Map::new();
+                if let Some(v) = args.get("name") {
+                    body.insert("name".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("description") {
+                    body.insert("description".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("protocol_category") {
+                    body.insert("protocol_category".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("trigger_mode") {
+                    body.insert("trigger_mode".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("trigger_config") {
+                    body.insert("trigger_config".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("relevance_vector") {
+                    body.insert("relevance_vector".to_string(), v.clone());
+                }
+                let result = http
+                    .put(
+                        &format!("/api/protocols/{}", protocol_id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "delete_protocol" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let result = http
+                    .delete(&format!("/api/protocols/{}", protocol_id))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "add_protocol_state" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let name = extract_string(args, "name")?;
+                let mut body = serde_json::Map::new();
+                body.insert("name".to_string(), json!(name));
+                if let Some(v) = args.get("description") {
+                    body.insert("description".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("state_type") {
+                    body.insert("state_type".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("action_name") {
+                    body.insert("action".to_string(), v.clone());
+                }
+                let result = http
+                    .post(
+                        &format!("/api/protocols/{}/states", protocol_id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "delete_protocol_state" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let state_id = extract_id(args, "state_id")?;
+                let result = http
+                    .delete(&format!(
+                        "/api/protocols/{}/states/{}",
+                        protocol_id, state_id
+                    ))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "list_protocol_states" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let result = http
+                    .get(&format!("/api/protocols/{}/states", protocol_id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "add_protocol_transition" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let from_state = extract_string(args, "from_state")?;
+                let to_state = extract_string(args, "to_state")?;
+                let trigger = extract_string(args, "trigger")?;
+                let mut body = serde_json::Map::new();
+                body.insert("from_state".to_string(), json!(from_state));
+                body.insert("to_state".to_string(), json!(to_state));
+                body.insert("trigger".to_string(), json!(trigger));
+                if let Some(v) = args.get("guard") {
+                    body.insert("guard".to_string(), v.clone());
+                }
+                let result = http
+                    .post(
+                        &format!("/api/protocols/{}/transitions", protocol_id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "delete_protocol_transition" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let transition_id = extract_id(args, "transition_id")?;
+                let result = http
+                    .delete(&format!(
+                        "/api/protocols/{}/transitions/{}",
+                        protocol_id, transition_id
+                    ))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "list_protocol_transitions" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let result = http
+                    .get(&format!("/api/protocols/{}/transitions", protocol_id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "link_protocol_to_skill" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let skill_id = extract_string(args, "skill_id")?;
+                let body = json!({"skill_id": skill_id});
+                let result = http
+                    .post(&format!("/api/protocols/{}/link-skill", protocol_id), &body)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            // ── Protocol Runs (FSM Runtime) (7 tools) ────────────────────
+            "start_protocol_run" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let mut body = serde_json::Map::new();
+                if let Some(v) = args.get("plan_id") {
+                    body.insert("plan_id".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("task_id") {
+                    body.insert("task_id".to_string(), v.clone());
+                }
+                let result = http
+                    .post(
+                        &format!("/api/protocols/{}/runs", protocol_id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "get_protocol_run" => {
+                let run_id = extract_id(args, "run_id")?;
+                let result = http.get(&format!("/api/protocols/runs/{}", run_id)).await?;
+                Ok(Some(result))
+            }
+
+            "list_protocol_runs" => {
+                let protocol_id = extract_id(args, "protocol_id")?;
+                let mut query = vec![];
+                if let Some(s) = args.get("status").and_then(|v| v.as_str()) {
+                    query.push(("status".to_string(), s.to_string()));
+                }
+                if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+                    query.push(("limit".to_string(), l.to_string()));
+                }
+                if let Some(o) = args.get("offset").and_then(|v| v.as_i64()) {
+                    query.push(("offset".to_string(), o.to_string()));
+                }
+                let result = http
+                    .get_with_query(&format!("/api/protocols/{}/runs", protocol_id), &query)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "fire_protocol_transition" => {
+                let run_id = extract_id(args, "run_id")?;
+                let trigger = extract_string(args, "trigger")?;
+                let body = json!({"trigger": trigger});
+                let result = http
+                    .post(&format!("/api/protocols/runs/{}/transition", run_id), &body)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "cancel_protocol_run" => {
+                let run_id = extract_id(args, "run_id")?;
+                let result = http
+                    .post(
+                        &format!("/api/protocols/runs/{}/cancel", run_id),
+                        &json!({}),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "fail_protocol_run" => {
+                let run_id = extract_id(args, "run_id")?;
+                let error_msg = args
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown error");
+                let body = json!({"error": error_msg});
+                let result = http
+                    .post(&format!("/api/protocols/runs/{}/fail", run_id), &body)
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "report_protocol_progress" => {
+                let run_id = extract_id(args, "run_id")?;
+                let state_name = extract_string(args, "state_name")?;
+                let sub_action = extract_string(args, "sub_action")?;
+                let processed =
+                    args.get("processed").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let total = args.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let elapsed_ms = args.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                let body = json!({
+                    "state_name": state_name,
+                    "sub_action": sub_action,
+                    "processed": processed,
+                    "total": total,
+                    "elapsed_ms": elapsed_ms,
+                });
+                let _result = http
+                    .post(&format!("/api/protocols/runs/{}/progress", run_id), &body)
+                    .await?;
+                Ok(Some(json!({
+                    "accepted": true,
+                    "run_id": run_id.to_string(),
+                    "progress": format!("{}/{}", processed, total),
+                })))
+            }
+
+            "delete_protocol_run" => {
+                let run_id = extract_id(args, "run_id")?;
+                let result = http
+                    .delete(&format!("/api/protocols/runs/{}", run_id))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "route_protocols" => {
+                let project_id = extract_id(args, "project_id")?;
+                let mut query_params = format!("project_id={}", project_id);
+                if let Some(plan_id) = args.get("plan_id").and_then(|v| v.as_str()) {
+                    query_params.push_str(&format!("&plan_id={}", plan_id));
+                }
+                if let Some(phase) = args.get("phase").and_then(|v| v.as_str()) {
+                    query_params.push_str(&format!("&phase={}", phase));
+                }
+                if let Some(domain) = args.get("domain").and_then(|v| v.as_f64()) {
+                    query_params.push_str(&format!("&domain={}", domain));
+                }
+                if let Some(resource) = args.get("resource").and_then(|v| v.as_f64()) {
+                    query_params.push_str(&format!("&resource={}", resource));
+                }
+                if let Some(structure) = args.get("structure").and_then(|v| v.as_f64()) {
+                    query_params.push_str(&format!("&structure={}", structure));
+                }
+                if let Some(lifecycle) = args.get("lifecycle").and_then(|v| v.as_f64()) {
+                    query_params.push_str(&format!("&lifecycle={}", lifecycle));
+                }
+                let result = http
+                    .get(&format!("/api/protocols/route?{}", query_params))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "compose_protocol" => {
+                let mut body = json!({});
+                if let Some(v) = args.get("project_id") {
+                    body["project_id"] = v.clone();
+                }
+                if let Some(v) = args.get("name") {
+                    body["name"] = v.clone();
+                }
+                if let Some(v) = args.get("description") {
+                    body["description"] = v.clone();
+                }
+                if let Some(v) = args.get("category") {
+                    body["category"] = v.clone();
+                }
+                if let Some(v) = args.get("notes") {
+                    body["notes"] = v.clone();
+                }
+                if let Some(v) = args.get("states") {
+                    body["states"] = v.clone();
+                }
+                if let Some(v) = args.get("transitions") {
+                    body["transitions"] = v.clone();
+                }
+                if let Some(v) = args.get("relevance_vector") {
+                    body["relevance_vector"] = v.clone();
+                }
+                if let Some(v) = args.get("triggers") {
+                    body["triggers"] = v.clone();
+                }
+                let result = http.post("/api/protocols/compose", &body).await?;
+                Ok(Some(result))
+            }
+
+            "simulate_protocol" => {
+                let mut body = json!({});
+                if let Some(v) = args.get("protocol_id") {
+                    body["protocol_id"] = v.clone();
+                }
+                if let Some(v) = args.get("context") {
+                    body["context"] = v.clone();
+                }
+                if let Some(v) = args.get("plan_id") {
+                    body["plan_id"] = v.clone();
+                }
+                let result = http.post("/api/protocols/simulate", &body).await?;
+                Ok(Some(result))
+            }
+
             // ── All tools migrated ──────────────────────────────────────
             _ => Ok(None),
         }
@@ -3643,6 +4061,7 @@ mod tests {
             ("link_to_project", "link_plan_to_project"),
             ("get_dependency_graph", "get_dependency_graph"),
             ("get_critical_path", "get_critical_path"),
+            ("get_waves", "get_waves"),
             ("delete", "delete_plan"),
         ] {
             let args = json!({"action": action});
@@ -3796,6 +4215,9 @@ mod tests {
             ("chat", "list_sessions"),
             ("feature_graph", "list"),
             ("admin", "meilisearch_stats"),
+            ("skill", "list"),
+            ("analysis_profile", "list"),
+            ("protocol", "list"),
         ];
 
         for (tool, action) in mega_tools_with_action {
@@ -4364,6 +4786,17 @@ mod tests {
             .unwrap();
         assert_eq!(result["method"], "GET");
         assert!(result["path"].as_str().unwrap().ends_with("/critical-path"));
+    }
+
+    #[tokio::test]
+    async fn test_http_get_waves() {
+        let (handler, _) = make_http_handler().await;
+        let result = handler
+            .handle("get_waves", Some(json!({"plan_id": UUID1})))
+            .await
+            .unwrap();
+        assert_eq!(result["method"], "GET");
+        assert!(result["path"].as_str().unwrap().ends_with("/waves"));
     }
 
     // -- Tasks (remaining) --------------------------------------------------

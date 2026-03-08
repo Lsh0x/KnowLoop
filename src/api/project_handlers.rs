@@ -303,6 +303,13 @@ pub async fn sync_project(
     // Refresh auto-built feature graphs in background (best-effort)
     state.orchestrator.spawn_refresh_feature_graphs(project.id);
 
+    // Spawn event-triggered protocol runs (post_sync)
+    crate::protocol::hooks::spawn_event_triggered_protocols(
+        state.orchestrator.neo4j_arc(),
+        project.id,
+        "post_sync",
+    );
+
     Ok(Json(SyncProjectResponse {
         files_synced: result.files_synced,
         files_skipped: result.files_skipped,
@@ -388,7 +395,14 @@ pub async fn search_project_code(
 // ============================================================================
 
 /// Allowed layer names (whitelist per security constraint)
-const VALID_LAYERS: &[&str] = &["code", "knowledge", "fabric", "neural", "skills"];
+const VALID_LAYERS: &[&str] = &[
+    "code",
+    "knowledge",
+    "fabric",
+    "neural",
+    "skills",
+    "behavioral",
+];
 
 /// A node in the project graph visualization
 #[derive(Debug, Clone, Serialize)]
@@ -568,6 +582,81 @@ pub async fn get_project_graph(
             }
         }
 
+        // Get sub-file symbols: Function, Struct, Trait, Enum
+        let symbols = neo4j
+            .list_project_symbols(project.id, limit)
+            .await
+            .unwrap_or_default();
+
+        for (sym_id, sym_name, sym_type, file_path, visibility, line_start) in &symbols {
+            if code_node_count >= limit {
+                break;
+            }
+            all_nodes.push(GraphNode {
+                id: sym_id.clone(),
+                node_type: sym_type.clone(),
+                label: sym_name.clone(),
+                layer: "code".to_string(),
+                attributes: Some(serde_json::json!({
+                    "file_path": file_path,
+                    "visibility": visibility,
+                    "line_start": line_start,
+                })),
+            });
+            node_ids.insert(sym_id.clone());
+            code_node_count += 1;
+
+            // CONTAINS edge: file → symbol
+            if node_ids.contains(file_path) {
+                all_edges.push(GraphEdge {
+                    source: file_path.clone(),
+                    target: sym_id.clone(),
+                    edge_type: "CONTAINS".to_string(),
+                    layer: "code".to_string(),
+                    attributes: None,
+                });
+                code_edge_count += 1;
+            }
+        }
+
+        // CALLS edges between functions
+        let call_edges = neo4j
+            .get_project_call_edges(project.id)
+            .await
+            .unwrap_or_default();
+
+        for (caller_id, callee_id) in &call_edges {
+            if node_ids.contains(caller_id.as_str()) && node_ids.contains(callee_id.as_str()) {
+                all_edges.push(GraphEdge {
+                    source: caller_id.clone(),
+                    target: callee_id.clone(),
+                    edge_type: "CALLS".to_string(),
+                    layer: "code".to_string(),
+                    attributes: None,
+                });
+                code_edge_count += 1;
+            }
+        }
+
+        // EXTENDS / IMPLEMENTS edges between structs/traits
+        let inheritance_edges = neo4j
+            .get_project_inheritance_edges(project.id)
+            .await
+            .unwrap_or_default();
+
+        for (source_id, target_id, rel_type) in &inheritance_edges {
+            if node_ids.contains(source_id.as_str()) && node_ids.contains(target_id.as_str()) {
+                all_edges.push(GraphEdge {
+                    source: source_id.clone(),
+                    target: target_id.clone(),
+                    edge_type: rel_type.clone(),
+                    layer: "code".to_string(),
+                    attributes: None,
+                });
+                code_edge_count += 1;
+            }
+        }
+
         stats.insert(
             "code".to_string(),
             LayerStats {
@@ -587,6 +676,54 @@ pub async fn get_project_graph(
                     key_files: c.key_files,
                 })
                 .collect();
+        }
+    }
+
+    // ---- Feature Graphs (overlay in code layer — groups of code entities) ----
+    // Parallel detail fetches to avoid sequential N+1.
+    if requested_layers.contains(&"code".to_string()) {
+        let feature_graphs = neo4j
+            .list_feature_graphs(Some(project.id))
+            .await
+            .unwrap_or_default();
+
+        // Fire all get_feature_graph_detail calls concurrently
+        let detail_futures: Vec<_> = feature_graphs
+            .iter()
+            .map(|fg| neo4j.get_feature_graph_detail(fg.id))
+            .collect();
+        let details = futures::future::join_all(detail_futures).await;
+
+        for (fg, detail_res) in feature_graphs.iter().zip(details) {
+            all_nodes.push(GraphNode {
+                id: fg.id.to_string(),
+                node_type: "feature_graph".to_string(),
+                label: fg.name.clone(),
+                layer: "code".to_string(),
+                attributes: Some(serde_json::json!({
+                    "description": fg.description,
+                    "entity_count": fg.entity_count,
+                    "entry_function": fg.entry_function,
+                })),
+            });
+            node_ids.insert(fg.id.to_string());
+
+            // INCLUDES_ENTITY edges (feature_graph → code entity)
+            if let Ok(Some(detail)) = detail_res {
+                for entity in &detail.entities {
+                    if node_ids.contains(&entity.entity_id) {
+                        all_edges.push(GraphEdge {
+                            source: fg.id.to_string(),
+                            target: entity.entity_id.clone(),
+                            edge_type: "INCLUDES_ENTITY".to_string(),
+                            layer: "code".to_string(),
+                            attributes: Some(serde_json::json!({
+                                "role": entity.role,
+                            })),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -740,6 +877,41 @@ pub async fn get_project_graph(
             }
         }
 
+        // Constraints (via Project → Plan → Constraint)
+        let project_constraints = neo4j
+            .get_project_constraints(project.id)
+            .await
+            .unwrap_or_default();
+
+        for (constraint, _plan_id) in &project_constraints {
+            if knowledge_node_count >= limit {
+                break;
+            }
+            let label = if constraint.description.chars().count() > 40 {
+                let end = constraint
+                    .description
+                    .char_indices()
+                    .nth(40)
+                    .map(|(i, _)| i)
+                    .unwrap_or(constraint.description.len());
+                format!("{}…", &constraint.description[..end])
+            } else {
+                constraint.description.clone()
+            };
+            all_nodes.push(GraphNode {
+                id: constraint.id.to_string(),
+                node_type: "constraint".to_string(),
+                label,
+                layer: "knowledge".to_string(),
+                attributes: Some(serde_json::json!({
+                    "constraint_type": format!("{:?}", constraint.constraint_type).to_lowercase(),
+                    "enforced_by": constraint.enforced_by,
+                })),
+            });
+            node_ids.insert(constraint.id.to_string());
+            knowledge_node_count += 1;
+        }
+
         stats.insert(
             "knowledge".to_string(),
             LayerStats {
@@ -852,6 +1024,124 @@ pub async fn get_project_graph(
         );
     }
 
+    // ---- Behavioral Layer (Protocol FSMs + HAS_STATE/HAS_TRANSITION edges) ----
+    if requested_layers.contains(&"behavioral".to_string()) {
+        let mut behavioral_node_count = 0usize;
+        let mut behavioral_edge_count = 0usize;
+
+        let (protocols, _) = neo4j
+            .list_protocols(project.id, None, limit, 0)
+            .await
+            .unwrap_or_default();
+
+        for protocol in &protocols {
+            if behavioral_node_count >= limit {
+                break;
+            }
+            all_nodes.push(GraphNode {
+                id: protocol.id.to_string(),
+                node_type: "protocol".to_string(),
+                label: protocol.name.clone(),
+                layer: "behavioral".to_string(),
+                attributes: Some(serde_json::json!({
+                    "category": protocol.protocol_category.to_string(),
+                    "description": protocol.description,
+                    "skill_id": protocol.skill_id.map(|s| s.to_string()),
+                    "relevance_vector": protocol.relevance_vector.as_ref().map(|rv| serde_json::json!({
+                        "phase": rv.phase,
+                        "structure": rv.structure,
+                        "domain": rv.domain,
+                        "resource": rv.resource,
+                        "lifecycle": rv.lifecycle,
+                    })),
+                })),
+            });
+            node_ids.insert(protocol.id.to_string());
+            behavioral_node_count += 1;
+
+            // HAS_STATE edges (protocol → state)
+            let states = neo4j
+                .get_protocol_states(protocol.id)
+                .await
+                .unwrap_or_default();
+
+            for state in &states {
+                if behavioral_node_count >= limit {
+                    break;
+                }
+                all_nodes.push(GraphNode {
+                    id: state.id.to_string(),
+                    node_type: "protocol_state".to_string(),
+                    label: state.name.clone(),
+                    layer: "behavioral".to_string(),
+                    attributes: Some(serde_json::json!({
+                        "state_type": state.state_type.to_string(),
+                        "action": state.action,
+                    })),
+                });
+                node_ids.insert(state.id.to_string());
+                behavioral_node_count += 1;
+
+                all_edges.push(GraphEdge {
+                    source: protocol.id.to_string(),
+                    target: state.id.to_string(),
+                    edge_type: "HAS_STATE".to_string(),
+                    layer: "behavioral".to_string(),
+                    attributes: None,
+                });
+                behavioral_edge_count += 1;
+            }
+
+            // HAS_TRANSITION edges (protocol → transition, with from/to state refs)
+            let transitions = neo4j
+                .get_protocol_transitions(protocol.id)
+                .await
+                .unwrap_or_default();
+
+            for transition in &transitions {
+                // Transition edges rendered as from_state → to_state
+                let from_str = transition.from_state.to_string();
+                let to_str = transition.to_state.to_string();
+                if node_ids.contains(&from_str) && node_ids.contains(&to_str) {
+                    all_edges.push(GraphEdge {
+                        source: from_str,
+                        target: to_str,
+                        edge_type: "TRANSITION".to_string(),
+                        layer: "behavioral".to_string(),
+                        attributes: Some(serde_json::json!({
+                            "trigger": transition.trigger,
+                            "guard": transition.guard,
+                        })),
+                    });
+                    behavioral_edge_count += 1;
+                }
+            }
+
+            // BELONGS_TO_SKILL edge (protocol → skill, if linked)
+            if let Some(skill_id) = protocol.skill_id {
+                let skill_str = skill_id.to_string();
+                if node_ids.contains(&skill_str) {
+                    all_edges.push(GraphEdge {
+                        source: protocol.id.to_string(),
+                        target: skill_str,
+                        edge_type: "BELONGS_TO_SKILL".to_string(),
+                        layer: "behavioral".to_string(),
+                        attributes: None,
+                    });
+                    behavioral_edge_count += 1;
+                }
+            }
+        }
+
+        stats.insert(
+            "behavioral".to_string(),
+            LayerStats {
+                nodes: behavioral_node_count,
+                edges: behavioral_edge_count,
+            },
+        );
+    }
+
     Ok(Json(ProjectGraphResponse {
         nodes: all_nodes,
         edges: all_edges,
@@ -915,6 +1205,17 @@ pub struct SkillsLayerSummary {
     pub total_activations: i64,
 }
 
+/// Behavioral layer metrics (Pattern Federation)
+#[derive(Debug, Clone, Serialize)]
+pub struct BehavioralLayerSummary {
+    pub protocols: usize,
+    pub states: usize,
+    pub transitions: usize,
+    pub system_protocols: usize,
+    pub business_protocols: usize,
+    pub skill_linked: usize,
+}
+
 /// Full intelligence summary response
 #[derive(Debug, Clone, Serialize)]
 pub struct IntelligenceSummaryResponse {
@@ -923,6 +1224,7 @@ pub struct IntelligenceSummaryResponse {
     pub fabric: FabricLayerSummary,
     pub neural: NeuralLayerSummary,
     pub skills: SkillsLayerSummary,
+    pub behavioral: BehavioralLayerSummary,
 }
 
 /// GET /api/projects/:slug/intelligence/summary
@@ -960,6 +1262,7 @@ pub async fn get_intelligence_summary(
         co_change_res,
         neural_res,
         skills_all_res,
+        protocols_res,
     ) = tokio::join!(
         neo4j.count_project_files(pid),
         neo4j.get_language_stats_for_project(pid),
@@ -971,6 +1274,7 @@ pub async fn get_intelligence_summary(
         neo4j.get_co_change_graph(pid, 1, 100_000),
         neo4j.get_neural_metrics(pid),
         neo4j.list_skills(pid, None, 1000, 0),
+        neo4j.list_protocols(pid, None, 10_000, 0),
     );
 
     // === Code layer ===
@@ -1066,12 +1370,50 @@ pub async fn get_intelligence_summary(
         total_activations,
     };
 
+    // === Behavioral layer (Protocol Federation) ===
+    let (all_protocols, _protocols_total) = protocols_res.unwrap_or((vec![], 0));
+
+    // Count states and transitions across all protocols (fire in parallel)
+    let mut total_states = 0usize;
+    let mut total_transitions = 0usize;
+    for proto in &all_protocols {
+        let (states_res, transitions_res) = tokio::join!(
+            neo4j.get_protocol_states(proto.id),
+            neo4j.get_protocol_transitions(proto.id),
+        );
+        total_states += states_res.map(|s| s.len()).unwrap_or(0);
+        total_transitions += transitions_res.map(|t| t.len()).unwrap_or(0);
+    }
+
+    let system_count = all_protocols
+        .iter()
+        .filter(|p| p.protocol_category == crate::protocol::ProtocolCategory::System)
+        .count();
+    let business_count = all_protocols
+        .iter()
+        .filter(|p| p.protocol_category == crate::protocol::ProtocolCategory::Business)
+        .count();
+    let skill_linked_count = all_protocols
+        .iter()
+        .filter(|p| p.skill_id.is_some())
+        .count();
+
+    let behavioral = BehavioralLayerSummary {
+        protocols: all_protocols.len(),
+        states: total_states,
+        transitions: total_transitions,
+        system_protocols: system_count,
+        business_protocols: business_count,
+        skill_linked: skill_linked_count,
+    };
+
     Ok(Json(IntelligenceSummaryResponse {
         code,
         knowledge,
         fabric,
         neural,
         skills,
+        behavioral,
     }))
 }
 
@@ -1218,6 +1560,17 @@ pub async fn get_embeddings_projection(
                 circular_fallback(embedding_points.len(), 2)
             }
         }
+    };
+
+    // 4b. Validate UMAP output — NaN/Inf coordinates crash serde_json serialization (500)
+    let projected = if projected
+        .iter()
+        .any(|coords| coords.iter().any(|c| !c.is_finite()))
+    {
+        tracing::warn!("UMAP produced NaN/Inf coordinates, falling back to circular layout");
+        circular_fallback(embedding_points.len(), proj_dims)
+    } else {
+        projected
     };
 
     // 5. Build projection points
@@ -1441,6 +1794,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: std::sync::Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         })
     }
 
@@ -1532,6 +1886,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: std::sync::Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1592,6 +1947,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: std::sync::Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1754,6 +2110,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: std::sync::Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         })
     }
 

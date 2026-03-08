@@ -16,7 +16,7 @@ All MCP tool interactions, code, and technical identifiers remain in English reg
 ## 1. Identity & Role
 
 You are an autonomous development agent integrated with the **Project Orchestrator**.
-You have **21 MCP mega-tools** covering the full project lifecycle: planning, execution, tracking, code exploration, knowledge management, neural skills, reasoning.
+You have **22 MCP mega-tools** covering the full project lifecycle: planning, execution, tracking, code exploration, knowledge management, neural skills, reasoning, behavioral patterns.
 
 **IMPORTANT — MCP-first Directive:**
 You use **EXCLUSIVELY the Project Orchestrator MCP tools** to organize your work.
@@ -36,7 +36,7 @@ Each tool has an `action` parameter that determines the operation:
 tool_name(action: "<action>", param1: value1, param2: value2, ...)
 ```
 
-The 21 mega-tools: `project`, `plan`, `task`, `step`, `decision`, `constraint`, `release`, `milestone`, `commit`, `note`, `workspace`, `workspace_milestone`, `resource`, `component`, `chat`, `feature_graph`, `code`, `reasoning`, `admin`, `skill`, `analysis_profile`
+The 22 mega-tools: `project`, `plan`, `task`, `step`, `decision`, `constraint`, `release`, `milestone`, `commit`, `note`, `workspace`, `workspace_milestone`, `resource`, `component`, `chat`, `feature_graph`, `code`, `reasoning`, `admin`, `skill`, `analysis_profile`, `protocol`
 
 ## 3. Data Model
 
@@ -245,6 +245,7 @@ Example of correct decomposition:
 
 - **ALWAYS** link plans to projects, commits to tasks, tasks to milestones/releases
 - Check `plan(action: "get_dependency_graph", plan_id)` and `plan(action: "get_critical_path", plan_id)` before starting execution
+- Use `plan(action: "get_waves", plan_id)` to compute parallel execution waves (topological sort + conflict splitting by affected_files)
 
 ### Impact Analysis Before Modification
 
@@ -420,6 +421,16 @@ Use `code(action: "get_communities", project_slug)` to segment tasks during plan
 - Enriched labels (`enriched_by` field) help name functional modules
 - `code(action: "enrich_communities", project_slug)` — enrich labels via LLM (batch)
 
+### Wave Dispatch (parallel plan execution)
+
+When a plan has parallelizable tasks:
+1. `plan(action: "get_waves", plan_id)` — computes execution waves (topological sort + conflict splitting by `affected_files`)
+2. For each wave, launch tasks with `Task(subagent_type: "general-purpose", run_in_background: true)` — one agent per task
+3. Each sub-agent receives the full task context via `task(action: "get_prompt")` and AUTONOMOUSLY updates its steps, creates notes/decisions via MCP
+4. `TaskOutput(block: true)` on ALL agent IDs in the wave before proceeding to the next wave
+5. **Gotcha**: multiple Bash calls in the same message are SERIALIZED — use `run_in_background: true` for true parallelism
+6. Detailed gotchas, sub-agent prompt templates → `note(action: "search", query: "wave-dispatcher")`
+
 ### Global vs project-scoped notes
 
 - **Project-scoped note** (with `project_id`): gotcha/pattern specific to a project (e.g., "this API returns 204 not 200")
@@ -453,7 +464,7 @@ Manage projects. Actions: list, create, get, update, delete, sync, get_roadmap, 
 | list_plans | `slug` (req) | List plans for project |
 
 ## plan
-Manage plans. Actions: list, create, get, update_status, delete, link_to_project, unlink_from_project, get_dependency_graph, get_critical_path
+Manage plans. Actions: list, create, get, update_status, delete, link_to_project, unlink_from_project, get_dependency_graph, get_critical_path, get_waves
 
 | Action | Key Parameters | Description |
 |--------|---------------|-------------|
@@ -466,6 +477,7 @@ Manage plans. Actions: list, create, get, update_status, delete, link_to_project
 | unlink_from_project | `plan_id` (req), `project_id` (req) | Unlink plan from project |
 | get_dependency_graph | `plan_id` (req) | Get task dependency graph |
 | get_critical_path | `plan_id` (req) | Get critical path through tasks |
+| get_waves | `plan_id` (req) | Compute execution waves (topological sort + conflict splitting by affected_files) |
 
 ## task
 Manage tasks. Actions: list, create, get, update, delete, get_next, add_dependencies, remove_dependency, get_blockers, get_blocked_by, get_context, get_prompt
@@ -719,7 +731,7 @@ Explore and analyze code. Actions: search, search_project, search_workspace, get
 | check_file_topology | `project_slug` (req), `file_path` (req), `new_imports` (req, array) | Check if new imports would violate rules |
 
 ## admin
-Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_builtin_calls, migrate_calls_confidence, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, reindex_decisions, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric, detect_skills, maintain_skills, install_hooks
+Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status, meilisearch_stats, delete_meilisearch_orphans, cleanup_cross_project_calls, cleanup_builtin_calls, migrate_calls_confidence, cleanup_sync_data, update_staleness_scores, update_energy_scores, search_neurons, reinforce_neurons, decay_synapses, backfill_synapses, reindex_decisions, backfill_decision_embeddings, backfill_touches, backfill_discussed, update_fabric_scores, bootstrap_knowledge_fabric, detect_skills, maintain_skills, audit_gaps, persist_health_report, install_hooks
 
 | Action | Key Parameters | Description |
 |--------|---------------|-------------|
@@ -747,6 +759,8 @@ Admin operations. Actions: sync_directory, start_watch, stop_watch, watch_status
 | bootstrap_knowledge_fabric | `project_id` | Bootstrap knowledge fabric |
 | detect_skills | `project_id` | Detect emergent skills |
 | maintain_skills | `level` (hourly/daily/weekly/full) | Run skill maintenance |
+| audit_gaps | `project_id` (req) | Audit knowledge graph gaps: orphan notes, decisions without AFFECTS, commits without TOUCHES, skills without members. Returns structured AuditGapsReport with counts and relationship type inventory. Used by system-inference protocol (AUDIT_GAPS state). |
+| persist_health_report | `project_id` (req) | Run health + audit_gaps + risk_assessment, persist combined report as Note (type: observation, tags: health-check, auto-generated, date). Includes delta analysis vs previous health-check note. Used by system-inference protocol (HEALTH_CHECK state). |
 | install_hooks | `project_id`, `cwd`, `port` | **Deprecated** — hooks are now automatic via SDK |
 
 ## skill
@@ -784,6 +798,128 @@ Manage analysis profiles (edge/fusion weight presets). Actions: list, create, ge
 | create | `name` (req), `project_slug`, `description`, `edge_weights` (object), `fusion_weights` (object) | Create analysis profile |
 | get | `id` (req) | Get analysis profile by UUID |
 | delete | `id` (req) | Delete analysis profile |
+
+## protocol
+Manage Protocol FSMs (Pattern Federation). Actions: list, create, get, update, delete, add_state, delete_state, list_states, add_transition, delete_transition, list_transitions, link_to_skill, start_run, transition, get_run, list_runs, cancel_run, fail_run, report_progress, route, compose, simulate
+
+| Action | Key Parameters | Description |
+|--------|---------------|-------------|
+| list | `project_id` (req), `category`, `limit`, `offset` | List protocols for project |
+| create | `project_id` (req), `name` (req), `description`, `category` (system/business), `relevance_vector` | Create protocol |
+| get | `protocol_id` (req) | Get protocol with states & transitions |
+| update | `protocol_id` (req), `name`, `description`, `relevance_vector` | Update protocol (relevance_vector: {phase, structure, domain, resource, lifecycle}) |
+| delete | `protocol_id` (req) | Delete protocol and all states/transitions |
+| add_state | `protocol_id` (req), `name` (req), `state_type` (start/intermediate/terminal), `description`, `action` | Add state to protocol |
+| delete_state | `protocol_id` (req), `state_id` (req) | Delete a state |
+| list_states | `protocol_id` (req) | List states for protocol |
+| add_transition | `protocol_id` (req), `from_state` (req), `to_state` (req), `trigger` (req), `guard` | Add transition |
+| delete_transition | `protocol_id` (req), `transition_id` (req) | Delete a transition |
+| list_transitions | `protocol_id` (req) | List transitions for protocol |
+| link_to_skill | `protocol_id` (req), `skill_id` (req) | Link protocol to a skill |
+| start_run | `protocol_id` (req), `plan_id`, `task_id` | Start a new protocol run (creates ProtocolRun in entry state) |
+| transition | `run_id` (req), `trigger` (req) | Fire a transition on a running protocol (evaluates guards, advances state) |
+| get_run | `run_id` (req) | Get a protocol run with current state, states_visited history, status |
+| list_runs | `protocol_id` (req), `status` | List runs for a protocol (filter by status: running/completed/failed/cancelled) |
+| cancel_run | `run_id` (req) | Cancel a running protocol run |
+| fail_run | `run_id` (req), `error` | Mark a running protocol run as failed with error message |
+| report_progress | `run_id` (req), `state_name` (req), `sub_action` (req), `processed`, `total`, `elapsed_ms` | Report progress during a long-running state (emits WS event for FSM Viewer) |
+| route | `project_id` (req), `plan_id`, `phase`, `domain`, `resource` | Route protocols by context affinity — returns ranked list with scores per dimension and explanation |
+| compose | `project_id` (req), `name` (req), `description`, `category` (system/business), `states` (req, array of {name, state_type, description, action}), `transitions` (req, array of {from_state, to_state, trigger, guard}), `notes` (array of {note_id, state_name}), `relevance_vector`, `triggers` (array of {pattern_type, pattern_value, confidence_threshold}) | One-shot creation: creates Skill + Protocol + States + Transitions + Note→Skill links in a single call. States/transitions use **name-based** references (not UUIDs). Returns protocol_id, skill_id, counts. |
+| simulate | `protocol_id` (req), `context` ({phase, structure, domain, resource, lifecycle}), `plan_id` | Dry-run activation: computes affinity score against the protocol's relevance_vector. Returns score (0-1), would_activate (threshold 0.6), per-dimension breakdown, explanation. If `plan_id` is provided, context is auto-built from plan metrics. |
+
+### Context Relevance Routing
+
+Each protocol can have a `relevance_vector` with 5 dimensions (all in [0,1]):
+- **phase**: Preferred workflow phase (0=warmup, 0.25=planning, 0.5=execution, 0.75=review, 1.0=closure)
+- **structure**: Preferred structural complexity (0=simple, 1=complex)
+- **domain**: Domain specificity (0.5=domain-agnostic)
+- **resource**: Preferred resource availability
+- **lifecycle**: Preferred lifecycle position (0=start, 1=end)
+
+Use `protocol(action: "route")` to rank protocols by context affinity. When `plan_id` is provided, the context is auto-built from plan metrics (phase, task count, dependencies, completion %). The response includes per-dimension breakdown and human-readable explanation.
+
+Example workflow — routing:
+```
+// During execution of a complex plan:
+protocol(action: "route", project_id: "...", plan_id: "...")
+// → wave-execution scores 95% (phase match + high structure)
+// → code-review scores 60% (phase mismatch)
+```
+
+### One-Shot Composition (compose + simulate)
+
+`compose` creates a complete protocol in a single call — no need to call create, add_state, add_transition, link_to_skill separately.
+It uses **name-based** state references: transitions reference states by `from_state`/`to_state` name (not UUID).
+
+Example workflow — compose then simulate:
+```
+// 1. Compose a protocol with states, transitions and note bindings:
+protocol(action: "compose", project_id: "...", name: "code-review",
+  category: "business",
+  states: [
+    { name: "analyze", state_type: "start", description: "Analyze code changes" },
+    { name: "review", state_type: "intermediate", description: "Review findings" },
+    { name: "done", state_type: "terminal", description: "Review complete" }
+  ],
+  transitions: [
+    { from_state: "analyze", to_state: "review", trigger: "analysis_complete" },
+    { from_state: "review", to_state: "done", trigger: "approved" }
+  ],
+  notes: [
+    { note_id: "...", state_name: "analyze" }
+  ],
+  relevance_vector: { phase: 0.75, structure: 0.6, domain: 0.5, resource: 0.5, lifecycle: 0.5 }
+)
+// → { protocol_id: "...", skill_id: "...", states_created: 3, transitions_created: 2, notes_linked: 1 }
+
+// 2. Simulate activation to test the relevance vector:
+protocol(action: "simulate", protocol_id: "...",
+  context: { phase: 0.75, structure: 0.7, domain: 0.5, resource: 0.4, lifecycle: 0.5 }
+)
+// → { score: 0.92, would_activate: true, dimensions: [...], explanation: "Strong match on phase (review)" }
+
+// 3. Or simulate with auto-built context from a plan:
+protocol(action: "simulate", protocol_id: "...", plan_id: "...")
+// → context auto-built from plan metrics (completion %, task count, complexity)
+```
+
+### Skill Registry & Cross-Instance Federation
+
+Skills can be **published** to a registry and **imported** across projects or PO instances.
+
+**SkillPackage v2 format** — portable, self-contained bundle:
+- `skill`: name, description, triggers, context_template, tags, cohesion
+- `notes[]`: type, importance, content, tags
+- `decisions[]`: description, rationale, alternatives, chosen_option
+- `protocols[]`: name, description, trigger_event, steps, tags
+- `execution_history`: activation_count, hit_rate, success_rate, last_activated
+- `source`: original project name, instance URL
+
+**Trust scoring** — computed at publish time:
+- Energy (20%) + Cohesion (20%) + Activation count (20%) + Success rate (30%) + Source diversity (10%)
+- Levels: High (≥0.8), Medium (≥0.5), Low (≥0.3), Untrusted (<0.3)
+- Higher trust → higher visibility in registry search results
+
+**Complete federation workflow:**
+```
+// 1. Compose a protocol-backed skill:
+protocol(action: "compose", project_id: "...", name: "wave-execution", ...)
+
+// 2. Export as portable SkillPackage v2:
+skill(action: "export", skill_id: "...", source_project_name: "my-project")
+
+// 3. Publish to the registry (computes trust score):
+POST /api/registry/publish { skill_id, project_id }
+
+// 4. Browse & search the registry (local + remote):
+GET /api/registry/search?query=wave&min_trust=0.5
+
+// 5. Import into another project:
+POST /api/registry/{id}/import { project_id, conflict_strategy: "merge" }
+// → creates skill + notes + decisions + synapses in target project
+```
+
+**Cross-instance discovery**: when `registry_remote_url` is configured (env `REGISTRY_REMOTE_URL` or config `registry.remote_url`), search queries both local and remote registries. Results are merged (local takes precedence on name conflicts), sorted by trust score. Remote failures are non-fatal (graceful degradation).
 "#;
 
 use anyhow::Result;
@@ -856,7 +992,7 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
         tools: &[
             ToolRef {
                 name: "plan",
-                description: "Manage plans (list/create/get/update_status/delete/link_to_project/unlink_from_project/get_dependency_graph/get_critical_path)",
+                description: "Manage plans (list/create/get/update_status/delete/link_to_project/unlink_from_project/get_dependency_graph/get_critical_path/get_waves)",
             },
             ToolRef {
                 name: "task",
@@ -1032,6 +1168,22 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
             description: "Build reasoning trees (reason/reason_feedback)",
         }],
     },
+    // ── Protocol (Pattern Federation) ────────────────────────────────
+    ToolGroup {
+        name: "protocol_federation",
+        description: "Manage Protocol FSMs for Pattern Federation — finite state machines with states, transitions, guards, runtime execution (start/transition/monitor runs), and context relevance routing",
+        keywords: &[
+            "protocol", "protocole", "fsm", "state machine", "machine à états",
+            "transition", "guard", "état", "state", "pattern federation",
+            "federation", "fédération", "workflow", "run", "exécution",
+            "execution", "trigger", "déclenchement", "progress", "progression",
+            "routing", "route", "relevance", "affinity", "context vector",
+        ],
+        tools: &[ToolRef {
+            name: "protocol",
+            description: "Manage protocols & runs (list/create/get/update/delete/add_state/delete_state/list_states/add_transition/delete_transition/list_transitions/link_to_skill/start_run/transition/get_run/list_runs/cancel_run/fail_run/report_progress/route)",
+        }],
+    },
     // ── Admin & Sync ────────────────────────────────────────────────
     ToolGroup {
         name: "sync_admin",
@@ -1049,7 +1201,7 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
 ];
 
 /// Total number of unique tools across all groups.
-/// Must match the MCP tools.rs count (currently 21 mega-tools).
+/// Must match the MCP tools.rs count (currently 22 mega-tools).
 pub fn tool_catalog_tool_count() -> usize {
     let mut names: Vec<&str> = TOOL_GROUPS
         .iter()
@@ -2256,7 +2408,7 @@ mod tests {
         assert!(BASE_SYSTEM_PROMPT.contains(r#"note(action: "create""#));
         assert!(BASE_SYSTEM_PROMPT.contains(r#"note(action: "link_to_entity""#));
         // Mega-tools section
-        assert!(BASE_SYSTEM_PROMPT.contains("21 mega-tools"));
+        assert!(BASE_SYSTEM_PROMPT.contains("22 mega-tools"));
         assert!(BASE_SYSTEM_PROMPT.contains("Mega-tools"));
     }
 
@@ -2720,11 +2872,11 @@ mod tests {
     // ================================================================
 
     #[test]
-    fn test_tool_groups_cover_all_21_mega_tools() {
+    fn test_tool_groups_cover_all_22_mega_tools() {
         let count = tool_catalog_tool_count();
         assert_eq!(
-            count, 21,
-            "TOOL_GROUPS must cover exactly 21 unique mega-tools (got {}). \
+            count, 22,
+            "TOOL_GROUPS must cover exactly 22 unique mega-tools (got {}). \
              Update the catalog when adding/removing MCP tools.",
             count
         );
@@ -2774,7 +2926,7 @@ mod tests {
 
     #[test]
     fn test_tool_groups_count() {
-        assert_eq!(TOOL_GROUPS.len(), 12, "Expected 12 tool groups");
+        assert_eq!(TOOL_GROUPS.len(), 13, "Expected 13 tool groups");
     }
 
     #[test]

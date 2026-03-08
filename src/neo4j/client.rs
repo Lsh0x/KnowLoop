@@ -247,6 +247,11 @@ impl Neo4jClient {
             "CREATE CONSTRAINT predicted_link_id IF NOT EXISTS FOR (l:PredictedLink) REQUIRE l.id IS UNIQUE",
             // GraIL — AnalysisProfile constraint
             "CREATE CONSTRAINT analysis_profile_id IF NOT EXISTS FOR (p:AnalysisProfile) REQUIRE p.id IS UNIQUE",
+            // Pattern Federation — Protocol constraints
+            "CREATE CONSTRAINT protocol_id IF NOT EXISTS FOR (p:Protocol) REQUIRE p.id IS UNIQUE",
+            "CREATE CONSTRAINT protocol_state_id IF NOT EXISTS FOR (ps:ProtocolState) REQUIRE ps.id IS UNIQUE",
+            "CREATE CONSTRAINT protocol_transition_id IF NOT EXISTS FOR (pt:ProtocolTransition) REQUIRE pt.id IS UNIQUE",
+            "CREATE CONSTRAINT protocol_run_id IF NOT EXISTS FOR (r:ProtocolRun) REQUIRE r.id IS UNIQUE",
         ];
 
         let indexes = vec![
@@ -298,6 +303,9 @@ impl Neo4jClient {
             "CREATE INDEX chat_session_cli IF NOT EXISTS FOR (s:ChatSession) ON (s.cli_session_id)",
             // ChatSession composite index for DISCUSSED relation queries
             "CREATE INDEX chat_session_project_id IF NOT EXISTS FOR (s:ChatSession) ON (s.project_slug, s.id)",
+            // ProtocolRun indexes
+            "CREATE INDEX protocol_run_protocol IF NOT EXISTS FOR (r:ProtocolRun) ON (r.protocol_id)",
+            "CREATE INDEX protocol_run_status IF NOT EXISTS FOR (r:ProtocolRun) ON (r.status)",
             // FeatureGraph indexes
             "CREATE INDEX feature_graph_project IF NOT EXISTS FOR (fg:FeatureGraph) ON (fg.project_id)",
             // User indexes — queried by email, external_id, auth_provider
@@ -350,6 +358,11 @@ impl Neo4jClient {
             "CREATE INDEX analysis_profile_project IF NOT EXISTS FOR (p:AnalysisProfile) ON (p.project_id)",
             // GraIL — PREDICTED_LINK relationship index (Plan 9)
             "CREATE INDEX predicted_link_rel_idx IF NOT EXISTS FOR ()-[r:PREDICTED_LINK]->() ON (r.plausibility)",
+            // Pattern Federation — Protocol indexes
+            "CREATE INDEX protocol_project IF NOT EXISTS FOR (p:Protocol) ON (p.project_id)",
+            "CREATE INDEX protocol_category IF NOT EXISTS FOR (p:Protocol) ON (p.protocol_category)",
+            "CREATE INDEX protocol_state_protocol IF NOT EXISTS FOR (ps:ProtocolState) ON (ps.protocol_id)",
+            "CREATE INDEX protocol_transition_protocol IF NOT EXISTS FOR (pt:ProtocolTransition) ON (pt.protocol_id)",
         ];
 
         // Vector indexes (require Neo4j 5.13+ — gracefully skip if not supported)

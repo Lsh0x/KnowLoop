@@ -639,6 +639,13 @@ pub async fn import_skill(
     // Invalidate skill cache for the target project
     skill_cache().invalidate_project(&body.project_id).await;
 
+    // Spawn event-triggered protocol runs (post_import)
+    crate::protocol::hooks::spawn_event_triggered_protocols(
+        state.orchestrator.neo4j_arc(),
+        body.project_id,
+        "post_import",
+    );
+
     Ok((StatusCode::CREATED, Json(result)))
 }
 
@@ -877,6 +884,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }
@@ -905,6 +913,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         (create_router(state), project_id)
     }
@@ -987,6 +996,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1037,6 +1047,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1074,6 +1085,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1114,6 +1126,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1159,6 +1172,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
