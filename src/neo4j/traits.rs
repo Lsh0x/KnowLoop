@@ -13,7 +13,7 @@ use crate::notes::{
     EntityType, Note, NoteAnchor, NoteFilters, NoteImportance, NoteStatus, PropagatedNote,
 };
 use crate::parser::FunctionCall;
-use crate::plan::models::{TaskDetails, UpdateTaskRequest};
+use crate::plan::models::{TaskDetails, UpdatePlanRequest, UpdateTaskRequest};
 use crate::protocol::{Protocol, ProtocolRun, ProtocolState, ProtocolTransition, RunStatus};
 use crate::skills::{ActivatedSkillContext, SkillNode, SkillStatus};
 use anyhow::Result;
@@ -717,6 +717,9 @@ pub trait GraphStore: Send + Sync {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<PlanNode>, usize)>;
+
+    /// Update plan fields (title, description, priority)
+    async fn update_plan(&self, id: Uuid, updates: &UpdatePlanRequest) -> Result<()>;
 
     /// Update plan status
     async fn update_plan_status(&self, id: Uuid, status: PlanStatus) -> Result<()>;

@@ -9,7 +9,7 @@ use crate::neo4j::traits::GraphStore;
 use crate::notes::{
     EntityType, Note, NoteAnchor, NoteFilters, NoteImportance, NoteStatus, PropagatedNote,
 };
-use crate::plan::models::{TaskDetails, UpdateTaskRequest};
+use crate::plan::models::{TaskDetails, UpdatePlanRequest, UpdateTaskRequest};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -2910,6 +2910,21 @@ impl GraphStore for MockGraphStore {
         filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         let total = filtered.len();
         Ok((paginate(&filtered, limit, offset), total))
+    }
+
+    async fn update_plan(&self, id: Uuid, updates: &UpdatePlanRequest) -> Result<()> {
+        if let Some(p) = self.plans.write().await.get_mut(&id) {
+            if let Some(title) = &updates.title {
+                p.title = title.clone();
+            }
+            if let Some(description) = &updates.description {
+                p.description = description.clone();
+            }
+            if let Some(priority) = updates.priority {
+                p.priority = priority;
+            }
+        }
+        Ok(())
     }
 
     async fn update_plan_status(&self, id: Uuid, status: PlanStatus) -> Result<()> {

@@ -57,6 +57,17 @@ pub struct CreateConstraintRequest {
     pub enforced_by: Option<String>,
 }
 
+/// Request to update a plan (title, description, priority)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdatePlanRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i32>,
+}
+
 /// Request to update a task
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateTaskRequest {

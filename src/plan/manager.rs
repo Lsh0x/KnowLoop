@@ -117,6 +117,16 @@ impl PlanManager {
         self.neo4j.list_active_plans().await
     }
 
+    /// Update plan fields (title, description, priority)
+    pub async fn update_plan(&self, plan_id: Uuid, req: UpdatePlanRequest) -> Result<()> {
+        self.neo4j.update_plan(plan_id, &req).await?;
+        self.emit(
+            CrudEvent::new(EntityType::Plan, CrudAction::Updated, plan_id.to_string())
+                .with_payload(serde_json::to_value(&req).unwrap_or_default()),
+        );
+        Ok(())
+    }
+
     /// Update plan status
     pub async fn update_plan_status(&self, plan_id: Uuid, status: PlanStatus) -> Result<()> {
         self.neo4j

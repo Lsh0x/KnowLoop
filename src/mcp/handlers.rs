@@ -104,6 +104,7 @@ impl ToolHandler {
             ("plan", "list") => "list_plans",
             ("plan", "create") => "create_plan",
             ("plan", "get") => "get_plan",
+            ("plan", "update") => "update_plan",
             ("plan", "update_status") => "update_plan_status",
             ("plan", "delete") => "delete_plan",
             ("plan", "link_to_project") => "link_plan_to_project",
@@ -632,6 +633,31 @@ impl ToolHandler {
                 let plan_id = extract_id(args, "plan_id")?;
                 let result = http.get(&format!("/api/plans/{}", plan_id)).await?;
                 Ok(Some(result))
+            }
+
+            "update_plan" => {
+                let plan_id = extract_id(args, "plan_id")?;
+                let mut body = serde_json::Map::new();
+                if let Some(v) = args.get("title") {
+                    body.insert("title".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("description") {
+                    body.insert("description".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("priority") {
+                    body.insert("priority".to_string(), v.clone());
+                }
+                if let Some(v) = args.get("status") {
+                    body.insert("status".to_string(), v.clone());
+                }
+                let result = http
+                    .patch(&format!("/api/plans/{}", plan_id), &Value::Object(body))
+                    .await?;
+                Ok(Some(if result.is_null() {
+                    json!({"updated": true})
+                } else {
+                    result
+                }))
             }
 
             "update_plan_status" => {
@@ -4057,6 +4083,7 @@ mod tests {
             ("list", "list_plans"),
             ("create", "create_plan"),
             ("get", "get_plan"),
+            ("update", "update_plan"),
             ("update_status", "update_plan_status"),
             ("link_to_project", "link_plan_to_project"),
             ("get_dependency_graph", "get_dependency_graph"),

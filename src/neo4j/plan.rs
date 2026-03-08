@@ -2,6 +2,7 @@
 
 use super::client::{pascal_to_snake_case, Neo4jClient, WhereBuilder};
 use super::models::*;
+use crate::plan::models::UpdatePlanRequest;
 use anyhow::{bail, Result};
 use neo4rs::query;
 use serde::Serialize;
@@ -299,6 +300,44 @@ impl Neo4jClient {
         }
 
         Ok((plans, total as usize))
+    }
+
+    /// Update plan fields (title, description, priority)
+    pub async fn update_plan(&self, id: Uuid, updates: &UpdatePlanRequest) -> Result<()> {
+        let mut set_clauses = Vec::new();
+
+        if updates.title.is_some() {
+            set_clauses.push("p.title = $title");
+        }
+        if updates.description.is_some() {
+            set_clauses.push("p.description = $description");
+        }
+        if updates.priority.is_some() {
+            set_clauses.push("p.priority = $priority");
+        }
+
+        if set_clauses.is_empty() {
+            return Ok(());
+        }
+
+        let cypher = format!(
+            "MATCH (p:Plan {{id: $id}}) SET {}",
+            set_clauses.join(", ")
+        );
+        let mut q = query(&cypher).param("id", id.to_string());
+
+        if let Some(title) = &updates.title {
+            q = q.param("title", title.clone());
+        }
+        if let Some(description) = &updates.description {
+            q = q.param("description", description.clone());
+        }
+        if let Some(priority) = updates.priority {
+            q = q.param("priority", priority as i64);
+        }
+
+        self.graph.run(q).await?;
+        Ok(())
     }
 
     /// Update plan status
