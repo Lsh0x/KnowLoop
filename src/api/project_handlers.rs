@@ -417,7 +417,7 @@ pub async fn get_project_graph(
     let limit = params.limit.unwrap_or(5000);
 
     let (nodes, edges, communities, stats) = super::graph_types::build_project_graph_data(
-        &*neo4j,
+        neo4j,
         &project,
         &requested_layers,
         limit,
@@ -452,7 +452,7 @@ pub async fn get_intelligence_summary(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", slug)))?;
 
-    let summary = super::graph_types::build_intelligence_summary(&*neo4j, project.id).await?;
+    let summary = super::graph_types::build_intelligence_summary(neo4j, project.id).await?;
 
     Ok(Json(summary))
 }
