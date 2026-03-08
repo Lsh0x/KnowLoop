@@ -1357,6 +1357,247 @@ pub struct AutoAnchorResult {
 }
 
 // ============================================================================
+// Decision Auto-Anchor (AFFECTS relationships)
+// ============================================================================
+
+/// Auto-anchor a decision to files mentioned in its content.
+///
+/// Extracts file paths from the decision's description, rationale, and
+/// chosen_option, then creates AFFECTS relationships to matching File nodes.
+/// Uses `add_decision_affects` which performs MERGE (idempotent).
+///
+/// **Important**: `root_path` must be provided so that relative paths extracted
+/// from content are resolved to the absolute paths used by File nodes in Neo4j.
+///
+/// Returns the number of new anchors created.
+pub async fn auto_anchor_decision(
+    graph_store: &dyn GraphStore,
+    decision: &DecisionNode,
+    root_path: Option<&str>,
+) -> anyhow::Result<usize> {
+    let mut all_paths = extract_file_paths_from_content(&decision.description);
+
+    if !decision.rationale.is_empty() {
+        all_paths.extend(extract_file_paths_from_content(&decision.rationale));
+    }
+    if let Some(ref chosen) = decision.chosen_option {
+        all_paths.extend(extract_file_paths_from_content(chosen));
+    }
+
+    // Deduplicate
+    all_paths.sort();
+    all_paths.dedup();
+
+    let mut anchored = 0;
+    for path in &all_paths {
+        // File nodes in Neo4j use absolute paths. extract_file_paths_from_content
+        // returns relative paths (e.g. "src/neo4j/client.rs"). Resolve them to
+        // absolute using the project's root_path so the MATCH query finds the node.
+        let resolved_path = if let Some(root) = root_path {
+            let root = root.trim_end_matches('/');
+            format!("{}/{}", root, path)
+        } else {
+            path.clone()
+        };
+
+        if let Err(e) = graph_store
+            .add_decision_affects(decision.id, "File", &resolved_path, None)
+            .await
+        {
+            tracing::debug!(
+                decision_id = %decision.id,
+                path = %resolved_path,
+                "Auto-anchor decision skipped (file may not exist in graph): {}",
+                e
+            );
+            continue;
+        }
+        anchored += 1;
+    }
+
+    Ok(anchored)
+}
+
+/// Auto-anchor all decisions for a project to files mentioned in their content.
+///
+/// Retrieves decisions via the Project->Plan->Task->Decision chain using
+/// `get_project_decisions_for_graph`, then runs `auto_anchor_decision` on each.
+///
+/// Returns `(decisions_processed, anchors_created)`.
+pub async fn auto_anchor_decisions_for_project(
+    graph_store: &dyn GraphStore,
+    project_id: Uuid,
+) -> anyhow::Result<(usize, usize)> {
+    // Resolve project root_path for absolute file path matching.
+    let root_path = match graph_store.get_project(project_id).await? {
+        Some(proj) => Some(proj.root_path),
+        None => {
+            tracing::warn!(%project_id, "Auto-anchor decisions: project not found");
+            None
+        }
+    };
+
+    // Get all decisions for this project via Plan→Task→Decision chain.
+    // get_project_decisions_for_graph returns (DecisionNode, Vec<AffectsRelation>);
+    // we only need the DecisionNode.
+    let decision_pairs = graph_store
+        .get_project_decisions_for_graph(project_id)
+        .await?;
+
+    let decisions_count = decision_pairs.len();
+    let mut total_anchors = 0;
+
+    for (decision, _existing_affects) in &decision_pairs {
+        let anchored =
+            auto_anchor_decision(graph_store, decision, root_path.as_deref()).await?;
+        total_anchors += anchored;
+    }
+
+    tracing::info!(
+        %project_id,
+        decisions_processed = decisions_count,
+        anchors_created = total_anchors,
+        "Auto-anchor decisions completed"
+    );
+
+    Ok((decisions_count, total_anchors))
+}
+
+// ============================================================================
+// Cross-Project Note Anchoring
+// ============================================================================
+
+/// Auto-anchor notes from ALL sources (project, global, other projects) to
+/// files of a given project.
+///
+/// Unlike `auto_anchor_notes_for_project` which only processes notes belonging
+/// to the specified project, this function loads all notes and anchors them
+/// against the target project's file tree. This enables cross-project knowledge
+/// propagation — a note from project A mentioning `src/shared/utils.rs` will
+/// be linked to the matching File node in project B if it has that path.
+///
+/// Returns `AutoAnchorResult` with diagnostics.
+pub async fn auto_anchor_all_notes_to_project(
+    graph_store: &dyn GraphStore,
+    project_id: Uuid,
+) -> anyhow::Result<AutoAnchorResult> {
+    use crate::notes::models::NoteFilters;
+
+    let root_path = match graph_store.get_project(project_id).await? {
+        Some(proj) => Some(proj.root_path),
+        None => {
+            tracing::warn!(%project_id, "Cross-project auto-anchor: project not found");
+            return Ok(AutoAnchorResult {
+                notes_processed: 0,
+                anchors_created: 0,
+                root_path_resolved: None,
+            });
+        }
+    };
+
+    // Load ALL notes (None for project_id = all notes across all projects)
+    let filters = NoteFilters::default();
+    let (all_notes, _total) = graph_store
+        .list_notes(None, None, &filters)
+        .await?;
+
+    let notes_count = all_notes.len();
+    let mut total_anchors = 0;
+
+    for note in &all_notes {
+        let anchored = auto_anchor_note(graph_store, note, root_path.as_deref()).await?;
+        total_anchors += anchored;
+    }
+
+    tracing::info!(
+        %project_id,
+        notes_processed = notes_count,
+        anchors_created = total_anchors,
+        "Cross-project auto-anchor notes completed"
+    );
+
+    Ok(AutoAnchorResult {
+        notes_processed: notes_count,
+        anchors_created: total_anchors,
+        root_path_resolved: root_path,
+    })
+}
+
+// ============================================================================
+// Knowledge Link Reconstruction (orchestrator)
+// ============================================================================
+
+/// Report from `reconstruct_knowledge_links` with diagnostic counters.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct ReconstructReport {
+    pub notes_processed: usize,
+    pub notes_linked: usize,
+    pub decisions_processed: usize,
+    pub affects_created: usize,
+    pub structural_propagated: usize,
+    pub semantic_linked: usize,
+    pub elapsed_ms: u64,
+}
+
+/// Reconstruct all knowledge links for a project after sync.
+///
+/// Called automatically post-sync and available as admin action.
+/// Performs two passes:
+///
+/// 1. **Cross-project note anchoring**: loads ALL notes (project + global + other
+///    projects) and creates LINKED_TO relationships to this project's File nodes.
+/// 2. **Decision anchoring**: loads all decisions for this project and creates
+///    AFFECTS relationships to File nodes mentioned in description/rationale.
+///
+/// Both passes use MERGE for idempotent relationship creation.
+/// File paths are resolved from relative to absolute using the project's `root_path`.
+pub async fn reconstruct_knowledge_links(
+    graph_store: &dyn GraphStore,
+    project_id: Uuid,
+) -> anyhow::Result<ReconstructReport> {
+    let start = std::time::Instant::now();
+
+    // 1. Cross-project note anchoring (includes project's own notes + global + other projects)
+    let anchor_result = auto_anchor_all_notes_to_project(graph_store, project_id).await?;
+
+    // 2. Decision anchoring (AFFECTS)
+    let (decisions_processed, affects_created) =
+        auto_anchor_decisions_for_project(graph_store, project_id).await?;
+
+    // 3. Structural propagation (IMPORTS/CALLS/CO_CHANGED → LINKED_TO propagated)
+    let structural_propagated = graph_store.propagate_structural_links(project_id).await?;
+
+    // 4. Semantic propagation (file embeddings ↔ note embeddings via HNSW)
+    let semantic_linked = graph_store
+        .propagate_semantic_links(project_id, 0.7)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(%project_id, error = %e, "Semantic propagation failed (non-fatal)");
+            0
+        });
+
+    let elapsed = start.elapsed();
+
+    let report = ReconstructReport {
+        notes_processed: anchor_result.notes_processed,
+        notes_linked: anchor_result.anchors_created,
+        decisions_processed,
+        affects_created,
+        structural_propagated,
+        semantic_linked,
+        elapsed_ms: elapsed.as_millis() as u64,
+    };
+
+    tracing::info!(
+        %project_id,
+        ?report,
+        "reconstruct_knowledge_links completed"
+    );
+
+    Ok(report)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
