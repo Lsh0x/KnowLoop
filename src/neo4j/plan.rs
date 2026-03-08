@@ -891,6 +891,24 @@ impl Neo4jClient {
              RETURN r.id AS id, 'release' AS type, r.title AS label,
                     r.status AS status, null AS priority,
                     r.target_date AS target_date, r.version AS version, null AS description
+             LIMIT $lim
+
+             UNION ALL
+
+             MATCH (proj:Project {id: $pid})-[:HAS_PLAN]->(pl:Plan)<-[:LINKED_TO_PLAN]-(c:Commit)
+             RETURN c.sha AS id, 'commit' AS type,
+                    COALESCE(substring(c.message, 0, 60), c.sha) AS label,
+                    null AS status, null AS priority,
+                    c.timestamp AS target_date, null AS version, null AS description
+             LIMIT $lim
+
+             UNION ALL
+
+             MATCH (proj:Project {id: $pid})-[:HAS_PLAN]->(:Plan)-[:HAS_TASK]->(t:Task)<-[:LINKED_TO_TASK]-(c:Commit)
+             RETURN c.sha AS id, 'commit' AS type,
+                    COALESCE(substring(c.message, 0, 60), c.sha) AS label,
+                    null AS status, null AS priority,
+                    c.timestamp AS target_date, null AS version, null AS description
              LIMIT $lim",
         )
         .param("pid", pid.clone())
@@ -953,7 +971,17 @@ impl Neo4jClient {
              UNION ALL
 
              MATCH (proj:Project {id: $pid})-[:HAS_PLAN]->(:Plan)-[:HAS_TASK]->(t:Task)<-[:LINKED_TO_TASK]-(c:Commit)
-             RETURN c.sha AS source, t.id AS target, 'LINKED_TO_TASK' AS rel_type",
+             RETURN c.sha AS source, t.id AS target, 'LINKED_TO_TASK' AS rel_type
+
+             UNION ALL
+
+             MATCH (proj:Project {id: $pid})-[:HAS_PLAN]->(pl:Plan)<-[:LINKED_TO_PLAN]-(c:Commit)-[r:TOUCHES]->(f:File)
+             RETURN c.sha AS source, f.path AS target, 'TOUCHES' AS rel_type
+
+             UNION ALL
+
+             MATCH (proj:Project {id: $pid})-[:HAS_PLAN]->(:Plan)-[:HAS_TASK]->(t:Task)<-[:LINKED_TO_TASK]-(c:Commit)-[r:TOUCHES]->(f:File)
+             RETURN c.sha AS source, f.path AS target, 'TOUCHES' AS rel_type",
         )
         .param("pid", pid);
 
