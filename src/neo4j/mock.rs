@@ -8094,6 +8094,45 @@ impl GraphStore for MockGraphStore {
             anyhow::bail!("PublishedSkill not found: {}", id)
         }
     }
+
+    // ========================================================================
+    // Graph visualization helpers
+    // ========================================================================
+
+    async fn list_project_symbols(
+        &self,
+        _project_id: Uuid,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String, String, Option<String>, Option<i64>)>> {
+        // Mock: return symbols from functions stored in mock
+        let functions = self.functions.read().await;
+        let mut symbols = Vec::new();
+        for (id, func) in functions.iter() {
+            symbols.push((
+                id.clone(),
+                func.name.clone(),
+                "function".to_string(),
+                func.file_path.clone(),
+                Some(format!("{:?}", func.visibility).to_lowercase()),
+                Some(func.line_start as i64),
+            ));
+        }
+        Ok(symbols)
+    }
+
+    async fn get_project_inheritance_edges(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        Ok(vec![])
+    }
+
+    async fn get_project_constraints(
+        &self,
+        _project_id: Uuid,
+    ) -> anyhow::Result<Vec<(crate::neo4j::models::ConstraintNode, Uuid)>> {
+        Ok(vec![])
+    }
 }
 
 #[cfg(test)]
