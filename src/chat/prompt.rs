@@ -872,6 +872,44 @@ protocol(action: "simulate", protocol_id: "...",
 protocol(action: "simulate", protocol_id: "...", plan_id: "...")
 // → context auto-built from plan metrics (completion %, task count, complexity)
 ```
+
+### Skill Registry & Cross-Instance Federation
+
+Skills can be **published** to a registry and **imported** across projects or PO instances.
+
+**SkillPackage v2 format** — portable, self-contained bundle:
+- `skill`: name, description, triggers, context_template, tags, cohesion
+- `notes[]`: type, importance, content, tags
+- `decisions[]`: description, rationale, alternatives, chosen_option
+- `protocols[]`: name, description, trigger_event, steps, tags
+- `execution_history`: activation_count, hit_rate, success_rate, last_activated
+- `source`: original project name, instance URL
+
+**Trust scoring** — computed at publish time:
+- Energy (20%) + Cohesion (20%) + Activation count (20%) + Success rate (30%) + Source diversity (10%)
+- Levels: High (≥0.8), Medium (≥0.5), Low (≥0.3), Untrusted (<0.3)
+- Higher trust → higher visibility in registry search results
+
+**Complete federation workflow:**
+```
+// 1. Compose a protocol-backed skill:
+protocol(action: "compose", project_id: "...", name: "wave-execution", ...)
+
+// 2. Export as portable SkillPackage v2:
+skill(action: "export", skill_id: "...", source_project_name: "my-project")
+
+// 3. Publish to the registry (computes trust score):
+POST /api/registry/publish { skill_id, project_id }
+
+// 4. Browse & search the registry (local + remote):
+GET /api/registry/search?query=wave&min_trust=0.5
+
+// 5. Import into another project:
+POST /api/registry/{id}/import { project_id, conflict_strategy: "merge" }
+// → creates skill + notes + decisions + synapses in target project
+```
+
+**Cross-instance discovery**: when `registry_remote_url` is configured (env `REGISTRY_REMOTE_URL` or config `registry.remote_url`), search queries both local and remote registries. Results are merged (local takes precedence on name conflicts), sorted by trust score. Remote failures are non-fatal (graceful degradation).
 "#;
 
 use anyhow::Result;
