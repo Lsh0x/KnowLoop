@@ -582,6 +582,81 @@ pub async fn get_project_graph(
             }
         }
 
+        // Get sub-file symbols: Function, Struct, Trait, Enum
+        let symbols = neo4j
+            .list_project_symbols(project.id, limit)
+            .await
+            .unwrap_or_default();
+
+        for (sym_id, sym_name, sym_type, file_path, visibility, line_start) in &symbols {
+            if code_node_count >= limit {
+                break;
+            }
+            all_nodes.push(GraphNode {
+                id: sym_id.clone(),
+                node_type: sym_type.clone(),
+                label: sym_name.clone(),
+                layer: "code".to_string(),
+                attributes: Some(serde_json::json!({
+                    "file_path": file_path,
+                    "visibility": visibility,
+                    "line_start": line_start,
+                })),
+            });
+            node_ids.insert(sym_id.clone());
+            code_node_count += 1;
+
+            // CONTAINS edge: file → symbol
+            if node_ids.contains(file_path) {
+                all_edges.push(GraphEdge {
+                    source: file_path.clone(),
+                    target: sym_id.clone(),
+                    edge_type: "CONTAINS".to_string(),
+                    layer: "code".to_string(),
+                    attributes: None,
+                });
+                code_edge_count += 1;
+            }
+        }
+
+        // CALLS edges between functions
+        let call_edges = neo4j
+            .get_project_call_edges(project.id)
+            .await
+            .unwrap_or_default();
+
+        for (caller_id, callee_id) in &call_edges {
+            if node_ids.contains(caller_id.as_str()) && node_ids.contains(callee_id.as_str()) {
+                all_edges.push(GraphEdge {
+                    source: caller_id.clone(),
+                    target: callee_id.clone(),
+                    edge_type: "CALLS".to_string(),
+                    layer: "code".to_string(),
+                    attributes: None,
+                });
+                code_edge_count += 1;
+            }
+        }
+
+        // EXTENDS / IMPLEMENTS edges between structs/traits
+        let inheritance_edges = neo4j
+            .get_project_inheritance_edges(project.id)
+            .await
+            .unwrap_or_default();
+
+        for (source_id, target_id, rel_type) in &inheritance_edges {
+            if node_ids.contains(source_id.as_str()) && node_ids.contains(target_id.as_str()) {
+                all_edges.push(GraphEdge {
+                    source: source_id.clone(),
+                    target: target_id.clone(),
+                    edge_type: rel_type.clone(),
+                    layer: "code".to_string(),
+                    attributes: None,
+                });
+                code_edge_count += 1;
+            }
+        }
+
         stats.insert(
             "code".to_string(),
             LayerStats {
@@ -800,6 +875,41 @@ pub async fn get_project_graph(
                 });
                 knowledge_edge_count += 1;
             }
+        }
+
+        // Constraints (via Project → Plan → Constraint)
+        let project_constraints = neo4j
+            .get_project_constraints(project.id)
+            .await
+            .unwrap_or_default();
+
+        for (constraint, _plan_id) in &project_constraints {
+            if knowledge_node_count >= limit {
+                break;
+            }
+            let label = if constraint.description.chars().count() > 40 {
+                let end = constraint
+                    .description
+                    .char_indices()
+                    .nth(40)
+                    .map(|(i, _)| i)
+                    .unwrap_or(constraint.description.len());
+                format!("{}…", &constraint.description[..end])
+            } else {
+                constraint.description.clone()
+            };
+            all_nodes.push(GraphNode {
+                id: constraint.id.to_string(),
+                node_type: "constraint".to_string(),
+                label,
+                layer: "knowledge".to_string(),
+                attributes: Some(serde_json::json!({
+                    "constraint_type": format!("{:?}", constraint.constraint_type).to_lowercase(),
+                    "enforced_by": constraint.enforced_by,
+                })),
+            });
+            node_ids.insert(constraint.id.to_string());
+            knowledge_node_count += 1;
         }
 
         stats.insert(

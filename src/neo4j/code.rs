@@ -318,6 +318,83 @@ impl Neo4jClient {
         }
     }
 
+    /// List all sub-file symbols (Function, Struct, Trait, Enum) for a project.
+    /// Returns tuples of (id, name, symbol_type, file_path, visibility, line_start).
+    /// Used by the graph visualization endpoint to include code-level detail nodes.
+    pub async fn list_project_symbols(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String, String, Option<String>, Option<i64>)>> {
+        let q = query(
+            r#"
+            MATCH (p:Project {id: $project_id})-[:CONTAINS]->(f:File)-[:CONTAINS]->(s)
+            WHERE s:Function OR s:Struct OR s:Trait OR s:Enum
+            RETURN s.id AS id,
+                   s.name AS name,
+                   CASE
+                     WHEN s:Function THEN 'function'
+                     WHEN s:Struct THEN 'struct'
+                     WHEN s:Trait THEN 'trait'
+                     WHEN s:Enum THEN 'enum'
+                   END AS symbol_type,
+                   f.path AS file_path,
+                   s.visibility AS visibility,
+                   s.line_start AS line_start
+            ORDER BY f.path, s.line_start
+            LIMIT $limit
+            "#,
+        )
+        .param("project_id", project_id.to_string())
+        .param("limit", limit as i64);
+
+        let mut result = self.graph.execute(q).await?;
+        let mut symbols = Vec::new();
+
+        while let Some(row) = result.next().await? {
+            symbols.push((
+                row.get::<String>("id").unwrap_or_default(),
+                row.get::<String>("name").unwrap_or_default(),
+                row.get::<String>("symbol_type").unwrap_or_default(),
+                row.get::<String>("file_path").unwrap_or_default(),
+                row.get::<String>("visibility").ok(),
+                row.get::<i64>("line_start").ok(),
+            ));
+        }
+
+        Ok(symbols)
+    }
+
+    /// List EXTENDS and IMPLEMENTS edges between structs/traits in a project.
+    /// Returns (source_id, target_id, relation_type).
+    pub async fn get_project_inheritance_edges(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(String, String, String)>> {
+        let q = query(
+            r#"
+            MATCH (p:Project {id: $project_id})-[:CONTAINS]->(f:File)-[:CONTAINS]->(child)
+                  -[r:EXTENDS|IMPLEMENTS]->(parent)<-[:CONTAINS]-(f2:File)<-[:CONTAINS]-(p)
+            WHERE (child:Struct OR child:Trait) AND (parent:Struct OR parent:Trait)
+            RETURN child.id AS source_id, parent.id AS target_id, type(r) AS rel_type
+            "#,
+        )
+        .param("project_id", project_id.to_string());
+
+        let mut result = self.graph.execute(q).await?;
+        let mut edges = Vec::new();
+
+        while let Some(row) = result.next().await? {
+            edges.push((
+                row.get::<String>("source_id").unwrap_or_default(),
+                row.get::<String>("target_id").unwrap_or_default(),
+                row.get::<String>("rel_type").unwrap_or_default(),
+            ));
+        }
+
+        Ok(edges)
+    }
+
     /// Backfill project_id on existing symbol nodes (Function, Struct, Enum, Trait)
     /// that were created before the denormalization was added.
     /// Inherits project_id from the parent File node via CONTAINS relationships.

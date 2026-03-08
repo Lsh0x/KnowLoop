@@ -2785,4 +2785,30 @@ impl GraphStore for Neo4jClient {
     async fn increment_published_skill_imports(&self, id: Uuid) -> anyhow::Result<()> {
         self.increment_published_skill_imports(id).await
     }
+
+    // ========================================================================
+    // Graph visualization helpers
+    // ========================================================================
+
+    async fn list_project_symbols(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String, String, Option<String>, Option<i64>)>> {
+        self.list_project_symbols(project_id, limit).await
+    }
+
+    async fn get_project_inheritance_edges(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        self.get_project_inheritance_edges(project_id).await
+    }
+
+    async fn get_project_constraints(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<Vec<(crate::neo4j::models::ConstraintNode, Uuid)>> {
+        self.get_project_constraints(project_id).await
+    }
 }

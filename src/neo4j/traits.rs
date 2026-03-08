@@ -2356,4 +2356,30 @@ pub trait GraphStore: Send + Sync {
 
     /// Increment the import count for a published skill.
     async fn increment_published_skill_imports(&self, id: Uuid) -> Result<()>;
+
+    // ========================================================================
+    // Graph visualization helpers (sub-file symbols, inheritance, constraints)
+    // ========================================================================
+
+    /// List all sub-file symbols (Function, Struct, Trait, Enum) for a project.
+    /// Returns tuples of (id, name, symbol_type, file_path, visibility, line_start).
+    async fn list_project_symbols(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String, String, Option<String>, Option<i64>)>>;
+
+    /// List EXTENDS and IMPLEMENTS edges between structs/traits in a project.
+    /// Returns (source_id, target_id, relation_type).
+    async fn get_project_inheritance_edges(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(String, String, String)>>;
+
+    /// Get all constraints for a project (via Project → Plan → Constraint).
+    /// Returns (constraint, plan_id) pairs for graph visualization.
+    async fn get_project_constraints(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(crate::neo4j::models::ConstraintNode, Uuid)>>;
 }
