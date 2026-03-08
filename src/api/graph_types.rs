@@ -21,6 +21,8 @@ pub const VALID_LAYERS: &[&str] = &[
     "neural",
     "skills",
     "behavioral",
+    "pm",
+    "chat",
 ];
 
 /// A node in the project graph visualization
@@ -878,6 +880,105 @@ pub async fn build_project_graph_data(
             LayerStats {
                 nodes: behavioral_node_count,
                 edges: behavioral_edge_count,
+            },
+        );
+    }
+
+    // ---- PM Layer (Plans, Tasks, Steps, Milestones, Releases) ----
+    if requested_layers.contains(&"pm".to_string()) {
+        let mut pm_node_count = 0usize;
+        let mut pm_edge_count = 0usize;
+
+        let (pm_nodes, pm_edges) = neo4j
+            .get_pm_graph_data(project.id, limit)
+            .await
+            .unwrap_or_default();
+
+        for node in &pm_nodes {
+            all_nodes.push(GraphNode {
+                id: node.id.clone(),
+                node_type: node.node_type.clone(),
+                label: node.label.clone(),
+                layer: "pm".to_string(),
+                attributes: Some(node.attributes.clone()),
+            });
+            node_ids.insert(node.id.clone());
+            pm_node_count += 1;
+        }
+
+        for edge in &pm_edges {
+            // Only add edges where both endpoints exist in the graph
+            if node_ids.contains(&edge.source) && node_ids.contains(&edge.target) {
+                all_edges.push(GraphEdge {
+                    source: edge.source.clone(),
+                    target: edge.target.clone(),
+                    edge_type: edge.rel_type.clone(),
+                    layer: "pm".to_string(),
+                    attributes: edge.attributes.clone(),
+                });
+                pm_edge_count += 1;
+            }
+        }
+
+        stats.insert(
+            "pm".to_string(),
+            LayerStats {
+                nodes: pm_node_count,
+                edges: pm_edge_count,
+            },
+        );
+    }
+
+    // ---- Chat Layer (ChatSessions + DISCUSSED edges to code entities) ----
+    if requested_layers.contains(&"chat".to_string()) {
+        let mut chat_node_count = 0usize;
+        let mut chat_edge_count = 0usize;
+
+        let (sessions, discussed) = neo4j
+            .get_chat_graph_data(project.id, 20) // Hard limit: max 20 sessions
+            .await
+            .unwrap_or_default();
+
+        for session in &sessions {
+            all_nodes.push(GraphNode {
+                id: session.id.clone(),
+                node_type: "chat_session".to_string(),
+                label: session.title.clone(),
+                layer: "chat".to_string(),
+                attributes: Some(serde_json::json!({
+                    "model": session.model,
+                    "message_count": session.message_count,
+                    "total_cost_usd": session.total_cost_usd,
+                    "created_at": session.created_at,
+                })),
+            });
+            node_ids.insert(session.id.clone());
+            chat_node_count += 1;
+        }
+
+        for disc in &discussed {
+            // DISCUSSED edges point to code-layer entities (files, functions, etc.)
+            // The entity_id may be a file path or symbol name — check if it exists in node_ids
+            if node_ids.contains(&disc.session_id) && node_ids.contains(&disc.entity_id) {
+                all_edges.push(GraphEdge {
+                    source: disc.session_id.clone(),
+                    target: disc.entity_id.clone(),
+                    edge_type: "DISCUSSED".to_string(),
+                    layer: "chat".to_string(),
+                    attributes: Some(serde_json::json!({
+                        "mention_count": disc.mention_count,
+                        "entity_type": disc.entity_type,
+                    })),
+                });
+                chat_edge_count += 1;
+            }
+        }
+
+        stats.insert(
+            "chat".to_string(),
+            LayerStats {
+                nodes: chat_node_count,
+                edges: chat_edge_count,
             },
         );
     }
