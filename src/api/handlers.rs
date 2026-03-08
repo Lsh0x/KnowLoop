@@ -2104,7 +2104,7 @@ pub async fn persist_health_report(
             .content
             .lines()
             .find(|l| l.contains("Total gaps:"))
-            .and_then(|l| l.split(':').last())
+            .and_then(|l| l.split(':').next_back())
             .and_then(|s| s.trim().parse().ok());
 
         prev_gaps.map(|prev| serde_json::json!({
