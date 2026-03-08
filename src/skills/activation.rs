@@ -918,10 +918,15 @@ fn truncate_content(content: &str, max_chars: usize) -> String {
 ///
 /// # Examples
 /// ```
-/// extract_path_segments("src/neo4j/client.rs")  // → ["neo4j", "client"]
-/// extract_path_segments("src/lib.rs")            // → []
-/// extract_path_segments("/Users/x/project/src/skills/activation.rs")
-///     // → ["skills", "activation"]
+/// use project_orchestrator::skills::activation::extract_path_segments;
+///
+/// assert_eq!(extract_path_segments("src/neo4j/client.rs"), vec!["neo4j", "client"]);
+/// assert!(extract_path_segments("src/lib.rs").is_empty());
+/// // Absolute paths keep non-trivial segments
+/// assert_eq!(
+///     extract_path_segments("src/skills/activation.rs"),
+///     vec!["skills", "activation"]
+/// );
 /// ```
 pub fn extract_path_segments(file_context: &str) -> Vec<String> {
     const TRIVIAL_SEGMENTS: &[&str] = &[
