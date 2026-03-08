@@ -984,13 +984,13 @@ fn skill_tool() -> ToolDefinition {
 fn protocol_tool() -> ToolDefinition {
     ToolDefinition {
         name: "protocol".to_string(),
-        description: "Manage protocols (Pattern Federation FSMs). Actions: list, create, get, update, delete, add_state, delete_state, list_states, add_transition, delete_transition, list_transitions, link_to_skill, start_run, get_run, list_runs, transition, cancel_run, fail_run, report_progress, delete_run".to_string(),
+        description: "Manage protocols (Pattern Federation FSMs). Actions: list, create, get, update, delete, add_state, delete_state, list_states, add_transition, delete_transition, list_transitions, link_to_skill, start_run, get_run, list_runs, transition, cancel_run, fail_run, report_progress, delete_run, route, compose, simulate".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["list", "create", "get", "update", "delete", "add_state", "delete_state", "list_states", "add_transition", "delete_transition", "list_transitions", "link_to_skill", "start_run", "get_run", "list_runs", "transition", "cancel_run", "fail_run", "report_progress", "delete_run"],
+                    "enum": ["list", "create", "get", "update", "delete", "add_state", "delete_state", "list_states", "add_transition", "delete_transition", "list_transitions", "link_to_skill", "start_run", "get_run", "list_runs", "transition", "cancel_run", "fail_run", "report_progress", "delete_run", "route", "compose", "simulate"],
                     "description": "Operation to perform"
                 },
                 "protocol_id": {"type": "string", "description": "Protocol UUID (get/update/delete/add_state/delete_state/list_states/add_transition/delete_transition/list_transitions/link_to_skill/start_run/list_runs)"},
@@ -1029,7 +1029,16 @@ fn protocol_tool() -> ToolDefinition {
                     "description": "Inline transitions to create with the protocol (create): [{\"from_state\": \"uuid\", \"to_state\": \"uuid\", \"trigger\": \"...\", \"guard\": \"...\"}]"
                 },
                 "limit": {"type": "integer", "description": "Max items (list/list_runs)"},
-                "offset": {"type": "integer", "description": "Skip items (list/list_runs)"}
+                "offset": {"type": "integer", "description": "Skip items (list/list_runs)"},
+                "phase": {"type": "string", "description": "Workflow phase for routing (route): warmup, planning, execution, review, closure"},
+                "domain": {"type": "number", "description": "Domain relevance 0.0-1.0 (route)"},
+                "resource": {"type": "number", "description": "Resource availability 0.0-1.0 (route)"},
+                "structure": {"type": "number", "description": "Structural complexity 0.0-1.0 (route)"},
+                "lifecycle": {"type": "number", "description": "Project lifecycle position 0.0-1.0 (route)"},
+                "notes": {"type": "array", "items": {"type": "object"}, "description": "Notes to bind to states (compose): [{\"note_id\": \"...\", \"state_name\": \"...\"}]"},
+                "relevance_vector": {"type": "object", "description": "Relevance vector for context routing (compose): {\"phase\": 0.5, \"structure\": 0.5, \"domain\": 0.5, \"resource\": 0.5, \"lifecycle\": 0.5}"},
+                "triggers": {"type": "array", "items": {"type": "object"}, "description": "Trigger patterns for auto-created skill (compose): [{\"pattern_type\": \"regex|file_glob|semantic\", \"pattern_value\": \"...\", \"confidence_threshold\": 0.7}]"},
+                "context": {"type": "object", "description": "Context vector for simulation (simulate): {\"phase\": 0.5, \"structure\": 0.5, \"domain\": 0.5, \"resource\": 0.5, \"lifecycle\": 0.5}"}
             })),
             required: Some(vec!["action".to_string()]),
         },

@@ -1852,18 +1852,28 @@ impl Neo4jClient {
             skills_without_members.push(format!("{} — {}", &id[..8.min(id.len())], name));
         }
 
-        // 5. Dynamic relationship type inventory
+        // 5. Dynamic relationship type inventory with actual counts
         let rel_types_q = query(
-            "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS rel_type ORDER BY rel_type",
+            r#"
+            CALL db.relationshipTypes() YIELD relationshipType AS rel_type
+            CALL {
+                WITH rel_type
+                MATCH ()-[r]->() WHERE type(r) = rel_type
+                RETURN count(r) AS cnt
+            }
+            RETURN rel_type, cnt
+            ORDER BY rel_type
+            "#,
         );
 
         let mut relationship_type_counts = Vec::new();
         if let Ok(mut rows) = self.graph.execute(rel_types_q).await {
             while let Some(row) = rows.next().await? {
                 let rel_type: String = row.get("rel_type").unwrap_or_default();
+                let count: i64 = row.get("cnt").unwrap_or(0);
                 relationship_type_counts.push(RelTypeCount {
                     rel_type,
-                    count: -1,
+                    count,
                 });
             }
         }

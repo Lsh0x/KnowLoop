@@ -10,6 +10,7 @@ use crate::protocol::{
 };
 use anyhow::{Context, Result};
 use neo4rs::query;
+use tracing::warn;
 use uuid::Uuid;
 
 impl Neo4jClient {
@@ -276,7 +277,16 @@ impl Neo4jClient {
         let mut protocols = Vec::new();
         while let Some(row) = result.next().await? {
             let node: neo4rs::Node = row.get("proto")?;
-            protocols.push(Self::node_to_protocol(&node)?);
+            match Self::node_to_protocol(&node) {
+                Ok(protocol) => protocols.push(protocol),
+                Err(e) => {
+                    let id_hint = node.get::<String>("id").unwrap_or_default();
+                    warn!(
+                        "Skipping corrupted Protocol node (id={}): {}",
+                        id_hint, e
+                    );
+                }
+            }
         }
 
         Ok((protocols, total))

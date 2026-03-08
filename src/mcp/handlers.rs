@@ -3931,6 +3931,12 @@ impl ToolHandler {
                 if let Some(resource) = args.get("resource").and_then(|v| v.as_f64()) {
                     query_params.push_str(&format!("&resource={}", resource));
                 }
+                if let Some(structure) = args.get("structure").and_then(|v| v.as_f64()) {
+                    query_params.push_str(&format!("&structure={}", structure));
+                }
+                if let Some(lifecycle) = args.get("lifecycle").and_then(|v| v.as_f64()) {
+                    query_params.push_str(&format!("&lifecycle={}", lifecycle));
+                }
                 let result = http
                     .get(&format!("/api/protocols/route?{}", query_params))
                     .await?;

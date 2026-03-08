@@ -149,6 +149,10 @@ pub struct RouteProtocolsQuery {
     pub domain: Option<f64>,
     /// Optional: explicit resource availability (0.0-1.0)
     pub resource: Option<f64>,
+    /// Optional: explicit structure complexity override (0.0-1.0)
+    pub structure: Option<f64>,
+    /// Optional: explicit lifecycle position override (0.0-1.0)
+    pub lifecycle: Option<f64>,
 }
 
 // ============================================================================
@@ -300,6 +304,12 @@ pub async fn route_protocols(
         if let Some(resource) = query.resource {
             ctx.resource = resource.clamp(0.0, 1.0);
         }
+        if let Some(structure) = query.structure {
+            ctx.structure = structure.clamp(0.0, 1.0);
+        }
+        if let Some(lifecycle) = query.lifecycle {
+            ctx.lifecycle = lifecycle.clamp(0.0, 1.0);
+        }
         ctx
     } else {
         // Manual context — use defaults with overrides
@@ -319,6 +329,12 @@ pub async fn route_protocols(
         }
         if let Some(resource) = query.resource {
             ctx.resource = resource.clamp(0.0, 1.0);
+        }
+        if let Some(structure) = query.structure {
+            ctx.structure = structure.clamp(0.0, 1.0);
+        }
+        if let Some(lifecycle) = query.lifecycle {
+            ctx.lifecycle = lifecycle.clamp(0.0, 1.0);
         }
         ctx
     };
@@ -661,6 +677,34 @@ pub async fn add_state(
         .await
         .map_err(AppError::Internal)?;
 
+    // Update protocol's entry_state / terminal_states when adding Start or Terminal states
+    if ps.state_type == crate::protocol::StateType::Start
+        || ps.state_type == crate::protocol::StateType::Terminal
+    {
+        if let Some(mut protocol) = state
+            .orchestrator
+            .neo4j()
+            .get_protocol(protocol_id)
+            .await
+            .map_err(AppError::Internal)?
+        {
+            if ps.state_type == crate::protocol::StateType::Start {
+                protocol.entry_state = ps.id;
+            }
+            if ps.state_type == crate::protocol::StateType::Terminal
+                && !protocol.terminal_states.contains(&ps.id)
+            {
+                protocol.terminal_states.push(ps.id);
+            }
+            state
+                .orchestrator
+                .neo4j()
+                .upsert_protocol(&protocol)
+                .await
+                .map_err(AppError::Internal)?;
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(ps)))
 }
 
@@ -851,8 +895,11 @@ pub async fn start_run(
     )
     .await
     .map_err(|e| {
-        if e.to_string().contains("not found") {
-            AppError::NotFound(e.to_string())
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            AppError::NotFound(msg)
+        } else if msg.contains("concurrent run") {
+            AppError::Conflict(msg)
         } else {
             AppError::Internal(e)
         }
@@ -1150,7 +1197,8 @@ pub struct ComposeProtocolBody {
     pub name: String,
     pub description: Option<String>,
     pub category: Option<String>,
-    /// Notes to bind to states
+    /// Notes to bind to states (optional, defaults to empty)
+    #[serde(default)]
     pub notes: Vec<NoteStateBinding>,
     /// FSM states
     pub states: Vec<ComposeStateInline>,
