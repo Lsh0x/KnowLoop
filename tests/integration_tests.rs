@@ -43,6 +43,7 @@ fn test_config() -> Config {
         embedding_model: None,
         embedding_api_key: None,
         embedding_dimensions: None,
+        registry_remote_url: None,
         config_yaml_path: None,
     }
 }

@@ -1218,6 +1218,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }

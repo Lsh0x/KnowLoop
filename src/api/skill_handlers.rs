@@ -884,6 +884,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }
@@ -912,6 +913,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         (create_router(state), project_id)
     }
@@ -994,6 +996,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1044,6 +1047,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1081,6 +1085,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1121,6 +1126,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 
@@ -1166,6 +1172,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         let app = create_router(state);
 

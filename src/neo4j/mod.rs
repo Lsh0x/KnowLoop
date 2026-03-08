@@ -17,6 +17,7 @@ pub mod plan;
 mod profile;
 mod project;
 mod protocol;
+mod registry;
 mod release;
 mod skill;
 mod step;

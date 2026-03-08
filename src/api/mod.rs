@@ -11,6 +11,7 @@ pub mod project_handlers;
 pub mod protocol_handlers;
 pub mod query;
 pub mod reason_handlers;
+pub mod registry_handlers;
 pub mod routes;
 pub mod skill_handlers;
 pub mod workspace_handlers;

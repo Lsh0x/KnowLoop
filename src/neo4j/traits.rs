@@ -2326,4 +2326,34 @@ pub trait GraphStore: Send + Sync {
     /// Audit the knowledge graph for gaps: orphan notes, decisions without AFFECTS,
     /// commits without TOUCHES, skills without members.
     async fn audit_knowledge_gaps(&self, project_id: Uuid) -> Result<AuditGapsReport>;
+
+    // ========================================================================
+    // Skill Registry
+    // ========================================================================
+
+    /// Create or update a published skill in the registry.
+    async fn upsert_published_skill(
+        &self,
+        published: &crate::skills::registry::PublishedSkill,
+    ) -> Result<()>;
+
+    /// Get a published skill by ID.
+    async fn get_published_skill(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<crate::skills::registry::PublishedSkill>>;
+
+    /// Search published skills with optional filters.
+    /// Returns (matching entries, total count).
+    async fn search_published_skills(
+        &self,
+        query: Option<&str>,
+        min_trust: Option<f64>,
+        tags: Option<&[String]>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<crate::skills::registry::PublishedSkill>, usize)>;
+
+    /// Increment the import count for a published skill.
+    async fn increment_published_skill_imports(&self, id: Uuid) -> Result<()>;
 }

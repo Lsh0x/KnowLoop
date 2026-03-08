@@ -52,6 +52,9 @@ pub struct ServerState {
     /// In-memory store for ephemeral WebSocket auth tickets.
     /// Used as a fallback when cookies are not sent on WS upgrades (WKWebView).
     pub ws_ticket_store: Arc<super::ws_auth::WsTicketStore>,
+    /// Remote skill registry URL (optional — enables cross-instance skill search).
+    /// When set, registry search merges local + remote results.
+    pub registry_remote_url: Option<String>,
 }
 
 /// Shared orchestrator state
@@ -3666,6 +3669,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         (create_router(state), milestone.id, task1.id, task2.id)
     }
@@ -3869,6 +3873,7 @@ mod tests {
             server_port,
             public_url: public_url.map(|s| s.to_string()),
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         }
     }
 
@@ -4019,6 +4024,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }

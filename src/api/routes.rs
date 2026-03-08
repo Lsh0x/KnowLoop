@@ -13,6 +13,7 @@ use super::profile_handlers;
 use super::project_handlers;
 use super::protocol_handlers;
 use super::reason_handlers;
+use super::registry_handlers;
 use super::skill_handlers;
 use super::workspace_handlers;
 use super::ws_chat_handler;
@@ -833,6 +834,25 @@ fn protected_routes() -> Router<OrchestratorState> {
             get(skill_handlers::get_skill_health),
         )
         // ================================================================
+        // Skill Registry (Pattern Federation)
+        // ================================================================
+        .route(
+            "/api/registry/publish",
+            post(registry_handlers::publish_skill),
+        )
+        .route(
+            "/api/registry/search",
+            get(registry_handlers::search_registry),
+        )
+        .route(
+            "/api/registry/{id}",
+            get(registry_handlers::get_published_skill),
+        )
+        .route(
+            "/api/registry/{id}/import",
+            post(registry_handlers::import_from_registry),
+        )
+        // ================================================================
         // Protocols (Pattern Federation)
         // ================================================================
         .route(
@@ -1196,6 +1216,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }
@@ -1220,6 +1241,7 @@ mod tests {
             server_port: 6600,
             public_url: None,
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
+            registry_remote_url: None,
         });
         create_router(state)
     }

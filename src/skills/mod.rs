@@ -39,6 +39,8 @@ pub mod package;
 pub mod project_resolver;
 pub mod templates;
 pub mod triggers;
+pub mod registry;
+pub mod trust;
 pub mod validation;
 
 pub use activation::*;

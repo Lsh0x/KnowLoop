@@ -134,6 +134,9 @@ pub struct MockGraphStore {
     pub protocol_transitions: RwLock<HashMap<Uuid, crate::protocol::ProtocolTransition>>,
     pub protocol_runs: RwLock<HashMap<Uuid, crate::protocol::ProtocolRun>>,
 
+    // Registry (published skills)
+    pub published_skills: RwLock<HashMap<Uuid, crate::skills::registry::PublishedSkill>>,
+
     // Analysis profiles (keyed by profile id String)
     pub analysis_profiles: RwLock<HashMap<String, crate::graph::models::AnalysisProfile>>,
 
@@ -221,6 +224,7 @@ impl MockGraphStore {
             protocol_states: RwLock::new(HashMap::new()),
             protocol_transitions: RwLock::new(HashMap::new()),
             protocol_runs: RwLock::new(HashMap::new()),
+            published_skills: RwLock::new(HashMap::new()),
             analysis_profiles: RwLock::new(HashMap::new()),
             topology_rules: RwLock::new(HashMap::new()),
             mock_has_context_cards: std::sync::atomic::AtomicBool::new(false),
@@ -8004,6 +8008,91 @@ impl GraphStore for MockGraphStore {
             skills_without_members: vec![],
             relationship_type_counts: vec![],
         })
+    }
+
+    // ========================================================================
+    // Registry operations (Skill Registry)
+    // ========================================================================
+
+    async fn upsert_published_skill(
+        &self,
+        published: &crate::skills::registry::PublishedSkill,
+    ) -> anyhow::Result<()> {
+        self.published_skills
+            .write()
+            .await
+            .insert(published.id, published.clone());
+        Ok(())
+    }
+
+    async fn get_published_skill(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<crate::skills::registry::PublishedSkill>> {
+        Ok(self.published_skills.read().await.get(&id).cloned())
+    }
+
+    async fn search_published_skills(
+        &self,
+        search_query: Option<&str>,
+        min_trust: Option<f64>,
+        tags: Option<&[String]>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::skills::registry::PublishedSkill>, usize)> {
+        let store = self.published_skills.read().await;
+        let mut filtered: Vec<_> = store
+            .values()
+            .filter(|ps| {
+                // Search filter
+                if let Some(q) = search_query {
+                    let q_lower = q.to_lowercase();
+                    if !ps.name.to_lowercase().contains(&q_lower)
+                        && !ps.description.to_lowercase().contains(&q_lower)
+                    {
+                        return false;
+                    }
+                }
+                // Min trust filter
+                if let Some(mt) = min_trust {
+                    if ps.trust_score < mt {
+                        return false;
+                    }
+                }
+                // Tags filter (AND logic)
+                if let Some(t) = tags {
+                    for tag in t {
+                        if !ps.tags.contains(tag) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        // Sort by trust_score DESC, then published_at DESC
+        filtered.sort_by(|a, b| {
+            b.trust_score
+                .partial_cmp(&a.trust_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.published_at.cmp(&a.published_at))
+        });
+
+        let total = filtered.len();
+        let page = filtered.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn increment_published_skill_imports(&self, id: Uuid) -> anyhow::Result<()> {
+        let mut store = self.published_skills.write().await;
+        if let Some(ps) = store.get_mut(&id) {
+            ps.import_count += 1;
+            Ok(())
+        } else {
+            anyhow::bail!("PublishedSkill not found: {}", id)
+        }
     }
 }
 

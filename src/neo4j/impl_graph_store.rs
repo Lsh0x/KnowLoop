@@ -2751,4 +2751,38 @@ impl GraphStore for Neo4jClient {
     ) -> anyhow::Result<crate::neo4j::models::AuditGapsReport> {
         self.audit_knowledge_gaps(project_id).await
     }
+
+    // ========================================================================
+    // Registry operations (Skill Registry)
+    // ========================================================================
+
+    async fn upsert_published_skill(
+        &self,
+        published: &crate::skills::registry::PublishedSkill,
+    ) -> anyhow::Result<()> {
+        self.upsert_published_skill(published).await
+    }
+
+    async fn get_published_skill(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<crate::skills::registry::PublishedSkill>> {
+        self.get_published_skill(id).await
+    }
+
+    async fn search_published_skills(
+        &self,
+        search_query: Option<&str>,
+        min_trust: Option<f64>,
+        tags: Option<&[String]>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<crate::skills::registry::PublishedSkill>, usize)> {
+        self.search_published_skills(search_query, min_trust, tags, limit, offset)
+            .await
+    }
+
+    async fn increment_published_skill_imports(&self, id: Uuid) -> anyhow::Result<()> {
+        self.increment_published_skill_imports(id).await
+    }
 }

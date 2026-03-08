@@ -76,6 +76,18 @@ pub struct YamlConfig {
     pub embeddings: EmbeddingsYamlConfig,
     /// Auth section — if absent, auth_config will be None (deny-by-default)
     pub auth: Option<AuthConfig>,
+    /// Skill registry section (optional — enables cross-instance skill sharing)
+    #[serde(default)]
+    pub registry: RegistryYamlConfig,
+}
+
+/// Skill registry configuration section (optional)
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct RegistryYamlConfig {
+    /// URL of a remote PO instance to use as a skill registry
+    /// (e.g. "https://po-central.example.com")
+    pub remote_url: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -513,6 +525,12 @@ pub struct Config {
     /// Priority: env var (EMBEDDING_DIMENSIONS) > YAML (embeddings.dimensions) > None.
     pub embedding_dimensions: Option<usize>,
 
+    // ── Skill Registry config ────────────────────────────────────────────
+    /// URL of a remote PO instance to use as a skill registry.
+    /// When set, registry search merges local + remote results.
+    /// Priority: env var (REGISTRY_REMOTE_URL) > YAML (registry.remote_url) > None.
+    pub registry_remote_url: Option<String>,
+
     /// Resolved path to the config.yaml file that was loaded (if any).
     /// Used for persisting runtime changes back to disk.
     pub config_yaml_path: Option<std::path::PathBuf>,
@@ -596,6 +614,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .or(yaml.embeddings.dimensions),
+            // Registry config (env var > YAML > None)
+            registry_remote_url: std::env::var("REGISTRY_REMOTE_URL")
+                .ok()
+                .or(yaml.registry.remote_url),
             config_yaml_path: resolved_path,
         })
     }
@@ -1125,6 +1147,7 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         server_port: config.server_port,
         public_url: config.public_url.clone(),
         ws_ticket_store,
+        registry_remote_url: config.registry_remote_url.clone(),
     });
 
     // Create router
