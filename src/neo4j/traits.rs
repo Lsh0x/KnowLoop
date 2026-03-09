@@ -1757,6 +1757,15 @@ pub trait GraphStore: Send + Sync {
         project_id: Option<Uuid>,
     ) -> Result<Vec<DiscussedEntity>>;
 
+    /// WorldModel predictive context (biomimicry T7):
+    /// Get co-changers of files discussed in the last N sessions.
+    async fn get_discussed_co_changers(
+        &self,
+        project_id: Uuid,
+        max_sessions: i64,
+        max_results: i64,
+    ) -> Result<Vec<CoChanger>>;
+
     /// Backfill DISCUSSED relations on all existing sessions.
     /// Returns `(sessions_processed, entities_found, relations_created)`.
     async fn backfill_discussed(&self) -> Result<(usize, usize, usize)>;

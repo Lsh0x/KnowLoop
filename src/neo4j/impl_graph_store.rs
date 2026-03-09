@@ -2113,6 +2113,16 @@ impl GraphStore for Neo4jClient {
         self.get_session_entities(session_id, project_id).await
     }
 
+    async fn get_discussed_co_changers(
+        &self,
+        project_id: Uuid,
+        max_sessions: i64,
+        max_results: i64,
+    ) -> anyhow::Result<Vec<CoChanger>> {
+        self.get_discussed_co_changers(project_id, max_sessions, max_results)
+            .await
+    }
+
     async fn backfill_discussed(&self) -> anyhow::Result<(usize, usize, usize)> {
         self.backfill_discussed().await
     }

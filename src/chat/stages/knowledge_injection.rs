@@ -102,6 +102,16 @@ struct ScoredDecision {
     score: f64,
 }
 
+/// A predictive file suggestion from the WorldModel (biomimicry T7).
+/// Predicted from CO_CHANGED / DISCUSSED patterns before the agent accesses them.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct PredictedFile {
+    path: String,
+    score: f64,
+    source: &'static str, // "co_change" or "discussed"
+}
+
 // ============================================================================
 // Stage implementation
 // ============================================================================
@@ -193,7 +203,7 @@ impl KnowledgeInjectionStage {
         _project_id: Option<Uuid>,
         entities: &[ExtractedEntity],
         referenced_uuids: &[Uuid],
-    ) -> (Vec<ScoredNote>, Vec<ScoredDecision>) {
+    ) -> (Vec<ScoredNote>, Vec<ScoredDecision>, Vec<PredictedFile>) {
         let query_timeout = Duration::from_millis(self.config.query_timeout_ms);
 
         // ── Query 1: BM25 notes search ──────────────────────────────────
@@ -248,6 +258,7 @@ impl KnowledgeInjectionStage {
 
         let entity_notes_future = async move {
             let mut notes = Vec::new();
+            let mut predictions: Vec<PredictedFile> = Vec::new();
 
             // Direct notes for files
             for file_path in &file_entities {
@@ -313,6 +324,34 @@ impl KnowledgeInjectionStage {
                 }
             }
 
+            // WorldModel predictive context (biomimicry T7)
+            // Inject top-5 CO_CHANGED co-changers as predicted file suggestions
+            for file_path in &file_entities {
+                match graph_clone
+                    .get_file_co_changers(file_path, 2, 5) // min_count=2, limit=5
+                    .await
+                {
+                    Ok(co_changers) => {
+                        for cc in co_changers {
+                            // Score: normalized co-change count (diminishing returns)
+                            let score = 1.0 - (1.0 / (cc.count as f64 + 1.0));
+                            predictions.push(PredictedFile {
+                                path: cc.path,
+                                score,
+                                source: "co_change",
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        debug!(
+                            file = %file_path,
+                            error = %e,
+                            "Failed to get co-changers for predictive context"
+                        );
+                    }
+                }
+            }
+
             // Direct notes for symbols (functions, structs, traits, enums)
             for (entity_type, identifier) in &symbol_entities {
                 let note_entity_type = match entity_type {
@@ -349,7 +388,7 @@ impl KnowledgeInjectionStage {
                 }
             }
 
-            notes
+            (notes, predictions)
         };
 
         // ── Query 4: Direct UUID lookups (notes/decisions referenced by UUID) ─
@@ -402,12 +441,37 @@ impl KnowledgeInjectionStage {
             (notes, decisions)
         };
 
+        // ── Query 5: DISCUSSED co-changers (WorldModel T7) ──────────────
+        let graph_clone3 = self.graph.clone();
+        let discussed_future = async move {
+            let mut preds = Vec::new();
+            if let Some(pid) = _project_id {
+                match graph_clone3.get_discussed_co_changers(pid, 3, 5).await {
+                    Ok(co_changers) => {
+                        for cc in co_changers {
+                            let score = 1.0 - (1.0 / (cc.count as f64 + 1.0));
+                            preds.push(PredictedFile {
+                                path: cc.path,
+                                score: score * 0.9, // Slight discount vs direct CO_CHANGED
+                                source: "discussed",
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "Failed to get discussed co-changers");
+                    }
+                }
+            }
+            preds
+        };
+
         // ── Execute all queries in parallel with timeouts ────────────────
-        let (notes_result, decisions_result, entity_notes_result, uuid_result) = tokio::join!(
+        let (notes_result, decisions_result, entity_notes_result, uuid_result, discussed_result) = tokio::join!(
             timeout(query_timeout, notes_future),
             timeout(query_timeout, decisions_future),
             timeout(query_timeout, entity_notes_future),
             timeout(query_timeout, uuid_lookup_future),
+            timeout(query_timeout, discussed_future),
         );
 
         // ── Collect & deduplicate notes ─────────────────────────────────
@@ -437,8 +501,9 @@ impl KnowledgeInjectionStage {
             debug!("[knowledge_injection] Notes BM25 search timed out");
         }
 
-        // Entity notes (direct + propagated)
-        if let Ok(entity_notes) = entity_notes_result {
+        // Entity notes (direct + propagated) + predictions
+        let mut predicted_files: Vec<PredictedFile> = Vec::new();
+        if let Ok((entity_notes, predictions)) = entity_notes_result {
             for note in entity_notes {
                 note_map
                     .entry(note.id.clone())
@@ -449,8 +514,49 @@ impl KnowledgeInjectionStage {
                     })
                     .or_insert(note);
             }
+            // Deduplicate predictions by path, keeping highest score
+            let mut pred_map: HashMap<String, PredictedFile> = HashMap::new();
+            for pred in predictions {
+                pred_map
+                    .entry(pred.path.clone())
+                    .and_modify(|existing| {
+                        if pred.score > existing.score {
+                            *existing = pred.clone();
+                        }
+                    })
+                    .or_insert(pred);
+            }
+            predicted_files = pred_map.into_values().collect();
+            predicted_files.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         } else {
             debug!("[knowledge_injection] Entity notes query timed out");
+        }
+
+        // Merge DISCUSSED co-changer predictions (WorldModel T7)
+        if let Ok(discussed_preds) = discussed_result {
+            for pred in discussed_preds {
+                // Merge with existing predictions: keep highest score per path
+                if let Some(existing) = predicted_files.iter_mut().find(|p| p.path == pred.path) {
+                    if pred.score > existing.score {
+                        existing.score = pred.score;
+                        existing.source = pred.source;
+                    }
+                } else {
+                    predicted_files.push(pred);
+                }
+            }
+            // Re-sort after merge
+            predicted_files.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            debug!("[knowledge_injection] DISCUSSED co-changers query timed out");
         }
 
         // UUID-referenced notes
@@ -520,16 +626,17 @@ impl KnowledgeInjectionStage {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        (notes, decisions)
+        (notes, decisions, predicted_files)
     }
 
-    /// Render notes and decisions into markdown sections for the enrichment context.
+    /// Render notes, decisions, and predicted files into markdown sections for the enrichment context.
     fn render_knowledge(
         &self,
         notes: &[ScoredNote],
         decisions: &[ScoredDecision],
+        predictions: &[PredictedFile],
     ) -> Option<String> {
-        if notes.is_empty() && decisions.is_empty() {
+        if notes.is_empty() && decisions.is_empty() && predictions.is_empty() {
             return None;
         }
 
@@ -563,6 +670,23 @@ impl KnowledgeInjectionStage {
                     "- **Decision:** {} — *Rationale:* {}\n",
                     truncate_content(&decision.description, 200),
                     truncate_content(&decision.rationale, 200),
+                );
+                if chars_used + entry.len() > self.config.max_content_chars {
+                    break;
+                }
+                content.push_str(&entry);
+                chars_used += entry.len();
+            }
+        }
+
+        // Render predicted context (WorldModel biomimicry T7)
+        if !predictions.is_empty() && chars_used < self.config.max_content_chars {
+            content.push_str("\n### Predicted Context (WorldModel)\n");
+            content.push_str("_Files you may also need (based on co-change patterns):_\n");
+            for pred in predictions.iter().take(5) {
+                let entry = format!(
+                    "- `{}` (score: {:.2}, source: {})\n",
+                    pred.path, pred.score, pred.source
                 );
                 if chars_used + entry.len() > self.config.max_content_chars {
                     break;
@@ -627,7 +751,7 @@ impl EnrichmentStage for KnowledgeInjectionStage {
         );
 
         // Run all knowledge queries in parallel
-        let (notes, decisions) = self
+        let (notes, decisions, predictions) = self
             .query_knowledge(
                 &input.message,
                 Some(&project_slug),
@@ -638,13 +762,14 @@ impl EnrichmentStage for KnowledgeInjectionStage {
             .await;
 
         debug!(
-            "[knowledge_injection] Found {} notes, {} decisions",
+            "[knowledge_injection] Found {} notes, {} decisions, {} predictions",
             notes.len(),
-            decisions.len()
+            decisions.len(),
+            predictions.len()
         );
 
         // Render and inject into context
-        if let Some(content) = self.render_knowledge(&notes, &decisions) {
+        if let Some(content) = self.render_knowledge(&notes, &decisions, &predictions) {
             ctx.add_section("Relevant Knowledge", content, self.name());
         }
 

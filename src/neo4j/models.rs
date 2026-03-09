@@ -1056,6 +1056,22 @@ pub struct CodeHealthReport {
     pub god_functions: Vec<GodFunction>,
     pub orphan_files: Vec<String>,
     pub coupling_metrics: Option<CouplingMetrics>,
+    /// WorldModel prediction accuracy (biomimicry T7)
+    pub prediction_accuracy: Option<PredictionAccuracy>,
+}
+
+/// WorldModel prediction accuracy metrics (biomimicry T7).
+/// Measures how well CO_CHANGED/DISCUSSED patterns predict file access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictionAccuracy {
+    /// Number of correctly predicted file accesses
+    pub hits: i64,
+    /// Total file accesses measured
+    pub total: i64,
+    /// Hit rate (hits / total), or 0.0 if total == 0
+    pub accuracy: f64,
+    /// Number of sessions analyzed
+    pub sessions_analyzed: i64,
 }
 
 /// Coupling metrics from clustering coefficients.

@@ -204,11 +204,78 @@ impl Neo4jClient {
             })
         });
 
+        // WorldModel prediction accuracy (biomimicry T7)
+        let prediction_accuracy = self
+            .compute_prediction_accuracy(project_id, 10)
+            .await
+            .ok();
+
         Ok(CodeHealthReport {
             god_functions,
             orphan_files,
             coupling_metrics,
+            prediction_accuracy,
         })
+    }
+
+    /// WorldModel prediction accuracy (biomimicry T7):
+    /// For each of the last N sessions, compute what files the agent discussed,
+    /// then check if those files were predictable from the CO_CHANGED graph
+    /// of files discussed in the *previous* session.
+    pub async fn compute_prediction_accuracy(
+        &self,
+        project_id: Uuid,
+        max_sessions: i64,
+    ) -> Result<crate::neo4j::models::PredictionAccuracy> {
+        let q = query(
+            r#"
+            MATCH (p:Project {id: $pid})-[:HAS_CHAT_SESSION]->(s:ChatSession)
+            WITH s ORDER BY s.created_at DESC LIMIT $max_sessions
+            WITH collect(s) AS sessions
+            UNWIND range(0, size(sessions) - 2) AS i
+            WITH sessions[i] AS current_session, sessions[i+1] AS prev_session
+            MATCH (prev_session)-[:DISCUSSED]->(prev_file:File)
+            WITH current_session, collect(DISTINCT prev_file.path) AS prev_files, prev_session
+            OPTIONAL MATCH (pf:File)-[:CO_CHANGED]->(predicted:File)
+            WHERE pf.path IN prev_files AND predicted.path <> pf.path
+            WITH current_session, collect(DISTINCT predicted.path) AS predicted_paths
+            MATCH (current_session)-[:DISCUSSED]->(actual_file:File)
+            WITH current_session, predicted_paths, collect(DISTINCT actual_file.path) AS actual_paths
+            WITH current_session,
+                 size(actual_paths) AS total_accessed,
+                 size([f IN actual_paths WHERE f IN predicted_paths]) AS hits
+            RETURN sum(hits) AS total_hits,
+                   sum(total_accessed) AS total_accessed,
+                   count(current_session) AS sessions_analyzed
+            "#,
+        )
+        .param("pid", project_id.to_string())
+        .param("max_sessions", max_sessions);
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            let hits = row.get::<i64>("total_hits").unwrap_or(0);
+            let total = row.get::<i64>("total_accessed").unwrap_or(0);
+            let sessions = row.get::<i64>("sessions_analyzed").unwrap_or(0);
+            let accuracy = if total > 0 {
+                hits as f64 / total as f64
+            } else {
+                0.0
+            };
+            Ok(crate::neo4j::models::PredictionAccuracy {
+                hits,
+                total,
+                accuracy,
+                sessions_analyzed: sessions,
+            })
+        } else {
+            Ok(crate::neo4j::models::PredictionAccuracy {
+                hits: 0,
+                total: 0,
+                accuracy: 0.0,
+                sessions_analyzed: 0,
+            })
+        }
     }
 
     /// Detect circular dependencies between files (import cycles).

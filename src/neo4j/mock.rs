@@ -6083,6 +6083,15 @@ impl GraphStore for MockGraphStore {
         Ok(Vec::new())
     }
 
+    async fn get_discussed_co_changers(
+        &self,
+        _project_id: Uuid,
+        _max_sessions: i64,
+        _max_results: i64,
+    ) -> Result<Vec<CoChanger>> {
+        Ok(Vec::new())
+    }
+
     async fn backfill_discussed(&self) -> Result<(usize, usize, usize)> {
         Ok((0, 0, 0))
     }
