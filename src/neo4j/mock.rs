@@ -2401,6 +2401,37 @@ impl GraphStore for MockGraphStore {
         })
     }
 
+    async fn compute_maintenance_snapshot(
+        &self,
+        _project_id: Uuid,
+    ) -> Result<crate::neo4j::models::MaintenanceSnapshot> {
+        use chrono::Utc;
+        let notes = self.notes.read().await;
+        let active_notes = notes.values().filter(|n| n.status == crate::notes::NoteStatus::Active).count();
+        let mean_energy = if active_notes > 0 {
+            notes.values()
+                .filter(|n| n.status == crate::notes::NoteStatus::Active)
+                .map(|n| n.energy)
+                .sum::<f64>() / active_notes as f64
+        } else {
+            0.5
+        };
+        let skills = self.skills.read().await;
+        let skill_count = skills.values()
+            .filter(|s| matches!(s.status, crate::skills::models::SkillStatus::Active | crate::skills::models::SkillStatus::Emerging))
+            .count();
+        let synapses = self.note_synapses.read().await;
+        let active_synapses: usize = synapses.values().map(|v| v.iter().filter(|(_, w)| *w > 0.0).count()).sum();
+        Ok(crate::neo4j::models::MaintenanceSnapshot {
+            health_score: 0.8,
+            active_synapses: active_synapses as i64,
+            mean_energy,
+            skill_count: skill_count as i64,
+            note_count: active_notes as i64,
+            captured_at: Utc::now().to_rfc3339(),
+        })
+    }
+
     async fn get_circular_dependencies(&self, project_id: Uuid) -> Result<Vec<Vec<String>>> {
         let pf = self.project_files.read().await;
         let project_paths: Vec<String> = pf.get(&project_id).cloned().unwrap_or_default();

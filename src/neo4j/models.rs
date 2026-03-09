@@ -1074,6 +1074,42 @@ pub struct PredictionAccuracy {
     pub sessions_analyzed: i64,
 }
 
+/// Snapshot of key health metrics before/after a maintenance cycle (biomimicry T11).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceSnapshot {
+    /// Composite health score (god_functions penalty + orphan penalty + coupling bonus)
+    pub health_score: f64,
+    /// Number of synapses with strength > 0
+    pub active_synapses: i64,
+    /// Average energy across all notes
+    pub mean_energy: f64,
+    /// Total number of active skills
+    pub skill_count: i64,
+    /// Total number of active notes
+    pub note_count: i64,
+    /// Timestamp of the snapshot
+    pub captured_at: String,
+}
+
+/// Report comparing pre/post maintenance snapshots (biomimicry T11).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceReport {
+    pub before: MaintenanceSnapshot,
+    pub after: MaintenanceSnapshot,
+    /// Delta for each metric (after - before)
+    pub delta_health_score: f64,
+    pub delta_active_synapses: i64,
+    pub delta_mean_energy: f64,
+    pub delta_skill_count: i64,
+    pub delta_note_count: i64,
+    /// Success rate: fraction of metrics that improved or stayed stable
+    pub success_rate: f64,
+    /// Maintenance level that was run
+    pub maintenance_level: String,
+    /// Duration in milliseconds
+    pub duration_ms: u64,
+}
+
 /// Coupling metrics from clustering coefficients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CouplingMetrics {

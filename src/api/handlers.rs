@@ -2937,52 +2937,24 @@ pub async fn skill_maintenance(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound(format!("Project not found: {}", project_id)))?;
 
-    let config = crate::skills::maintenance::SkillMaintenanceConfig::default();
-    let start = std::time::Instant::now();
-
-    let result = match body.level.as_str() {
-        "hourly" => {
-            crate::skills::maintenance::run_hourly_maintenance(
-                state.orchestrator.neo4j(),
-                project_id,
-                &config,
-            )
-            .await
-        }
-        "daily" => {
-            crate::skills::maintenance::run_daily_maintenance(
-                state.orchestrator.neo4j(),
-                project_id,
-                &config,
-            )
-            .await
-        }
-        "weekly" => {
-            crate::skills::maintenance::run_weekly_maintenance(
-                state.orchestrator.neo4j(),
-                project_id,
-                &config,
-            )
-            .await
-        }
-        "full" => {
-            crate::skills::maintenance::run_full_maintenance(
-                state.orchestrator.neo4j(),
-                project_id,
-                &config,
-            )
-            .await
-        }
-        _ => {
-            return Err(AppError::BadRequest(format!(
-                "Invalid maintenance level: '{}'. Expected: hourly, daily, weekly, full",
-                body.level
-            )));
-        }
+    let level = body.level.as_str();
+    if !matches!(level, "hourly" | "daily" | "weekly" | "full") {
+        return Err(AppError::BadRequest(format!(
+            "Invalid maintenance level: '{}'. Expected: hourly, daily, weekly, full",
+            level
+        )));
     }
-    .map_err(AppError::Internal)?;
 
-    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let config = crate::skills::maintenance::SkillMaintenanceConfig::default();
+
+    let (result, report) = crate::skills::maintenance::run_maintenance_with_tracking(
+        state.orchestrator.neo4j(),
+        project_id,
+        level,
+        &config,
+    )
+    .await
+    .map_err(AppError::Internal)?;
 
     // Invalidate hook activation cache after maintenance
     super::hook_handlers::skill_cache()
@@ -2997,7 +2969,17 @@ pub async fn skill_maintenance(
         "evolution": result.evolution,
         "skills_detected": result.skills_detected,
         "warnings": result.warnings,
-        "elapsed_ms": elapsed_ms,
+        "elapsed_ms": report.duration_ms,
+        "tracking": {
+            "before": report.before,
+            "after": report.after,
+            "delta_health_score": report.delta_health_score,
+            "delta_active_synapses": report.delta_active_synapses,
+            "delta_mean_energy": report.delta_mean_energy,
+            "delta_skill_count": report.delta_skill_count,
+            "delta_note_count": report.delta_note_count,
+            "success_rate": report.success_rate,
+        },
     })))
 }
 

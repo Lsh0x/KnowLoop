@@ -278,6 +278,122 @@ impl Neo4jClient {
         }
     }
 
+    /// Capture a lightweight maintenance snapshot (biomimicry T11).
+    /// 5 queries: health_score proxy, active_synapses, mean_energy, skill_count, note_count.
+    pub async fn compute_maintenance_snapshot(
+        &self,
+        project_id: Uuid,
+    ) -> Result<crate::neo4j::models::MaintenanceSnapshot> {
+        use chrono::Utc;
+
+        // Q1: health_score proxy — count god functions + orphan files (lower = healthier)
+        let q1 = query(
+            r#"
+            MATCH (p:Project {id: $pid})-[:CONTAINS]->(f:File)-[:DEFINES]->(fn:Function)
+            WHERE fn.line_count > 100
+            WITH count(fn) AS god_fns
+            OPTIONAL MATCH (p2:Project {id: $pid})-[:CONTAINS]->(orphan:File)
+            WHERE NOT EXISTS { (orphan)-[:IMPORTS]->() }
+              AND NOT EXISTS { ()-[:IMPORTS]->(orphan) }
+            WITH god_fns, count(orphan) AS orphans
+            RETURN god_fns, orphans,
+                   CASE WHEN god_fns + orphans = 0 THEN 1.0
+                        ELSE 1.0 / (1.0 + god_fns * 0.1 + orphans * 0.05)
+                   END AS health_score
+            "#,
+        )
+        .param("pid", project_id.to_string());
+
+        // Q2: active synapses count
+        let q2 = query(
+            r#"
+            MATCH (p:Project {id: $pid})
+            OPTIONAL MATCH (p)-[:HAS_NOTE]->(n1:Note)-[s:SYNAPSE]->(n2:Note)
+            WHERE s.strength > 0
+            RETURN count(s) AS active_synapses
+            "#,
+        )
+        .param("pid", project_id.to_string());
+
+        // Q3: mean energy across notes
+        let q3 = query(
+            r#"
+            MATCH (p:Project {id: $pid})-[:HAS_NOTE]->(n:Note)
+            WHERE n.status = 'active'
+            RETURN avg(coalesce(n.energy, 0.5)) AS mean_energy
+            "#,
+        )
+        .param("pid", project_id.to_string());
+
+        // Q4: active skill count
+        let q4 = query(
+            r#"
+            MATCH (p:Project {id: $pid})-[:HAS_SKILL]->(s:Skill)
+            WHERE s.status IN ['active', 'emerging']
+            RETURN count(s) AS skill_count
+            "#,
+        )
+        .param("pid", project_id.to_string());
+
+        // Q5: active note count
+        let q5 = query(
+            r#"
+            MATCH (p:Project {id: $pid})-[:HAS_NOTE]->(n:Note)
+            WHERE n.status = 'active'
+            RETURN count(n) AS note_count
+            "#,
+        )
+        .param("pid", project_id.to_string());
+
+        // Execute all 5 in parallel
+        let (r1, r2, r3, r4, r5) = tokio::join!(
+            self.execute_with_params(q1),
+            self.execute_with_params(q2),
+            self.execute_with_params(q3),
+            self.execute_with_params(q4),
+            self.execute_with_params(q5),
+        );
+
+        let health_score = r1
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|r| r.get::<f64>("health_score").ok())
+            .unwrap_or(0.5);
+
+        let active_synapses = r2
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|r| r.get::<i64>("active_synapses").ok())
+            .unwrap_or(0);
+
+        let mean_energy = r3
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|r| r.get::<f64>("mean_energy").ok())
+            .unwrap_or(0.5);
+
+        let skill_count = r4
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|r| r.get::<i64>("skill_count").ok())
+            .unwrap_or(0);
+
+        let note_count = r5
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|r| r.get::<i64>("note_count").ok())
+            .unwrap_or(0);
+
+        Ok(crate::neo4j::models::MaintenanceSnapshot {
+            health_score,
+            active_synapses,
+            mean_energy,
+            skill_count,
+            note_count,
+            captured_at: Utc::now().to_rfc3339(),
+        })
+    }
+
     /// Detect circular dependencies between files (import cycles).
     pub async fn get_circular_dependencies(&self, project_id: Uuid) -> Result<Vec<Vec<String>>> {
         let q = query(

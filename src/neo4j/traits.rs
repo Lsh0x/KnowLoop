@@ -644,6 +644,12 @@ pub trait GraphStore: Send + Sync {
         god_function_threshold: usize,
     ) -> Result<crate::neo4j::models::CodeHealthReport>;
 
+    /// Capture a lightweight maintenance snapshot (biomimicry T11).
+    async fn compute_maintenance_snapshot(
+        &self,
+        project_id: Uuid,
+    ) -> Result<crate::neo4j::models::MaintenanceSnapshot>;
+
     /// Detect circular dependencies between files (import cycles).
     async fn get_circular_dependencies(&self, project_id: Uuid) -> Result<Vec<Vec<String>>>;
 

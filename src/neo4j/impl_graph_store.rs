@@ -801,6 +801,13 @@ impl GraphStore for Neo4jClient {
             .await
     }
 
+    async fn compute_maintenance_snapshot(
+        &self,
+        project_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::models::MaintenanceSnapshot> {
+        self.compute_maintenance_snapshot(project_id).await
+    }
+
     async fn get_circular_dependencies(
         &self,
         project_id: Uuid,

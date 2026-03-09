@@ -316,6 +316,168 @@ pub async fn run_full_maintenance(
 }
 
 // ============================================================================
+// Tracked Maintenance (biomimicry T11 — Sleep Success Tracking)
+// ============================================================================
+
+/// Retrieve the success_rate from the last maintenance report stored as a Note.
+/// Returns None if no previous report exists.
+async fn get_last_maintenance_success_rate(
+    graph_store: &dyn GraphStore,
+    project_id: Uuid,
+) -> Option<f64> {
+    use crate::notes::models::NoteFilters;
+    // Find the most recent maintenance-report note by tag
+    let filters = NoteFilters {
+        tags: Some(vec!["maintenance-report".to_string()]),
+        limit: Some(1),
+        sort_by: Some("created_at".to_string()),
+        sort_order: Some("desc".to_string()),
+        ..Default::default()
+    };
+    let (notes, _) = graph_store
+        .list_notes(Some(project_id), None, &filters)
+        .await
+        .ok()?;
+    let note = notes.first()?;
+    // Parse success_rate from the note content (stored as JSON)
+    let parsed: serde_json::Value = serde_json::from_str(&note.content).ok()?;
+    parsed.get("success_rate")?.as_f64()
+}
+
+/// Store a maintenance report as a Note for future adaptive reference.
+async fn store_maintenance_report(
+    graph_store: &dyn GraphStore,
+    project_id: Uuid,
+    report: &crate::neo4j::models::MaintenanceReport,
+) {
+    let content = match serde_json::to_string_pretty(report) {
+        Ok(json) => json,
+        Err(e) => {
+            warn!(error = %e, "Failed to serialize maintenance report");
+            return;
+        }
+    };
+
+    let mut note = crate::notes::Note::new(
+        Some(project_id),
+        crate::notes::NoteType::Observation,
+        content,
+        "maintenance-tracker".to_string(),
+    );
+    note.importance = crate::notes::NoteImportance::Medium;
+    note.tags = vec![
+        "maintenance-report".to_string(),
+        "auto-generated".to_string(),
+        format!("level:{}", report.maintenance_level),
+    ];
+    if let Err(e) = graph_store.create_note(&note).await {
+        warn!(error = %e, "Failed to store maintenance report as note");
+    }
+}
+
+/// Run maintenance with pre/post snapshot tracking and delta computation.
+///
+/// 1. Capture a pre-maintenance snapshot
+/// 2. Run the requested maintenance level
+/// 3. Capture a post-maintenance snapshot
+/// 4. Compute deltas and success_rate (fraction of metrics that improved or stayed stable)
+/// 5. Return both the MaintenanceResult and the MaintenanceReport
+pub async fn run_maintenance_with_tracking(
+    graph_store: &dyn GraphStore,
+    project_id: Uuid,
+    level: &str,
+    config: &SkillMaintenanceConfig,
+) -> anyhow::Result<(MaintenanceResult, crate::neo4j::models::MaintenanceReport)> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+
+    // 0. Adaptive decay: check last maintenance report success_rate
+    //    If previous success_rate < 0.5, halve the decay amount to be gentler
+    let mut adapted_config = config.clone();
+    let last_success_rate = get_last_maintenance_success_rate(graph_store, project_id).await;
+    if let Some(rate) = last_success_rate {
+        if rate < 0.5 {
+            adapted_config.synapse_decay_amount *= 0.5;
+            info!(
+                project_id = %project_id,
+                previous_success_rate = format!("{:.0}%", rate * 100.0),
+                new_decay = adapted_config.synapse_decay_amount,
+                "Adaptive decay: reducing synapse_decay_amount due to low previous success_rate"
+            );
+        }
+    }
+    let config = &adapted_config;
+
+    // 1. Pre-snapshot
+    let before = graph_store.compute_maintenance_snapshot(project_id).await?;
+
+    // 2. Run maintenance
+    let result = match level {
+        "hourly" => run_hourly_maintenance(graph_store, project_id, config).await?,
+        "daily" => run_daily_maintenance(graph_store, project_id, config).await?,
+        "weekly" => run_weekly_maintenance(graph_store, project_id, config).await?,
+        "full" => run_full_maintenance(graph_store, project_id, config).await?,
+        _ => {
+            warn!(level = level, "Unknown maintenance level, defaulting to daily");
+            run_daily_maintenance(graph_store, project_id, config).await?
+        }
+    };
+
+    // 3. Post-snapshot
+    let after = graph_store.compute_maintenance_snapshot(project_id).await?;
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    // 4. Compute deltas
+    let delta_health_score = after.health_score - before.health_score;
+    let delta_active_synapses = after.active_synapses - before.active_synapses;
+    let delta_mean_energy = after.mean_energy - before.mean_energy;
+    let delta_skill_count = after.skill_count - before.skill_count;
+    let delta_note_count = after.note_count - before.note_count;
+
+    // 5. Success rate: fraction of metrics that improved or stayed stable (>= 0)
+    let metrics = [
+        delta_health_score >= 0.0,
+        delta_active_synapses >= 0,
+        delta_mean_energy >= -0.01, // small tolerance for energy decay (expected)
+        delta_skill_count >= 0,
+        delta_note_count >= 0,
+    ];
+    let stable_or_improved = metrics.iter().filter(|&&b| b).count();
+    let success_rate = stable_or_improved as f64 / metrics.len() as f64;
+
+    let report = crate::neo4j::models::MaintenanceReport {
+        before,
+        after,
+        delta_health_score,
+        delta_active_synapses,
+        delta_mean_energy,
+        delta_skill_count,
+        delta_note_count,
+        success_rate,
+        maintenance_level: level.to_string(),
+        duration_ms,
+    };
+
+    info!(
+        project_id = %project_id,
+        level = level,
+        success_rate = format!("{:.0}%", success_rate * 100.0),
+        duration_ms = duration_ms,
+        delta_health = format!("{:+.3}", delta_health_score),
+        delta_synapses = delta_active_synapses,
+        delta_energy = format!("{:+.3}", delta_mean_energy),
+        "Tracked maintenance complete"
+    );
+
+    // 6. Store report as Note for future adaptive reference
+    store_maintenance_report(graph_store, project_id, &report).await;
+
+    Ok((result, report))
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
