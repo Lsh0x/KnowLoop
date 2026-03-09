@@ -101,6 +101,34 @@ pub struct ChatSessionNode {
 }
 
 // ============================================================================
+// Session Tree Node (for discussion graph traversal)
+// ============================================================================
+
+/// A node in a session tree, representing a session and its position in
+/// the SPAWNED_BY hierarchy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTreeNode {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub spawn_type: Option<String>,
+    pub run_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+    pub depth: u32,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Lightweight session info for run-scoped queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub model: String,
+    pub spawn_type: Option<String>,
+    pub task_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ============================================================================
 // Chat Event Record (for WebSocket replay & persistence)
 // ============================================================================
 
@@ -337,6 +365,12 @@ pub struct PlanNode {
     pub priority: i32,
     #[serde(default)]
     pub project_id: Option<Uuid>,
+    /// Pre-enriched execution context (JSON) — cached by plan enrich action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_context: Option<String>,
+    /// Pre-enriched persona profile (JSON) — cached by plan enrich action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 /// Status of a plan
@@ -381,6 +415,15 @@ pub struct TaskNode {
     /// Accumulates on blocked/failure events, decays on step completion.
     #[serde(default)]
     pub frustration_score: f64,
+    /// Pre-enriched execution context (JSON) — cached by plan/task enrich action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_context: Option<String>,
+    /// Pre-enriched persona profile (JSON) — cached by plan/task enrich action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Pre-built prompt cache — full prompt ready for the runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<String>,
 }
 
 /// Status of a task
@@ -420,6 +463,12 @@ pub struct StepNode {
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Pre-enriched execution context (JSON) — cached by plan/task enrich action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_context: Option<String>,
+    /// Pre-enriched persona profile (JSON) — cached by plan/task enrich action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 /// Status of a step

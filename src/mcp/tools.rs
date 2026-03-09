@@ -207,6 +207,8 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "delete_chat_session" => Some(("chat", "delete_session")),
         "chat_send_message" => Some(("chat", "send_message")),
         "list_chat_messages" => Some(("chat", "list_messages")),
+        "get_session_tree" => Some(("chat", "get_session_tree")),
+        "get_run_sessions" => Some(("chat", "get_run_sessions")),
 
         // Feature Graph
         "create_feature_graph" => Some(("feature_graph", "create")),
@@ -370,16 +372,16 @@ fn project_tool() -> ToolDefinition {
 fn plan_tool() -> ToolDefinition {
     ToolDefinition {
         name: "plan".to_string(),
-        description: "Manage plans. Actions: list, create, get, update, update_status, delete, link_to_project, unlink_from_project, get_dependency_graph, get_critical_path, get_waves, run, run_status, cancel_run, auto_pr, add_trigger, list_triggers, remove_trigger, enable_trigger, disable_trigger, list_runs, get_run, compare_runs, predict_run".to_string(),
+        description: "Manage plans. Actions: list, create, get, update, update_status, delete, link_to_project, unlink_from_project, get_dependency_graph, get_critical_path, get_waves, run, run_status, cancel_run, auto_pr, add_trigger, list_triggers, remove_trigger, enable_trigger, disable_trigger, list_runs, get_run, compare_runs, predict_run, enrich, delegate_task".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["list", "create", "get", "update", "update_status", "delete", "link_to_project", "unlink_from_project", "get_dependency_graph", "get_critical_path", "get_waves", "run", "run_status", "cancel_run", "auto_pr", "add_trigger", "list_triggers", "remove_trigger", "enable_trigger", "disable_trigger", "list_runs", "get_run", "compare_runs", "predict_run"],
+                    "enum": ["list", "create", "get", "update", "update_status", "delete", "link_to_project", "unlink_from_project", "get_dependency_graph", "get_critical_path", "get_waves", "run", "run_status", "cancel_run", "auto_pr", "add_trigger", "list_triggers", "remove_trigger", "enable_trigger", "disable_trigger", "list_runs", "get_run", "compare_runs", "predict_run", "enrich", "delegate_task"],
                     "description": "Operation to perform"
                 },
-                "plan_id": {"type": "string", "description": "Plan UUID (get/update/update_status/delete/link_to_project/unlink_from_project/get_dependency_graph/get_critical_path/get_waves/run/run_status/cancel_run)"},
+                "plan_id": {"type": "string", "description": "Plan UUID (get/update/update_status/delete/link_to_project/unlink_from_project/get_dependency_graph/get_critical_path/get_waves/run/run_status/cancel_run/enrich)"},
                 "project_id": {"type": "string", "description": "Project UUID (create/link_to_project/unlink_from_project/list)"},
                 "title": {"type": "string", "description": "Plan title (create/update)"},
                 "description": {"type": "string", "description": "Plan description (create/update)"},
@@ -399,7 +401,10 @@ fn plan_tool() -> ToolDefinition {
                 "config": {"type": "object", "description": "Trigger config JSON (add_trigger): e.g. {\"cron\": \"0 2 * * *\"} for schedule"},
                 "cooldown_secs": {"type": "integer", "description": "Cooldown between firings in seconds (add_trigger, default 0)"},
                 "run_id": {"type": "string", "description": "Run UUID (get_run)"},
-                "run_ids": {"type": "array", "items": {"type": "string"}, "description": "Run UUIDs to compare (compare_runs)"}
+                "run_ids": {"type": "array", "items": {"type": "string"}, "description": "Run UUIDs to compare (compare_runs)"},
+                "task_id": {"type": "string", "description": "Task UUID to delegate (delegate_task)"},
+                "parent_session_id": {"type": "string", "description": "Parent session UUID for SPAWNED_BY relation (delegate_task)"},
+                "custom_sections": {"type": "array", "items": {"type": "string"}, "description": "Custom prompt sections to append (delegate_task)"}
             })),
             required: Some(vec!["action".to_string()]),
         },
@@ -409,13 +414,13 @@ fn plan_tool() -> ToolDefinition {
 fn task_tool() -> ToolDefinition {
     ToolDefinition {
         name: "task".to_string(),
-        description: "Manage tasks. Actions: list, create, get, update, delete, get_next, add_dependencies, remove_dependency, get_blockers, get_blocked_by, get_context, get_prompt".to_string(),
+        description: "Manage tasks. Actions: list, create, get, update, delete, get_next, add_dependencies, remove_dependency, get_blockers, get_blocked_by, get_context, get_prompt, build_prompt, enrich".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["list", "create", "get", "update", "delete", "get_next", "add_dependencies", "remove_dependency", "get_blockers", "get_blocked_by", "get_context", "get_prompt"],
+                    "enum": ["list", "create", "get", "update", "delete", "get_next", "add_dependencies", "remove_dependency", "get_blockers", "get_blocked_by", "get_context", "get_prompt", "build_prompt", "enrich"],
                     "description": "Operation to perform"
                 },
                 "task_id": {"type": "string", "description": "Task UUID"},
@@ -432,7 +437,8 @@ fn task_tool() -> ToolDefinition {
                 "depends_on_task_id": {"type": "string", "description": "Dependency to remove (remove_dependency)"},
                 "search": {"type": "string", "description": "Search filter (list)"},
                 "limit": {"type": "integer", "description": "Max items (list)"},
-                "offset": {"type": "integer", "description": "Skip items (list)"}
+                "offset": {"type": "integer", "description": "Skip items (list)"},
+                "custom_sections": {"type": "array", "items": {"type": "string"}, "description": "Custom prompt sections to append (build_prompt)"}
             })),
             required: Some(vec!["action".to_string()]),
         },
@@ -758,13 +764,13 @@ fn component_tool() -> ToolDefinition {
 fn chat_tool() -> ToolDefinition {
     ToolDefinition {
         name: "chat".to_string(),
-        description: "Manage chat sessions. Actions: list_sessions, get_session, get_children, delete_session, send_message, list_messages, add_discussed, get_session_entities".to_string(),
+        description: "Manage chat sessions. Actions: list_sessions, get_session, get_children, delete_session, send_message, list_messages, add_discussed, get_session_entities, get_session_tree, get_run_sessions".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
                 "action": {
                     "type": "string",
-                    "enum": ["list_sessions", "get_session", "get_children", "delete_session", "send_message", "list_messages", "add_discussed", "get_session_entities"],
+                    "enum": ["list_sessions", "get_session", "get_children", "delete_session", "send_message", "list_messages", "add_discussed", "get_session_entities", "get_session_tree", "get_run_sessions"],
                     "description": "Operation to perform"
                 },
                 "session_id": {"type": "string", "description": "Session UUID"},
@@ -776,6 +782,7 @@ fn chat_tool() -> ToolDefinition {
                 "workspace_slug": {"type": "string", "description": "Workspace slug (send_message)"},
                 "add_dirs": {"type": "array", "items": {"type": "string"}, "description": "Additional directories (send_message)"},
                 "entities": {"type": "array", "items": {"type": "object"}, "description": "Entities to mark as discussed (add_discussed): [{entity_type, entity_id}]"},
+                "run_id": {"type": "string", "description": "PlanRun UUID (get_run_sessions)"},
                 "project_id": {"type": "string", "description": "Project UUID (get_session_entities — scoping filter)"},
                 "limit": {"type": "integer", "description": "Max items"},
                 "offset": {"type": "integer", "description": "Skip items"}
@@ -1290,6 +1297,8 @@ mod tests {
             "list_chat_sessions",
             "get_chat_session",
             "get_session_children",
+            "get_session_tree",
+            "get_run_sessions",
             "delete_chat_session",
             "chat_send_message",
             "create_feature_graph",

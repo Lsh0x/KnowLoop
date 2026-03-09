@@ -10,8 +10,16 @@ use crate::neo4j::models::TaskStatus;
 use crate::neo4j::traits::GraphStore;
 use crate::orchestrator::context::ContextBuilder;
 use crate::runner::enricher::TaskEnricher;
+use crate::runner::git;
 use crate::runner::guard::{AgentGuard, ChatManagerHintSender, GuardConfig, GuardVerdict};
-use crate::runner::models::{PlanRunStatus, RunnerConfig, RunnerEvent, TaskResult, TriggerSource};
+use crate::runner::models::{
+    ActiveAgent, ActiveAgentSnapshot, PlanRunStatus, RunnerConfig, RunnerEvent, TaskResult,
+    TriggerSource,
+};
+use crate::runner::persona::{
+    activate_skills_for_task, complexity_directive, profile_task, record_skill_feedback,
+};
+use crate::runner::prompt::{build_runner_constraints, RunnerPromptContext};
 use crate::runner::state::RunnerState;
 use crate::runner::vector::VectorCollector;
 use crate::runner::verifier::{TaskVerifier, VerifyResult};
@@ -44,36 +52,6 @@ static VECTOR_COLLECTOR: LazyLock<Arc<RwLock<VectorCollector>>> =
     LazyLock::new(|| Arc::new(RwLock::new(VectorCollector::new())));
 
 // ============================================================================
-// Runner constraints injected into the agent prompt
-// ============================================================================
-
-const RUNNER_CONSTRAINTS: &str = r#"
-## Runner Execution Mode
-
-You are an **autonomous code execution agent** spawned by the PlanRunner.
-Your ONLY job is to **write code, test it, and commit it**. You are NOT in a conversation.
-
-### Behavior Rules
-1. **Execute immediately** — read the task, analyze the code, write the fix, test, commit. No discussion.
-2. **DO NOT** call `task(action: "update", status: ...)` or `step(action: "update", status: ...)` via MCP — the Runner manages all status transitions.
-3. **DO NOT** ask questions, request confirmation, or explain your reasoning at length. Just do the work.
-4. **DO NOT** use MCP project orchestrator tools for searching code — use Read, Grep, Glob directly for speed.
-5. Make atomic commits with conventional format: `<type>(<scope>): <short description>`.
-6. **NEVER** commit sensitive files (.env, credentials, *.key, *.pem, *.secret).
-7. After writing code, ALWAYS run `cargo check` (Rust) or the relevant build command to verify compilation.
-8. If tests are mentioned in steps, run them.
-9. If `cargo check` or tests fail, fix the errors and retry — do not give up.
-10. When done with ALL steps, make a final commit summarizing the work.
-
-### Execution Flow
-1. Read the affected files listed below
-2. For each step: implement → verify → move to next
-3. Run `cargo check` / `cargo test` as verification
-4. Commit with a clear message
-5. You are DONE when all steps are implemented and the code compiles
-"#;
-
-// ============================================================================
 // PlanRunner — the execution engine
 // ============================================================================
 
@@ -102,11 +80,30 @@ pub struct StartResult {
     pub total_tasks: usize,
 }
 
+/// Result of executing an entire wave of tasks in parallel.
+#[derive(Debug)]
+struct WaveResult {
+    /// Task IDs that completed successfully
+    pub tasks_completed: Vec<Uuid>,
+    /// Task IDs that failed, with their error reason
+    pub tasks_failed: Vec<(Uuid, String)>,
+    /// Total cost in USD for the wave
+    pub wave_cost_usd: f64,
+    /// Whether the wave was aborted due to budget or cancellation
+    pub aborted: bool,
+}
+
 /// Result of execute_task — wraps TaskResult with the session_id for enricher.
 #[derive(Debug)]
 struct TaskExecutionResult {
     pub result: TaskResult,
     pub session_id: Option<Uuid>,
+    /// Skill IDs activated during this task (for post-task feedback).
+    pub activated_skill_ids: Vec<Uuid>,
+    /// AgentExecution UUID created for this task (for USED_SKILL relations).
+    pub agent_execution_id: Uuid,
+    /// Persona profile string used for this agent.
+    pub persona_profile: String,
 }
 
 impl TaskExecutionResult {
@@ -123,8 +120,13 @@ pub struct RunStatus {
     pub plan_id: Option<Uuid>,
     pub status: Option<PlanRunStatus>,
     pub current_wave: Option<usize>,
+    /// Deprecated: use `active_agents` instead. Kept for backward compatibility.
+    /// Returns the task_id of the first active agent when there is exactly one.
     pub current_task_id: Option<Uuid>,
+    /// Deprecated: use `active_agents` instead.
     pub current_task_title: Option<String>,
+    /// All currently active agents (may be multiple in parallel waves).
+    pub active_agents: Vec<ActiveAgentSnapshot>,
     pub progress_pct: f64,
     pub tasks_completed: usize,
     pub tasks_total: usize,
@@ -216,6 +218,9 @@ impl PlanRunner {
                     (run_id.to_string(), CrudAction::Updated)
                 }
                 RunnerEvent::RunnerError { run_id, .. } => {
+                    (run_id.to_string(), CrudAction::Updated)
+                }
+                RunnerEvent::WorktreeRecovery { run_id, .. } => {
                     (run_id.to_string(), CrudAction::Updated)
                 }
             };
@@ -392,7 +397,7 @@ impl PlanRunner {
             total_tasks,
         };
 
-        // 5. Compute prediction from historical runs
+        // 5. Compute prediction from historical runs (with per-agent data when available)
         let prediction = match self.graph.list_plan_runs(plan_id, 50).await {
             Ok(runs) if !runs.is_empty() => {
                 let vectors: Vec<_> = runs
@@ -400,7 +405,33 @@ impl PlanRunner {
                     .rev()
                     .map(crate::runner::vector::ExecutionVector::from_runner_state)
                     .collect();
-                Some(crate::runner::vector::predict_run(&vectors))
+
+                // Try to load per-agent vectors for finer-grained prediction
+                let mut agent_vectors = Vec::new();
+                for run in runs.iter().rev() {
+                    match self.graph.get_agent_executions_for_run(run.run_id).await {
+                        Ok(aes) => {
+                            let avs: Vec<_> = aes
+                                .iter()
+                                .filter_map(|ae| {
+                                    ae.vector_json.as_ref().and_then(|json| {
+                                        serde_json::from_str::<
+                                            crate::runner::vector::AgentExecutionVector,
+                                        >(json)
+                                        .ok()
+                                    })
+                                })
+                                .collect();
+                            agent_vectors.push(avs);
+                        }
+                        Err(_) => agent_vectors.push(Vec::new()),
+                    }
+                }
+
+                Some(crate::runner::vector::predict_run_per_agent(
+                    &vectors,
+                    &agent_vectors,
+                ))
             }
             _ => None,
         };
@@ -462,20 +493,25 @@ impl PlanRunner {
     pub async fn status() -> RunStatus {
         let global = RUNNER_STATE.read().await;
         match &*global {
-            Some(state) => RunStatus {
-                running: state.status == PlanRunStatus::Running,
-                run_id: Some(state.run_id),
-                plan_id: Some(state.plan_id),
-                status: Some(state.status),
-                current_wave: Some(state.current_wave),
-                current_task_id: state.current_task_id,
-                current_task_title: state.current_task_title.clone(),
-                progress_pct: state.progress_pct(),
-                tasks_completed: state.tasks_completed(),
-                tasks_total: state.total_tasks,
-                elapsed_secs: state.elapsed_secs(),
-                cost_usd: state.cost_usd,
-            },
+            Some(state) => {
+                let active_agents: Vec<ActiveAgentSnapshot> =
+                    state.active_agents.iter().map(|a| a.snapshot()).collect();
+                RunStatus {
+                    running: state.status == PlanRunStatus::Running,
+                    run_id: Some(state.run_id),
+                    plan_id: Some(state.plan_id),
+                    status: Some(state.status),
+                    current_wave: Some(state.current_wave),
+                    current_task_id: state.current_task_id,
+                    current_task_title: state.current_task_title.clone(),
+                    active_agents,
+                    progress_pct: state.progress_pct(),
+                    tasks_completed: state.tasks_completed(),
+                    tasks_total: state.total_tasks,
+                    elapsed_secs: state.elapsed_secs(),
+                    cost_usd: state.cost_usd,
+                }
+            }
             None => RunStatus {
                 running: false,
                 run_id: None,
@@ -484,6 +520,7 @@ impl PlanRunner {
                 current_wave: None,
                 current_task_id: None,
                 current_task_title: None,
+                active_agents: Vec::new(),
                 progress_pct: 0.0,
                 tasks_completed: 0,
                 tasks_total: 0,
@@ -549,7 +586,8 @@ impl PlanRunner {
             // Check cancel flag
             if RUNNER_CANCEL.load(Ordering::SeqCst) {
                 info!("Runner cancelled at wave {}", wave_number);
-                self.finalize_run(run_id, PlanRunStatus::Cancelled).await?;
+                self.finalize_run(run_id, PlanRunStatus::Cancelled, Some(&cwd))
+                    .await?;
                 return Ok(());
             }
 
@@ -567,166 +605,107 @@ impl PlanRunner {
                 task_count: wave.task_count,
             });
 
-            // Execute tasks in this wave sequentially (v1)
-            for wave_task in &wave.tasks {
-                // Check cancel flag between tasks
+            // Execute all tasks in this wave in parallel via JoinSet
+            let wave_result = self
+                .execute_wave(
+                    run_id,
+                    plan_id,
+                    wave,
+                    &cwd,
+                    project_slug.as_deref(),
+                    project_id,
+                )
+                .await?;
+
+            // If wave was aborted (budget/cancel), finalize accordingly
+            if wave_result.aborted {
+                // Check which reason caused the abort
                 if RUNNER_CANCEL.load(Ordering::SeqCst) {
-                    info!("Runner cancelled before task {}", wave_task.id);
-                    self.finalize_run(run_id, PlanRunStatus::Cancelled).await?;
-                    return Ok(());
-                }
-
-                // Skip already completed tasks (for recovery)
-                if wave_task.status == "completed" {
-                    continue;
-                }
-
-                // Skip blocked tasks
-                if wave_task.status == "blocked" {
-                    warn!(
-                        "Skipping blocked task {}: {}",
-                        wave_task.id,
-                        wave_task.title.as_deref().unwrap_or("untitled")
-                    );
-                    continue;
-                }
-
-                let task_start_time = chrono::Utc::now();
-
-                let task_result = self
-                    .execute_task(
+                    self.finalize_run(run_id, PlanRunStatus::Cancelled, Some(&cwd))
+                        .await?;
+                } else {
+                    // Budget exceeded
+                    let (cumulated, limit) = {
+                        let global = RUNNER_STATE.read().await;
+                        global
+                            .as_ref()
+                            .map(|s| (s.cost_usd, self.config.max_cost_usd))
+                            .unwrap_or((0.0, 0.0))
+                    };
+                    self.emit_event(RunnerEvent::BudgetExceeded {
                         run_id,
                         plan_id,
-                        wave_task.id,
-                        wave_task.title.as_deref().unwrap_or("untitled"),
-                        &cwd,
-                        project_slug.as_deref(),
-                    )
-                    .await;
-
-                // Extract session_id from the result (for enricher)
-                let task_session_id = task_result.as_ref().ok().and_then(|r| r.session_id());
-
-                match task_result.map(|r| r.result) {
-                    Ok(TaskResult::Success {
-                        duration_secs,
-                        cost_usd,
-                    }) => {
-                        self.on_task_completed(run_id, wave_task.id, duration_secs, cost_usd)
-                            .await?;
-
-                        // Fire-and-forget enrichment (commits, auto-notes, AFFECTS)
-                        let enricher = TaskEnricher::new(self.graph.clone());
-                        let enrich_task_id = wave_task.id;
-                        let enrich_plan_id = plan_id;
-                        let enrich_project_id = project_id;
-                        let enrich_session_id = task_session_id;
-                        let enrich_cwd = cwd.clone();
-                        let enrich_start = task_start_time;
-                        tokio::spawn(async move {
-                            let result = enricher
-                                .enrich(
-                                    enrich_task_id,
-                                    enrich_plan_id,
-                                    enrich_project_id,
-                                    enrich_session_id,
-                                    enrich_start,
-                                    &enrich_cwd,
-                                )
-                                .await;
-                            info!(
-                                "Enricher completed for task {}: {} commits, note={}, {} affects, {} discussed",
-                                enrich_task_id,
-                                result.commits_linked,
-                                result.note_created,
-                                result.affects_added,
-                                result.discussed_added
-                            );
-                        });
-                    }
-                    Ok(TaskResult::Failed {
-                        reason,
-                        attempts: _,
-                        cost_usd,
-                    }) => {
-                        self.on_task_failed(run_id, plan_id, wave_task.id, &reason, 0.0, cost_usd)
-                            .await?;
-                    }
-                    Ok(TaskResult::Timeout {
-                        duration_secs,
-                        cost_usd,
-                    }) => {
-                        self.emit_event(RunnerEvent::TaskTimeout {
-                            run_id,
-                            task_id: wave_task.id,
-                            task_title: wave_task.title.clone().unwrap_or_default(),
-                            duration_secs,
-                        });
-                        self.on_task_failed(
-                            run_id,
-                            plan_id,
-                            wave_task.id,
-                            "Task timeout",
-                            duration_secs,
-                            cost_usd,
-                        )
+                        cumulated_cost_usd: cumulated,
+                        limit_usd: limit,
+                    });
+                    self.finalize_run(run_id, PlanRunStatus::BudgetExceeded, Some(&cwd))
                         .await?;
-                    }
-                    Ok(TaskResult::BudgetExceeded {
-                        cumulated_cost_usd,
-                        limit_usd,
-                    }) => {
-                        let plan_id = {
-                            let global = RUNNER_STATE.read().await;
-                            global.as_ref().map(|s| s.plan_id).unwrap_or(plan_id)
-                        };
-                        self.emit_event(RunnerEvent::BudgetExceeded {
-                            run_id,
-                            plan_id,
-                            cumulated_cost_usd,
-                            limit_usd,
-                        });
-                        self.finalize_run(run_id, PlanRunStatus::BudgetExceeded)
-                            .await?;
-                        return Ok(());
-                    }
-                    Ok(TaskResult::Blocked { blocked_by }) => {
-                        warn!("Task {} blocked by {:?}", wave_task.id, blocked_by);
-                        // Mark task as blocked and continue (with CrudEvent)
-                        let _ = self
-                            .update_task_status_with_event(wave_task.id, TaskStatus::Blocked)
-                            .await;
-                    }
-                    Err(e) => {
-                        error!("Task {} execution error: {}", wave_task.id, e);
-                        self.on_task_failed(
-                            run_id,
-                            plan_id,
-                            wave_task.id,
-                            &e.to_string(),
-                            0.0,
-                            0.0,
-                        )
-                        .await?;
+                }
+                return Ok(());
+            }
+
+            // Post-wave: collect commits from agent worktrees before verification.
+            // Agents may have created worktrees for isolation — their commits need
+            // to be cherry-picked back onto the run branch.
+            {
+                let run_branch = git::current_branch(&cwd).await.unwrap_or_default();
+                if !run_branch.is_empty() {
+                    match git::collect_worktree_commits(&cwd, &run_branch).await {
+                        Ok(wt_result) => {
+                            if !wt_result.recovered_commits.is_empty()
+                                || !wt_result.conflicts.is_empty()
+                            {
+                                info!(
+                                    "Wave {}: recovered {} commits from worktrees, {} conflicts, {} cleaned up",
+                                    wave_number,
+                                    wt_result.recovered_commits.len(),
+                                    wt_result.conflicts.len(),
+                                    wt_result.cleaned_up.len(),
+                                );
+                                self.emit_event(RunnerEvent::WorktreeRecovery {
+                                    run_id,
+                                    wave_number,
+                                    commits_recovered: wt_result.recovered_commits.len(),
+                                    conflicts: wt_result.conflicts.len(),
+                                    worktrees_cleaned: wt_result.cleaned_up.len(),
+                                });
+                            }
+                            for conflict in &wt_result.conflicts {
+                                warn!(
+                                    "Worktree conflict: {} on branch {} (commit {}): {}",
+                                    conflict.worktree_path,
+                                    conflict.branch,
+                                    conflict.commit_sha,
+                                    conflict.error
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Worktree collection failed (non-fatal): {}", e);
+                        }
                     }
                 }
+            }
 
-                // Budget check after each task
-                {
-                    let global = RUNNER_STATE.read().await;
-                    if let Some(ref s) = *global {
-                        if s.is_budget_exceeded(self.config.max_cost_usd) {
-                            self.emit_event(RunnerEvent::BudgetExceeded {
-                                run_id,
-                                plan_id,
-                                cumulated_cost_usd: s.cost_usd,
-                                limit_usd: self.config.max_cost_usd,
-                            });
-                            drop(global);
-                            self.finalize_run(run_id, PlanRunStatus::BudgetExceeded)
-                                .await?;
-                            return Ok(());
-                        }
+            // Post-wave verification: run TaskVerifier ONCE for all completed tasks.
+            // Step completion is checked for every task, but build/git checks run
+            // only once (on the last task) since they verify the whole project.
+            if !wave_result.tasks_completed.is_empty() {
+                for (idx, &task_id) in wave_result.tasks_completed.iter().enumerate() {
+                    let is_last = idx == wave_result.tasks_completed.len() - 1;
+                    let wave_verifier = TaskVerifier::new(
+                        self.graph.clone(),
+                        // Only run build/git checks on the last task
+                        is_last && self.config.build_check,
+                        is_last && self.config.test_runner,
+                    );
+                    let verify_result = wave_verifier.verify(task_id, &cwd).await;
+                    if let VerifyResult::Fail { reasons } = verify_result {
+                        let reason =
+                            format!("Post-wave verification failed:\n- {}", reasons.join("\n- "));
+                        warn!("Task {} verification failed: {}", task_id, reason);
+                        self.on_task_failed(run_id, plan_id, task_id, &reason, 0.0, 0.0)
+                            .await?;
                     }
                 }
             }
@@ -747,8 +726,435 @@ impl PlanRunner {
         }
 
         // All waves completed successfully
-        self.finalize_run(run_id, PlanRunStatus::Completed).await?;
+        self.finalize_run(run_id, PlanRunStatus::Completed, Some(&cwd))
+            .await?;
         Ok(())
+    }
+
+    /// Execute all tasks in a wave in parallel using a JoinSet.
+    ///
+    /// Each task is spawned as a separate tokio task. Results are collected as
+    /// they complete. Budget and cancellation checks happen after each result,
+    /// with `join_set.abort_all()` used to stop remaining tasks if needed.
+    async fn execute_wave(
+        &self,
+        run_id: Uuid,
+        plan_id: Uuid,
+        wave: &crate::neo4j::plan::Wave,
+        cwd: &str,
+        project_slug: Option<&str>,
+        project_id: Option<Uuid>,
+    ) -> Result<WaveResult> {
+        use tokio::task::JoinSet;
+
+        let mut wave_result = WaveResult {
+            tasks_completed: Vec::new(),
+            tasks_failed: Vec::new(),
+            wave_cost_usd: 0.0,
+            aborted: false,
+        };
+
+        // Filter tasks: skip completed and blocked
+        let eligible_tasks: Vec<_> = wave
+            .tasks
+            .iter()
+            .filter(|t| {
+                if t.status == "completed" {
+                    return false;
+                }
+                if t.status == "blocked" {
+                    warn!(
+                        "Skipping blocked task {}: {}",
+                        t.id,
+                        t.title.as_deref().unwrap_or("untitled")
+                    );
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        if eligible_tasks.is_empty() {
+            return Ok(wave_result);
+        }
+
+        // Build a map of task_id -> start_time for enricher
+        let mut task_start_times: std::collections::HashMap<Uuid, chrono::DateTime<chrono::Utc>> =
+            std::collections::HashMap::new();
+
+        let mut join_set: JoinSet<(Uuid, String, Result<TaskExecutionResult>)> = JoinSet::new();
+
+        for wave_task in &eligible_tasks {
+            let task_id = wave_task.id;
+            let task_title = wave_task
+                .title
+                .clone()
+                .unwrap_or_else(|| "untitled".to_string());
+            task_start_times.insert(task_id, chrono::Utc::now());
+
+            let runner = self.clone();
+            let cwd = cwd.to_string();
+            let project_slug = project_slug.map(|s| s.to_string());
+            let title_clone = task_title.clone();
+
+            join_set.spawn(async move {
+                let result = runner
+                    .execute_task(
+                        run_id,
+                        plan_id,
+                        task_id,
+                        &title_clone,
+                        &cwd,
+                        project_slug.as_deref(),
+                    )
+                    .await;
+                (task_id, title_clone, result)
+            });
+        }
+
+        // Collect results as they complete
+        while let Some(join_result) = join_set.join_next().await {
+            let (task_id, task_title, task_result) = match join_result {
+                Ok(tuple) => tuple,
+                Err(join_error) => {
+                    if join_error.is_cancelled() {
+                        // Task was aborted via join_set.abort_all() — not a failure
+                        info!("A wave task was cancelled via JoinSet abort");
+                        continue;
+                    }
+                    // JoinError from panic — treat as unexpected error
+                    error!("A wave task panicked: {}", join_error);
+                    continue;
+                }
+            };
+
+            // Extract session_id from the result (for enricher)
+            let task_session_id = task_result.as_ref().ok().and_then(|r| r.session_id());
+            let task_start_time = task_start_times
+                .get(&task_id)
+                .copied()
+                .unwrap_or_else(chrono::Utc::now);
+
+            // Extract activated skill IDs and agent execution ID before consuming the result
+            let task_activated_skills = task_result
+                .as_ref()
+                .ok()
+                .map(|r| r.activated_skill_ids.clone())
+                .unwrap_or_default();
+
+            let task_agent_execution_id = task_result.as_ref().ok().map(|r| r.agent_execution_id);
+
+            let task_persona = task_result
+                .as_ref()
+                .ok()
+                .map(|r| r.persona_profile.clone())
+                .unwrap_or_default();
+
+            match task_result.map(|r| r.result) {
+                Ok(TaskResult::Success {
+                    duration_secs,
+                    cost_usd,
+                }) => {
+                    self.on_task_completed(run_id, task_id, duration_secs, cost_usd)
+                        .await?;
+                    wave_result.tasks_completed.push(task_id);
+                    wave_result.wave_cost_usd += cost_usd;
+
+                    // Fire-and-forget enrichment (commits, auto-notes, AFFECTS)
+                    let enricher = TaskEnricher::new(self.graph.clone());
+                    let enrich_plan_id = plan_id;
+                    let enrich_project_id = project_id;
+                    let enrich_session_id = task_session_id;
+                    let enrich_cwd = cwd.to_string();
+                    let enrich_start = task_start_time;
+                    tokio::spawn(async move {
+                        let result = enricher
+                            .enrich(
+                                task_id,
+                                enrich_plan_id,
+                                enrich_project_id,
+                                enrich_session_id,
+                                enrich_start,
+                                &enrich_cwd,
+                            )
+                            .await;
+                        info!(
+                            "Enricher completed for task {}: {} commits, note={}, {} affects, {} discussed",
+                            task_id,
+                            result.commits_linked,
+                            result.note_created,
+                            result.affects_added,
+                            result.discussed_added
+                        );
+                    });
+
+                    // Fire-and-forget: finalize AgentExecution node (success)
+                    if let Some(ae_id) = task_agent_execution_id {
+                        let graph = self.graph.clone();
+                        let persona = task_persona.clone();
+                        tokio::spawn(async move {
+                            use crate::neo4j::agent_execution::{
+                                AgentExecutionNode, AgentExecutionStatus,
+                            };
+                            let ae = AgentExecutionNode {
+                                id: ae_id,
+                                run_id,
+                                task_id,
+                                session_id: task_session_id,
+                                started_at: task_start_time,
+                                completed_at: Some(chrono::Utc::now()),
+                                cost_usd,
+                                duration_secs,
+                                status: AgentExecutionStatus::Completed,
+                                tools_used: "{}".to_string(),
+                                files_modified: vec![],
+                                commits: vec![],
+                                persona_profile: persona,
+                                vector_json: None,
+                            };
+                            if let Err(e) = graph.update_agent_execution(&ae).await {
+                                warn!("Failed to update AgentExecution {}: {}", ae_id, e);
+                            }
+                        });
+                    }
+
+                    // Fire-and-forget skill feedback + USED_SKILL relations (success)
+                    if !task_activated_skills.is_empty() {
+                        let graph = self.graph.clone();
+                        let skills = task_activated_skills;
+                        let ae_id = task_agent_execution_id;
+                        tokio::spawn(async move {
+                            record_skill_feedback(
+                                graph.clone(),
+                                task_id,
+                                run_id,
+                                skills.clone(),
+                                true,
+                                cost_usd,
+                                duration_secs,
+                            )
+                            .await;
+                            // Create USED_SKILL relations via AgentExecution
+                            if let Some(ae_id) = ae_id {
+                                for skill_id in &skills {
+                                    if let Err(e) = graph
+                                        .create_used_skill_relation(ae_id, *skill_id, "success")
+                                        .await
+                                    {
+                                        warn!("Failed to create USED_SKILL relation: {}", e);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                Ok(TaskResult::Failed {
+                    reason,
+                    attempts: _,
+                    cost_usd,
+                }) => {
+                    self.on_task_failed(run_id, plan_id, task_id, &reason, 0.0, cost_usd)
+                        .await?;
+                    wave_result.tasks_failed.push((task_id, reason));
+                    wave_result.wave_cost_usd += cost_usd;
+
+                    // Fire-and-forget: finalize AgentExecution node (failure)
+                    if let Some(ae_id) = task_agent_execution_id {
+                        let graph = self.graph.clone();
+                        let persona = task_persona.clone();
+                        tokio::spawn(async move {
+                            use crate::neo4j::agent_execution::{
+                                AgentExecutionNode, AgentExecutionStatus,
+                            };
+                            let ae = AgentExecutionNode {
+                                id: ae_id,
+                                run_id,
+                                task_id,
+                                session_id: task_session_id,
+                                started_at: task_start_time,
+                                completed_at: Some(chrono::Utc::now()),
+                                cost_usd,
+                                duration_secs: 0.0,
+                                status: AgentExecutionStatus::Failed,
+                                tools_used: "{}".to_string(),
+                                files_modified: vec![],
+                                commits: vec![],
+                                persona_profile: persona,
+                                vector_json: None,
+                            };
+                            if let Err(e) = graph.update_agent_execution(&ae).await {
+                                warn!("Failed to update AgentExecution {}: {}", ae_id, e);
+                            }
+                        });
+                    }
+
+                    // Fire-and-forget skill feedback + USED_SKILL (failure)
+                    if !task_activated_skills.is_empty() {
+                        let graph = self.graph.clone();
+                        let skills = task_activated_skills;
+                        let ae_id = task_agent_execution_id;
+                        tokio::spawn(async move {
+                            record_skill_feedback(
+                                graph.clone(),
+                                task_id,
+                                run_id,
+                                skills.clone(),
+                                false,
+                                cost_usd,
+                                0.0,
+                            )
+                            .await;
+                            if let Some(ae_id) = ae_id {
+                                for skill_id in &skills {
+                                    if let Err(e) = graph
+                                        .create_used_skill_relation(ae_id, *skill_id, "failure")
+                                        .await
+                                    {
+                                        warn!("Failed to create USED_SKILL relation: {}", e);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                Ok(TaskResult::Timeout {
+                    duration_secs,
+                    cost_usd,
+                }) => {
+                    self.emit_event(RunnerEvent::TaskTimeout {
+                        run_id,
+                        task_id,
+                        task_title: task_title.clone(),
+                        duration_secs,
+                    });
+                    self.on_task_failed(
+                        run_id,
+                        plan_id,
+                        task_id,
+                        "Task timeout",
+                        duration_secs,
+                        cost_usd,
+                    )
+                    .await?;
+                    wave_result
+                        .tasks_failed
+                        .push((task_id, "Task timeout".to_string()));
+                    wave_result.wave_cost_usd += cost_usd;
+
+                    // Fire-and-forget: finalize AgentExecution (timeout)
+                    if let Some(ae_id) = task_agent_execution_id {
+                        let graph = self.graph.clone();
+                        let persona = task_persona.clone();
+                        tokio::spawn(async move {
+                            use crate::neo4j::agent_execution::{
+                                AgentExecutionNode, AgentExecutionStatus,
+                            };
+                            let ae = AgentExecutionNode {
+                                id: ae_id,
+                                run_id,
+                                task_id,
+                                session_id: task_session_id,
+                                started_at: task_start_time,
+                                completed_at: Some(chrono::Utc::now()),
+                                cost_usd,
+                                duration_secs,
+                                status: AgentExecutionStatus::Timeout,
+                                tools_used: "{}".to_string(),
+                                files_modified: vec![],
+                                commits: vec![],
+                                persona_profile: persona,
+                                vector_json: None,
+                            };
+                            if let Err(e) = graph.update_agent_execution(&ae).await {
+                                warn!("Failed to update AgentExecution {}: {}", ae_id, e);
+                            }
+                        });
+                    }
+
+                    // Fire-and-forget skill feedback + USED_SKILL (timeout = failure)
+                    if !task_activated_skills.is_empty() {
+                        let graph = self.graph.clone();
+                        let skills = task_activated_skills;
+                        let ae_id = task_agent_execution_id;
+                        tokio::spawn(async move {
+                            record_skill_feedback(
+                                graph.clone(),
+                                task_id,
+                                run_id,
+                                skills.clone(),
+                                false,
+                                cost_usd,
+                                duration_secs,
+                            )
+                            .await;
+                            if let Some(ae_id) = ae_id {
+                                for skill_id in &skills {
+                                    if let Err(e) = graph
+                                        .create_used_skill_relation(ae_id, *skill_id, "failure")
+                                        .await
+                                    {
+                                        warn!("Failed to create USED_SKILL relation: {}", e);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                Ok(TaskResult::BudgetExceeded {
+                    cumulated_cost_usd,
+                    limit_usd,
+                }) => {
+                    self.emit_event(RunnerEvent::BudgetExceeded {
+                        run_id,
+                        plan_id,
+                        cumulated_cost_usd,
+                        limit_usd,
+                    });
+                    wave_result.aborted = true;
+                    join_set.abort_all();
+                    // Drain remaining aborted tasks
+                    while join_set.join_next().await.is_some() {}
+                    return Ok(wave_result);
+                }
+                Ok(TaskResult::Blocked { blocked_by }) => {
+                    warn!("Task {} blocked by {:?}", task_id, blocked_by);
+                    let _ = self
+                        .update_task_status_with_event(task_id, TaskStatus::Blocked)
+                        .await;
+                }
+                Err(e) => {
+                    error!("Task {} execution error: {}", task_id, e);
+                    self.on_task_failed(run_id, plan_id, task_id, &e.to_string(), 0.0, 0.0)
+                        .await?;
+                    wave_result.tasks_failed.push((task_id, e.to_string()));
+                }
+            }
+
+            // Budget check after each agent result
+            {
+                let global = RUNNER_STATE.read().await;
+                if let Some(ref s) = *global {
+                    if s.is_budget_exceeded(self.config.max_cost_usd) {
+                        wave_result.aborted = true;
+                        drop(global);
+                        join_set.abort_all();
+                        while join_set.join_next().await.is_some() {}
+                        return Ok(wave_result);
+                    }
+                }
+            }
+
+            // Cancel check after each agent result
+            if RUNNER_CANCEL.load(Ordering::SeqCst) {
+                info!("Runner cancelled during wave execution");
+                wave_result.aborted = true;
+                join_set.abort_all();
+                while join_set.join_next().await.is_some() {}
+                return Ok(wave_result);
+            }
+        }
+
+        Ok(wave_result)
     }
 
     /// Execute a single task by spawning a Claude Code agent.
@@ -763,12 +1169,11 @@ impl PlanRunner {
     ) -> Result<TaskExecutionResult> {
         info!("Executing task {}: {}", task_id, task_title);
 
-        // Update global state
+        // Update global state — register active agent
         {
             let mut global = RUNNER_STATE.write().await;
             if let Some(ref mut s) = *global {
-                s.current_task_id = Some(task_id);
-                s.current_task_title = Some(task_title.to_string());
+                s.add_agent(ActiveAgent::new(task_id, task_title.to_string()));
             }
         }
 
@@ -789,10 +1194,122 @@ impl PlanRunner {
             wave_number,
         });
 
-        // Build the prompt
-        let context = self.context_builder.build_context(task_id, plan_id).await?;
-        let mut prompt = self.context_builder.generate_prompt(&context);
-        prompt.push_str(RUNNER_CONSTRAINTS);
+        // --- Step 1: Profile the task ---
+        let task_node = self.graph.get_task(task_id).await?;
+        let steps = self.graph.get_task_steps(task_id).await.unwrap_or_default();
+        let task_profile = task_node
+            .as_ref()
+            .map(|t| profile_task(t, steps.len()))
+            .unwrap_or_else(|| {
+                profile_task(
+                    &crate::neo4j::models::TaskNode {
+                        id: task_id,
+                        title: Some(task_title.to_string()),
+                        description: String::new(),
+                        status: crate::neo4j::models::TaskStatus::InProgress,
+                        assigned_to: None,
+                        priority: None,
+                        tags: vec![],
+                        acceptance_criteria: vec![],
+                        affected_files: vec![],
+                        estimated_complexity: None,
+                        actual_complexity: None,
+                        created_at: chrono::Utc::now(),
+                        updated_at: None,
+                        started_at: None,
+                        completed_at: None,
+                        frustration_score: 0.0,
+                        execution_context: None,
+                        persona: None,
+                        prompt_cache: None,
+                    },
+                    0,
+                )
+            });
+        info!(
+            task_id = %task_id,
+            complexity = %task_profile.complexity,
+            timeout_secs = task_profile.timeout_secs,
+            max_cost_usd = task_profile.max_cost_usd,
+            "Task profiled"
+        );
+
+        // --- Step 2: Activate skills ---
+        let project_id_for_skills = if let Some(slug) = &project_slug {
+            self.graph
+                .get_project_by_slug(slug)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.id)
+        } else {
+            None
+        };
+
+        let skill_activation =
+            if let (Some(pid), Some(ref tn)) = (project_id_for_skills, &task_node) {
+                activate_skills_for_task(self.graph.as_ref(), pid, tn).await
+            } else {
+                None
+            };
+
+        let activated_skill_ids = skill_activation
+            .as_ref()
+            .map(|sa| sa.activated_skill_ids.clone())
+            .unwrap_or_default();
+
+        let skill_context = skill_activation
+            .map(|sa| sa.context_text)
+            .filter(|s| !s.is_empty());
+
+        // Build the prompt — use prompt_cache if available (pre-enrichment), else build from scratch
+        let cached_prompt = task_node.as_ref().and_then(|t| t.prompt_cache.clone());
+        let (mut prompt, affected_files_for_ctx) = if let Some(ref cached) = cached_prompt {
+            info!(task_id = %task_id, "Using pre-enriched prompt_cache (skipping build_context)");
+            let af = task_node
+                .as_ref()
+                .map(|t| t.affected_files.clone())
+                .unwrap_or_default();
+            (cached.clone(), af)
+        } else {
+            let context = self.context_builder.build_context(task_id, plan_id).await?;
+            let p = self.context_builder.generate_prompt(&context);
+            let af = context
+                .target_files
+                .iter()
+                .map(|f| f.path.clone())
+                .collect();
+            (p, af)
+        };
+
+        // Build dynamic runner constraints with git branch, wave info, skills, and profile
+        let git_branch = git::current_branch(cwd).await.unwrap_or_default();
+        let task_tags = task_node
+            .as_ref()
+            .map(|t| t.tags.clone())
+            .unwrap_or_default();
+        let frustration_level = task_node
+            .as_ref()
+            .map(|t| t.frustration_score)
+            .unwrap_or(0.0);
+        let runner_ctx = RunnerPromptContext {
+            git_branch,
+            task_tags,
+            affected_files: affected_files_for_ctx,
+            forbidden_files: vec![], // populated by execute_wave for parallel tasks
+            skill_context,
+            frustration_level,
+            wave_number,
+            parallel_agents: 1, // default, overridden by execute_wave
+        };
+        prompt.push_str(&build_runner_constraints(&runner_ctx));
+
+        // --- Step 3: Inject complexity directive ---
+        prompt.push_str(&format!(
+            "\n## Cognitive Profile: {}\n{}\n",
+            task_profile.complexity,
+            complexity_directive(task_profile.complexity)
+        ));
 
         // Spawn agent: create_session → subscribe → send_message → listen
         let request = ChatRequest {
@@ -820,11 +1337,47 @@ impl PlanRunner {
         let session_id = session.session_id.clone();
         let session_uuid = session_id.parse::<Uuid>().ok();
 
-        // Helper to wrap TaskResult with session_id
-        let wrap = |result: TaskResult| -> TaskExecutionResult {
+        // Create an AgentExecution ID for this task
+        let agent_execution_id = Uuid::new_v4();
+        let persona_str = task_profile.complexity.to_string();
+
+        // Create AgentExecution node in Neo4j (fire-and-forget)
+        {
+            use crate::neo4j::agent_execution::{AgentExecutionNode, AgentExecutionStatus};
+            let ae = AgentExecutionNode {
+                id: agent_execution_id,
+                run_id,
+                task_id,
+                session_id: session_uuid,
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+                cost_usd: 0.0,
+                duration_secs: 0.0,
+                status: AgentExecutionStatus::Running,
+                tools_used: "{}".to_string(),
+                files_modified: vec![],
+                commits: vec![],
+                persona_profile: persona_str.clone(),
+                vector_json: None,
+            };
+            let graph = self.graph.clone();
+            tokio::spawn(async move {
+                if let Err(e) = graph.create_agent_execution(&ae).await {
+                    warn!("Failed to create AgentExecution node: {}", e);
+                }
+            });
+        }
+
+        // Helper to wrap TaskResult with session_id and activated skills
+        let activated_ids = activated_skill_ids.clone();
+        let persona_clone = persona_str.clone();
+        let wrap = move |result: TaskResult| -> TaskExecutionResult {
             TaskExecutionResult {
                 result,
                 session_id: session_uuid,
+                activated_skill_ids: activated_ids.clone(),
+                agent_execution_id,
+                persona_profile: persona_clone.clone(),
             }
         };
 
@@ -838,10 +1391,10 @@ impl PlanRunner {
 
         let start = std::time::Instant::now();
 
-        // Spawn the AgentGuard in parallel
+        // Spawn the AgentGuard in parallel (timeout adapted to task profile)
         let guard_config = GuardConfig {
             idle_timeout: Duration::from_secs(self.config.idle_timeout_secs),
-            task_timeout: Duration::from_secs(self.config.task_timeout_secs),
+            task_timeout: Duration::from_secs(task_profile.timeout_secs),
             loop_threshold: 3,
             ..Default::default()
         };
@@ -966,29 +1519,28 @@ impl PlanRunner {
             }
         }
 
-        // Post-task verification (build, steps, git sanity)
-        let verifier = TaskVerifier::new(
-            self.graph.clone(),
-            self.config.build_check,
-            self.config.test_runner,
-        );
-        let verify_result = verifier.verify(task_id, cwd).await;
-
-        match verify_result {
-            VerifyResult::Pass => Ok(wrap(TaskResult::Success {
-                duration_secs,
-                cost_usd,
-            })),
-            VerifyResult::Fail { reasons } => {
-                let reason = format!("Post-task verification failed:\n- {}", reasons.join("\n- "));
-                warn!("Task {} verification failed: {}", task_id, reason);
-                Ok(wrap(TaskResult::Failed {
-                    reason,
-                    attempts: 0,
-                    cost_usd,
-                }))
-            }
+        // Post-execution: persist persona used on the task node (Step 5 — T9)
+        {
+            let persona_for_persist = persona_str.clone();
+            let graph = self.graph.clone();
+            let tid = task_id;
+            tokio::spawn(async move {
+                if let Err(e) = graph
+                    .update_task_enrichment(tid, None, Some(&persona_for_persist), None)
+                    .await
+                {
+                    warn!("Failed to persist persona on task {}: {}", tid, e);
+                }
+            });
         }
+
+        // NOTE: Verification (build check, steps, git sanity) is now performed
+        // post-wave by execute_wave, not per-task. This avoids redundant build
+        // checks when multiple tasks run in parallel within the same wave.
+        Ok(wrap(TaskResult::Success {
+            duration_secs,
+            cost_usd,
+        }))
     }
 
     // ========================================================================
@@ -1011,8 +1563,6 @@ impl PlanRunner {
             let mut global = RUNNER_STATE.write().await;
             if let Some(ref mut s) = *global {
                 s.mark_task_completed(task_id);
-                s.current_task_id = None;
-                s.current_task_title = None;
                 // Persist to Neo4j
                 self.graph.update_plan_run(s).await?;
             }
@@ -1103,8 +1653,6 @@ impl PlanRunner {
             let mut global = RUNNER_STATE.write().await;
             if let Some(ref mut s) = *global {
                 s.mark_task_failed(task_id);
-                s.current_task_id = None;
-                s.current_task_title = None;
                 self.graph.update_plan_run(s).await?;
             }
         }
@@ -1201,8 +1749,28 @@ impl PlanRunner {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// Finalize the run — update state, persist, emit event.
-    async fn finalize_run(&self, run_id: Uuid, status: PlanRunStatus) -> Result<()> {
+    /// Finalize the run — update state, persist, emit event, cleanup worktrees.
+    ///
+    /// `cwd` is optional: when provided, remaining agent worktrees are cleaned up.
+    async fn finalize_run(
+        &self,
+        run_id: Uuid,
+        status: PlanRunStatus,
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        // Cleanup any remaining agent worktrees before finalizing
+        if let Some(cwd) = cwd {
+            match git::WorktreeCollector::cleanup_worktrees(cwd).await {
+                Ok(count) if count > 0 => {
+                    info!("Cleaned up {} worktrees during finalize_run", count);
+                }
+                Err(e) => {
+                    warn!("Worktree cleanup failed (non-fatal): {}", e);
+                }
+                _ => {}
+            }
+        }
+
         let mut global = RUNNER_STATE.write().await;
         if let Some(ref mut s) = *global {
             s.finalize(status);
@@ -1543,12 +2111,14 @@ mod tests {
 
     #[test]
     fn test_runner_constraints_in_prompt() {
-        assert!(RUNNER_CONSTRAINTS.contains("## Runner Execution Mode"));
-        assert!(RUNNER_CONSTRAINTS.contains("autonomous code execution agent"));
-        assert!(RUNNER_CONSTRAINTS.contains("DO NOT"));
-        assert!(RUNNER_CONSTRAINTS.contains("task(action: \"update\", status"));
-        assert!(RUNNER_CONSTRAINTS.contains(".env"));
-        assert!(RUNNER_CONSTRAINTS.contains("cargo check"));
+        let ctx = RunnerPromptContext::single_agent(String::new());
+        let constraints = build_runner_constraints(&ctx);
+        assert!(constraints.contains("## Runner Execution Mode"));
+        assert!(constraints.contains("autonomous code execution agent"));
+        assert!(constraints.contains("DO NOT"));
+        assert!(constraints.contains("task(action: \"update\", status"));
+        assert!(constraints.contains(".env"));
+        assert!(constraints.contains("cargo check"));
     }
 
     #[test]
@@ -1561,6 +2131,7 @@ mod tests {
             current_wave: None,
             current_task_id: None,
             current_task_title: None,
+            active_agents: Vec::new(),
             progress_pct: 0.0,
             tasks_completed: 0,
             tasks_total: 0,
@@ -1569,5 +2140,6 @@ mod tests {
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"running\":false"));
+        assert!(json.contains("\"active_agents\":[]"));
     }
 }

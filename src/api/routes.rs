@@ -404,6 +404,21 @@ fn protected_routes() -> Router<OrchestratorState> {
             "/api/plans/{plan_id}/tasks/{task_id}/prompt",
             get(handlers::get_task_prompt),
         )
+        .route(
+            "/api/plans/{plan_id}/tasks/{task_id}/build_prompt",
+            post(handlers::build_task_prompt),
+        )
+        // Task delegation — sub-agent orchestration
+        .route(
+            "/api/plans/{plan_id}/tasks/{task_id}/delegate",
+            post(handlers::delegate_task),
+        )
+        // Pre-enrichment pipeline
+        .route("/api/plans/{plan_id}/enrich", post(handlers::enrich_plan))
+        .route(
+            "/api/plans/{plan_id}/tasks/{task_id}/enrich",
+            post(handlers::enrich_task),
+        )
         // Decisions
         .route(
             "/api/tasks/{task_id}/decisions",
@@ -1265,6 +1280,14 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/chat/sessions/{id}/children",
             get(chat_handlers::get_session_children),
+        )
+        .route(
+            "/api/chat/sessions/{id}/tree",
+            get(chat_handlers::get_session_tree),
+        )
+        .route(
+            "/api/chat/runs/{run_id}/sessions",
+            get(chat_handlers::get_run_sessions),
         )
         // DISCUSSED relations (ChatSession → Entity)
         .route(

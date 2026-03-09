@@ -826,6 +826,15 @@ pub trait GraphStore: Send + Sync {
     /// Update a task with new values
     async fn update_task(&self, task_id: Uuid, updates: &UpdateTaskRequest) -> Result<()>;
 
+    /// Update pre-enrichment fields on a task (execution_context, persona, prompt_cache).
+    async fn update_task_enrichment(
+        &self,
+        task_id: Uuid,
+        execution_context: Option<&str>,
+        persona: Option<&str>,
+        prompt_cache: Option<&str>,
+    ) -> Result<()>;
+
     /// Delete a task and all its related data (steps, decisions)
     async fn delete_task(&self, task_id: Uuid) -> Result<()>;
 
@@ -1706,6 +1715,25 @@ pub trait GraphStore: Send + Sync {
 
     /// Get child sessions spawned by a parent session
     async fn get_session_children(&self, parent_id: Uuid) -> Result<Vec<ChatSessionNode>>;
+
+    /// Create a SPAWNED_BY relation between two chat sessions
+    async fn create_spawned_by_relation(
+        &self,
+        child_session_id: &str,
+        parent_session_id: &str,
+        spawn_type: &str,
+        run_id: Option<Uuid>,
+        task_id: Option<Uuid>,
+    ) -> Result<()>;
+
+    /// Get the full session tree rooted at a session (recursive SPAWNED_BY traversal, max 10 levels)
+    async fn get_session_tree(&self, session_id: &str) -> Result<Vec<SessionTreeNode>>;
+
+    /// Follow SPAWNED_BY upward to find the root session
+    async fn get_session_root(&self, session_id: &str) -> Result<Option<String>>;
+
+    /// Get all sessions for a PlanRun via SPAWNED_BY relation metadata
+    async fn get_run_sessions(&self, run_id: Uuid) -> Result<Vec<SessionInfo>>;
 
     /// Update a chat session (partial update, None fields are skipped)
     #[allow(clippy::too_many_arguments)]
@@ -2588,4 +2616,32 @@ pub trait GraphStore: Send + Sync {
         trigger_id: Uuid,
         limit: i64,
     ) -> Result<Vec<crate::runner::TriggerFiring>>;
+
+    // ── AgentExecution ──────────────────────────────────────────────────────
+
+    /// Create an AgentExecution node linked to a PlanRun and Task.
+    async fn create_agent_execution(
+        &self,
+        ae: &crate::neo4j::agent_execution::AgentExecutionNode,
+    ) -> Result<()>;
+
+    /// Update an existing AgentExecution with final results.
+    async fn update_agent_execution(
+        &self,
+        ae: &crate::neo4j::agent_execution::AgentExecutionNode,
+    ) -> Result<()>;
+
+    /// Get all AgentExecution nodes for a given PlanRun.
+    async fn get_agent_executions_for_run(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<crate::neo4j::agent_execution::AgentExecutionNode>>;
+
+    /// Create a USED_SKILL relationship from AgentExecution to Skill.
+    async fn create_used_skill_relation(
+        &self,
+        agent_execution_id: Uuid,
+        skill_id: Uuid,
+        result: &str,
+    ) -> Result<()>;
 }

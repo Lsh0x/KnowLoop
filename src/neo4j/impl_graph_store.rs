@@ -1049,6 +1049,17 @@ impl GraphStore for Neo4jClient {
         self.update_task(task_id, updates).await
     }
 
+    async fn update_task_enrichment(
+        &self,
+        task_id: Uuid,
+        execution_context: Option<&str>,
+        persona: Option<&str>,
+        prompt_cache: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.update_task_enrichment(task_id, execution_context, persona, prompt_cache)
+            .await
+    }
+
     async fn delete_task(&self, task_id: Uuid) -> anyhow::Result<()> {
         self.delete_task(task_id).await
     }
@@ -2055,6 +2066,36 @@ impl GraphStore for Neo4jClient {
         self.get_session_children(parent_id).await
     }
 
+    async fn create_spawned_by_relation(
+        &self,
+        child_session_id: &str,
+        parent_session_id: &str,
+        spawn_type: &str,
+        run_id: Option<Uuid>,
+        task_id: Option<Uuid>,
+    ) -> anyhow::Result<()> {
+        self.create_spawned_by_relation(
+            child_session_id,
+            parent_session_id,
+            spawn_type,
+            run_id,
+            task_id,
+        )
+        .await
+    }
+
+    async fn get_session_tree(&self, session_id: &str) -> anyhow::Result<Vec<SessionTreeNode>> {
+        self.get_session_tree(session_id).await
+    }
+
+    async fn get_session_root(&self, session_id: &str) -> anyhow::Result<Option<String>> {
+        self.get_session_root(session_id).await
+    }
+
+    async fn get_run_sessions(&self, run_id: Uuid) -> anyhow::Result<Vec<SessionInfo>> {
+        self.get_run_sessions(run_id).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn update_chat_session(
         &self,
@@ -3056,5 +3097,38 @@ impl GraphStore for Neo4jClient {
         limit: i64,
     ) -> anyhow::Result<Vec<crate::runner::TriggerFiring>> {
         self.list_trigger_firings_impl(trigger_id, limit).await
+    }
+
+    // ── AgentExecution ──────────────────────────────────────────────────────
+
+    async fn create_agent_execution(
+        &self,
+        ae: &crate::neo4j::agent_execution::AgentExecutionNode,
+    ) -> anyhow::Result<()> {
+        self.create_agent_execution_impl(ae).await
+    }
+
+    async fn update_agent_execution(
+        &self,
+        ae: &crate::neo4j::agent_execution::AgentExecutionNode,
+    ) -> anyhow::Result<()> {
+        self.update_agent_execution_impl(ae).await
+    }
+
+    async fn get_agent_executions_for_run(
+        &self,
+        run_id: Uuid,
+    ) -> anyhow::Result<Vec<crate::neo4j::agent_execution::AgentExecutionNode>> {
+        self.get_agent_executions_for_run_impl(run_id).await
+    }
+
+    async fn create_used_skill_relation(
+        &self,
+        agent_execution_id: Uuid,
+        skill_id: Uuid,
+        result: &str,
+    ) -> anyhow::Result<()> {
+        self.create_used_skill_relation_impl(agent_execution_id, skill_id, result)
+            .await
     }
 }
