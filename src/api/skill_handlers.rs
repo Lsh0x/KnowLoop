@@ -702,9 +702,7 @@ pub async fn split_skill(
     Path(skill_id): Path<Uuid>,
     Json(body): Json<SplitSkillRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    use crate::skills::evolution::{
-        execute_evolution, SkillEvolution, MIN_MEMBERS_FOR_SPLIT,
-    };
+    use crate::skills::evolution::{execute_evolution, SkillEvolution, MIN_MEMBERS_FOR_SPLIT};
 
     let graph = state.orchestrator.neo4j();
 
@@ -716,7 +714,9 @@ pub async fn split_skill(
         .ok_or_else(|| AppError::NotFound(format!("Skill {} not found", skill_id)))?;
 
     if skill.status == SkillStatus::Archived {
-        return Err(AppError::BadRequest("Cannot split an archived skill".into()));
+        return Err(AppError::BadRequest(
+            "Cannot split an archived skill".into(),
+        ));
     }
 
     // Get current members
@@ -736,9 +736,13 @@ pub async fn split_skill(
     }
 
     // Build candidates from explicit sub-clusters or auto-detect
-    let candidates: Vec<crate::skills::detection::SkillCandidate> = if let Some(sub_clusters) = body.sub_clusters {
+    let candidates: Vec<crate::skills::detection::SkillCandidate> = if let Some(sub_clusters) =
+        body.sub_clusters
+    {
         if sub_clusters.len() < 2 {
-            return Err(AppError::BadRequest("Need at least 2 sub-clusters for split".into()));
+            return Err(AppError::BadRequest(
+                "Need at least 2 sub-clusters for split".into(),
+            ));
         }
         sub_clusters
             .into_iter()
@@ -769,10 +773,8 @@ pub async fn split_skill(
             .candidates
             .into_iter()
             .filter(|c| {
-                let jaccard = crate::skills::detection::jaccard_similarity(
-                    &c.member_note_ids,
-                    &member_ids,
-                );
+                let jaccard =
+                    crate::skills::detection::jaccard_similarity(&c.member_note_ids, &member_ids);
                 jaccard >= overlap_threshold
             })
             .collect();
@@ -802,9 +804,7 @@ pub async fn split_skill(
         .map_err(AppError::Internal)?;
 
     // Invalidate hook cache
-    skill_cache()
-        .invalidate_project(&skill.project_id)
-        .await;
+    skill_cache().invalidate_project(&skill.project_id).await;
 
     let new_ids: Vec<Uuid> = result
         .split
@@ -828,12 +828,12 @@ pub async fn merge_skills(
     State(state): State<OrchestratorState>,
     Json(body): Json<MergeSkillsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    use crate::skills::evolution::{
-        execute_evolution, SkillEvolution, MAX_MEMBERS_AFTER_MERGE,
-    };
+    use crate::skills::evolution::{execute_evolution, SkillEvolution, MAX_MEMBERS_AFTER_MERGE};
 
     if body.skill_ids.len() < 2 {
-        return Err(AppError::BadRequest("Need at least 2 skill IDs to merge".into()));
+        return Err(AppError::BadRequest(
+            "Need at least 2 skill IDs to merge".into(),
+        ));
     }
 
     let graph = state.orchestrator.neo4j();
@@ -904,9 +904,7 @@ pub async fn merge_skills(
         .map_err(AppError::Internal)?;
 
     // Invalidate hook cache
-    skill_cache()
-        .invalidate_project(&project_id)
-        .await;
+    skill_cache().invalidate_project(&project_id).await;
 
     let survivor_id = result.merged.first().map(|e| e.survivor_id);
     let absorbed_ids: Vec<Uuid> = result.merged.iter().map(|e| e.absorbed_id).collect();

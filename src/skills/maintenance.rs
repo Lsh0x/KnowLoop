@@ -419,7 +419,10 @@ pub async fn run_maintenance_with_tracking(
         "weekly" => run_weekly_maintenance(graph_store, project_id, config).await?,
         "full" => run_full_maintenance(graph_store, project_id, config).await?,
         _ => {
-            warn!(level = level, "Unknown maintenance level, defaulting to daily");
+            warn!(
+                level = level,
+                "Unknown maintenance level, defaulting to daily"
+            );
             run_daily_maintenance(graph_store, project_id, config).await?
         }
     };
@@ -503,15 +506,14 @@ pub async fn deep_maintenance(
     aggressive_config.synapse_decay_amount *= 3.0;
     aggressive_config.synapse_prune_threshold *= 1.5;
 
-    let maintenance_json = match run_full_maintenance(graph_store, project_id, &aggressive_config)
-        .await
-    {
-        Ok(result) => serde_json::to_value(&result).ok(),
-        Err(e) => {
-            warn!(error = %e, "Full maintenance failed during deep maintenance");
-            None
-        }
-    };
+    let maintenance_json =
+        match run_full_maintenance(graph_store, project_id, &aggressive_config).await {
+            Ok(result) => serde_json::to_value(&result).ok(),
+            Err(e) => {
+                warn!(error = %e, "Full maintenance failed during deep maintenance");
+                None
+            }
+        };
 
     // 3. Update staleness scores and flag stale notes
     let stale_notes_flagged = match graph_store.update_staleness_scores().await {
@@ -798,7 +800,10 @@ mod tests {
         let plan = test_plan_for_project(project_id);
         let plan_id = plan.id;
         store.create_plan(&plan).await.unwrap();
-        store.link_plan_to_project(plan_id, project_id).await.unwrap();
+        store
+            .link_plan_to_project(plan_id, project_id)
+            .await
+            .unwrap();
 
         let mut task_ids = Vec::new();
         for i in 0..n_completed {
@@ -830,17 +835,26 @@ mod tests {
     #[tokio::test]
     async fn test_biomimicry_s1_scar_frustration_chain() {
         let store = MockGraphStore::new();
-        let (_project_id, _plan_id, task_ids) =
-            setup_project_with_tasks(&store, 0, 0, 2).await;
+        let (_project_id, _plan_id, task_ids) = setup_project_with_tasks(&store, 0, 0, 2).await;
 
         // Create notes to scar
-        let mut note1 = Note::new(Some(_project_id), NoteType::Observation, "Obs 1".into(), "test".into());
+        let mut note1 = Note::new(
+            Some(_project_id),
+            NoteType::Observation,
+            "Obs 1".into(),
+            "test".into(),
+        );
         note1.importance = NoteImportance::Medium;
         note1.tags = vec!["test".into()];
         let note1_id = note1.id;
         store.create_note(&note1).await.unwrap();
 
-        let mut note2 = Note::new(Some(_project_id), NoteType::Observation, "Obs 2".into(), "test".into());
+        let mut note2 = Note::new(
+            Some(_project_id),
+            NoteType::Observation,
+            "Obs 2".into(),
+            "test".into(),
+        );
         note2.importance = NoteImportance::Medium;
         note2.tags = vec!["test".into()];
         let note2_id = note2.id;
@@ -851,7 +865,11 @@ mod tests {
         assert_eq!(scarred, 2);
 
         let n1 = store.get_note(note1_id).await.unwrap().unwrap();
-        assert!((n1.scar_intensity - 0.5).abs() < 0.01, "scar_intensity should be ~0.5, got {}", n1.scar_intensity);
+        assert!(
+            (n1.scar_intensity - 0.5).abs() < 0.01,
+            "scar_intensity should be ~0.5, got {}",
+            n1.scar_intensity
+        );
 
         // Increment frustration
         let f1 = store.increment_frustration(task_ids[0], 0.3).await.unwrap();
@@ -871,7 +889,12 @@ mod tests {
 
         let mut note_ids = Vec::new();
         for i in 0..10 {
-            let mut note = Note::new(Some(project_id), NoteType::Observation, format!("Obs {}", i), "test".into());
+            let mut note = Note::new(
+                Some(project_id),
+                NoteType::Observation,
+                format!("Obs {}", i),
+                "test".into(),
+            );
             note.importance = NoteImportance::Medium;
             note.tags = vec!["test".into()];
             note_ids.push(note.id);
@@ -882,9 +905,16 @@ mod tests {
 
         let report = store.compute_homeostasis(project_id, None).await.unwrap();
         let scar_ratio = report.ratios.iter().find(|r| r.name == "scar_load");
-        assert!(scar_ratio.is_some(), "Homeostasis should have scar_load ratio");
+        assert!(
+            scar_ratio.is_some(),
+            "Homeostasis should have scar_load ratio"
+        );
         let scar = scar_ratio.unwrap();
-        assert!(scar.value > 0.0, "scar_load should be > 0, got {}", scar.value);
+        assert!(
+            scar.value > 0.0,
+            "scar_load should be > 0, got {}",
+            scar.value
+        );
     }
 
     /// Scenario 3: Global stagnation → deep maintenance
@@ -900,7 +930,12 @@ mod tests {
 
         // Low energy notes
         for i in 0..5 {
-            let mut note = Note::new(Some(project_id), NoteType::Observation, format!("Low {}", i), "test".into());
+            let mut note = Note::new(
+                Some(project_id),
+                NoteType::Observation,
+                format!("Low {}", i),
+                "test".into(),
+            );
             note.importance = NoteImportance::Low;
             note.tags = vec!["test".into()];
             note.energy = 0.1;
@@ -910,15 +945,27 @@ mod tests {
         // Detect stagnation
         let report = store.detect_global_stagnation(project_id).await.unwrap();
         assert!(report.is_stagnating, "Should detect stagnation");
-        assert!(report.signals_triggered >= 3, "Should have >= 3 signals, got {}", report.signals_triggered);
+        assert!(
+            report.signals_triggered >= 3,
+            "Should have >= 3 signals, got {}",
+            report.signals_triggered
+        );
         assert_eq!(report.tasks_completed_48h, 0);
-        assert!(report.avg_frustration > 0.6, "Avg frustration should be > 0.6, got {}", report.avg_frustration);
+        assert!(
+            report.avg_frustration > 0.6,
+            "Avg frustration should be > 0.6, got {}",
+            report.avg_frustration
+        );
 
         // Deep maintenance
         let config = SkillMaintenanceConfig::default();
         let deep = deep_maintenance(&store, project_id, &config).await.unwrap();
         assert!(deep.stagnation.is_stagnating);
-        assert!(deep.stuck_tasks_found >= 3, "Should find >= 3 stuck tasks, got {}", deep.stuck_tasks_found);
+        assert!(
+            deep.stuck_tasks_found >= 3,
+            "Should find >= 3 stuck tasks, got {}",
+            deep.stuck_tasks_found
+        );
         assert!(!deep.recommendations.is_empty());
     }
 
@@ -929,7 +976,12 @@ mod tests {
         let (project_id, _, _) = setup_project_with_tasks(&store, 3, 0, 0).await;
 
         for i in 0..5 {
-            let mut note = Note::new(Some(project_id), NoteType::Observation, format!("Note {}", i), "test".into());
+            let mut note = Note::new(
+                Some(project_id),
+                NoteType::Observation,
+                format!("Note {}", i),
+                "test".into(),
+            );
             note.importance = NoteImportance::Medium;
             note.tags = vec!["test".into()];
             note.energy = 0.8;
@@ -937,17 +989,25 @@ mod tests {
         }
 
         // Pre-snapshot
-        let before = store.compute_maintenance_snapshot(project_id).await.unwrap();
+        let before = store
+            .compute_maintenance_snapshot(project_id)
+            .await
+            .unwrap();
         assert_eq!(before.note_count, 5);
         assert!(before.mean_energy > 0.0);
 
         // Run tracked maintenance
         let config = SkillMaintenanceConfig::default();
-        let (result, report) = run_maintenance_with_tracking(&store, project_id, "hourly", &config).await.unwrap();
+        let (result, report) = run_maintenance_with_tracking(&store, project_id, "hourly", &config)
+            .await
+            .unwrap();
 
         assert_eq!(result.level, "hourly");
-        assert!(report.success_rate >= 0.0 && report.success_rate <= 1.0,
-            "success_rate should be in [0, 1], got {}", report.success_rate);
+        assert!(
+            report.success_rate >= 0.0 && report.success_rate <= 1.0,
+            "success_rate should be in [0, 1], got {}",
+            report.success_rate
+        );
     }
 
     /// Scenario 5: Scaffolding adapts to project health
@@ -959,16 +1019,32 @@ mod tests {
         let (project_id, _, _) = setup_project_with_tasks(&store, 18, 2, 0).await;
 
         for i in 0..3 {
-            let mut note = Note::new(Some(project_id), NoteType::Observation, format!("Healthy {}", i), "test".into());
+            let mut note = Note::new(
+                Some(project_id),
+                NoteType::Observation,
+                format!("Healthy {}", i),
+                "test".into(),
+            );
             note.importance = NoteImportance::Medium;
             note.tags = vec!["test".into()];
             note.energy = 0.9;
             store.create_note(&note).await.unwrap();
         }
 
-        let level = store.compute_scaffolding_level(project_id, None).await.unwrap();
-        assert!(level.task_success_rate >= 0.8, "Success rate should be >= 0.8, got {}", level.task_success_rate);
-        assert!(level.level >= 3, "Level should be >= 3 with high success, got L{}", level.level);
+        let level = store
+            .compute_scaffolding_level(project_id, None)
+            .await
+            .unwrap();
+        assert!(
+            level.task_success_rate >= 0.8,
+            "Success rate should be >= 0.8, got {}",
+            level.task_success_rate
+        );
+        assert!(
+            level.level >= 3,
+            "Level should be >= 3 with high success, got L{}",
+            level.level
+        );
         assert!(!level.is_overridden);
 
         // Degraded project: 2 completed, 8 failed + scars
@@ -979,7 +1055,10 @@ mod tests {
         let plan2 = test_plan_for_project(project2_id);
         let plan2_id = plan2.id;
         store.create_plan(&plan2).await.unwrap();
-        store.link_plan_to_project(plan2_id, project2_id).await.unwrap();
+        store
+            .link_plan_to_project(plan2_id, project2_id)
+            .await
+            .unwrap();
 
         for i in 0..2 {
             let mut t = test_task_titled(&format!("P2 OK {}", i));
@@ -995,7 +1074,12 @@ mod tests {
 
         let mut scar_ids = Vec::new();
         for i in 0..5 {
-            let mut note = Note::new(Some(project2_id), NoteType::Gotcha, format!("Scar {}", i), "test".into());
+            let mut note = Note::new(
+                Some(project2_id),
+                NoteType::Gotcha,
+                format!("Scar {}", i),
+                "test".into(),
+            );
             note.importance = NoteImportance::High;
             note.tags = vec!["test".into()];
             scar_ids.push(note.id);
@@ -1003,16 +1087,38 @@ mod tests {
         }
         store.apply_scars(&scar_ids, 0.9).await.unwrap();
 
-        let level2 = store.compute_scaffolding_level(project2_id, None).await.unwrap();
-        assert!(level2.task_success_rate <= 0.3, "Should be <= 0.3, got {}", level2.task_success_rate);
-        assert!(level2.level <= 1, "Should be <= L1 with low success + scars, got L{}", level2.level);
+        let level2 = store
+            .compute_scaffolding_level(project2_id, None)
+            .await
+            .unwrap();
+        assert!(
+            level2.task_success_rate <= 0.3,
+            "Should be <= 0.3, got {}",
+            level2.task_success_rate
+        );
+        assert!(
+            level2.level <= 1,
+            "Should be <= L1 with low success + scars, got L{}",
+            level2.level
+        );
 
         // Verify levels differ
-        assert!(level.level > level2.level, "Healthy L{} > degraded L{}", level.level, level2.level);
+        assert!(
+            level.level > level2.level,
+            "Healthy L{} > degraded L{}",
+            level.level,
+            level2.level
+        );
 
         // Test override
-        store.set_scaffolding_override(project2_id, Some(4)).await.unwrap();
-        let overridden = store.compute_scaffolding_level(project2_id, Some(4)).await.unwrap();
+        store
+            .set_scaffolding_override(project2_id, Some(4))
+            .await
+            .unwrap();
+        let overridden = store
+            .compute_scaffolding_level(project2_id, Some(4))
+            .await
+            .unwrap();
         assert_eq!(overridden.level, 4, "Override should force L4");
         assert!(overridden.is_overridden);
     }

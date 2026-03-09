@@ -2458,7 +2458,7 @@ mod tests {
                 last_synced: None,
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             ..Default::default()
         };
@@ -2488,7 +2488,7 @@ mod tests {
                 last_synced: None,
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             ..Default::default()
         };
@@ -2511,7 +2511,7 @@ mod tests {
                 last_synced: Some(Utc::now()),
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             language_stats: vec![LanguageStatsNode {
                 language: "Rust".into(),
@@ -2683,7 +2683,7 @@ mod tests {
                 last_synced: None,
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             sibling_projects: vec![
                 ProjectNode {
@@ -2696,7 +2696,7 @@ mod tests {
                     last_synced: None,
                     analytics_computed_at: None,
                     last_co_change_computed_at: None,
-            scaffolding_override: None,
+                    scaffolding_override: None,
                 },
                 ProjectNode {
                     id: uuid::Uuid::new_v4(),
@@ -2708,7 +2708,7 @@ mod tests {
                     last_synced: None,
                     analytics_computed_at: None,
                     last_co_change_computed_at: None,
-            scaffolding_override: None,
+                    scaffolding_override: None,
                 },
             ],
             ..Default::default()
@@ -2738,7 +2738,7 @@ mod tests {
                 last_synced: Some(Utc::now()),
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             workspace: Some(WorkspaceNode {
                 id: uuid::Uuid::new_v4(),
@@ -2760,7 +2760,7 @@ mod tests {
                     last_synced: None,
                     analytics_computed_at: None,
                     last_co_change_computed_at: None,
-            scaffolding_override: None,
+                    scaffolding_override: None,
                 },
                 ProjectNode {
                     id: uuid::Uuid::new_v4(),
@@ -2772,7 +2772,7 @@ mod tests {
                     last_synced: None,
                     analytics_computed_at: None,
                     last_co_change_computed_at: None,
-            scaffolding_override: None,
+                    scaffolding_override: None,
                 },
             ],
             ..Default::default()
@@ -2850,7 +2850,7 @@ mod tests {
                 last_synced: Some(Utc::now()),
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             global_guidelines: vec![{
                 let mut n = crate::notes::Note::new(
@@ -3084,7 +3084,7 @@ mod tests {
                 last_synced: Some(Utc::now()),
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             ..Default::default()
         };
@@ -3142,7 +3142,7 @@ mod tests {
                 last_synced: Some(Utc::now()),
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             feature_graphs: make_feature_graphs(3),
             ..Default::default()
@@ -3171,7 +3171,7 @@ mod tests {
                 last_synced: Some(Utc::now()),
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             ..Default::default()
         };
@@ -3208,7 +3208,7 @@ mod tests {
                 last_synced: Some(Utc::now()),
                 analytics_computed_at: None,
                 last_co_change_computed_at: None,
-            scaffolding_override: None,
+                scaffolding_override: None,
             }),
             feature_graphs: fgs,
             ..Default::default()

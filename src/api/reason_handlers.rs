@@ -235,10 +235,7 @@ pub async fn reason_feedback(
 
     // Biomimicry: Elun Knowledge Scars — apply negative reinforcement on failure
     if matches!(body.outcome, FeedbackOutcome::Failure) {
-        match neo4j
-            .apply_scars(&body.followed_nodes, 0.2)
-            .await
-        {
+        match neo4j.apply_scars(&body.followed_nodes, 0.2).await {
             Ok(count) => {
                 scars_applied = count;
                 tracing::info!(

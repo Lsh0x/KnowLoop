@@ -806,10 +806,21 @@ pub async fn search_decisions_semantic(
     // Apply Langevin thermal noise for stochastic exploration
     if let Some(temperature) = params.temperature {
         if temperature > 0.0 {
-            let mut scored: Vec<(DecisionSearchHit, f64)> =
-                results.into_iter().map(|h| { let s = h.score; (h, s) }).collect();
+            let mut scored: Vec<(DecisionSearchHit, f64)> = results
+                .into_iter()
+                .map(|h| {
+                    let s = h.score;
+                    (h, s)
+                })
+                .collect();
             add_thermal_noise(&mut scored, temperature);
-            results = scored.into_iter().map(|(mut h, s)| { h.score = s; h }).collect();
+            results = scored
+                .into_iter()
+                .map(|(mut h, s)| {
+                    h.score = s;
+                    h
+                })
+                .collect();
         }
     }
 

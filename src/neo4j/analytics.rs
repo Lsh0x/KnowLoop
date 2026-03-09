@@ -9,11 +9,31 @@ use uuid::Uuid;
 /// Map a scaffolding level (0-4) to its label and recommended steps description.
 pub fn level_info(level: u8) -> (u8, String, String) {
     match level {
-        0 => (0, "L0 — Reflexe".to_string(), "5+ steps détaillés avec snippets".to_string()),
-        1 => (1, "L1 — Associatif".to_string(), "3-4 steps guidés".to_string()),
-        2 => (2, "L2 — Contextuel".to_string(), "3-4 steps standard".to_string()),
-        3 => (3, "L3 — Stratégique".to_string(), "2 steps, autonomie élevée".to_string()),
-        _ => (4, "L4 — Méta-cognitif".to_string(), "1 step abstrait, libre décomposition".to_string()),
+        0 => (
+            0,
+            "L0 — Reflexe".to_string(),
+            "5+ steps détaillés avec snippets".to_string(),
+        ),
+        1 => (
+            1,
+            "L1 — Associatif".to_string(),
+            "3-4 steps guidés".to_string(),
+        ),
+        2 => (
+            2,
+            "L2 — Contextuel".to_string(),
+            "3-4 steps standard".to_string(),
+        ),
+        3 => (
+            3,
+            "L3 — Stratégique".to_string(),
+            "2 steps, autonomie élevée".to_string(),
+        ),
+        _ => (
+            4,
+            "L4 — Méta-cognitif".to_string(),
+            "1 step abstrait, libre décomposition".to_string(),
+        ),
     }
 }
 
@@ -216,10 +236,7 @@ impl Neo4jClient {
         });
 
         // WorldModel prediction accuracy (biomimicry T7)
-        let prediction_accuracy = self
-            .compute_prediction_accuracy(project_id, 10)
-            .await
-            .ok();
+        let prediction_accuracy = self.compute_prediction_accuracy(project_id, 10).await.ok();
 
         Ok(CodeHealthReport {
             god_functions,
@@ -440,10 +457,7 @@ impl Neo4jClient {
         .param("pid", project_id.to_string());
 
         // Execute in parallel
-        let (r1, r2) = tokio::join!(
-            self.execute_with_params(q1),
-            self.execute_with_params(q2),
-        );
+        let (r1, r2) = tokio::join!(self.execute_with_params(q1), self.execute_with_params(q2),);
 
         let (tasks_analyzed, task_success_rate, avg_frustration) = r1
             .ok()
@@ -619,13 +633,16 @@ impl Neo4jClient {
         }
         if commits_48h == 0 {
             signals += 1;
-            recommendations.push("No commits in 48h — project may be abandoned or blocked.".to_string());
+            recommendations
+                .push("No commits in 48h — project may be abandoned or blocked.".to_string());
         }
 
         let is_stagnating = signals >= 3;
 
         if is_stagnating {
-            recommendations.push("⚠️ Global stagnation detected — recommend running deep_maintenance.".to_string());
+            recommendations.push(
+                "⚠️ Global stagnation detected — recommend running deep_maintenance.".to_string(),
+            );
         }
 
         Ok(crate::neo4j::models::StagnationReport {
@@ -2438,11 +2455,11 @@ impl Neo4jClient {
 
         // Default target ranges (overridable via analysis_profile)
         let default_ranges: Vec<(&str, f64, f64)> = vec![
-            ("note_density", 0.3, 2.0),       // 0.3-2.0 notes per file
-            ("decision_coverage", 0.1, 0.8),   // 10-80% of files have decisions
-            ("synapse_health", 0.2, 3.0),      // 0.2-3.0 synapses per note
-            ("churn_balance", 0.3, 1.0),       // 30-100% hotspots covered
-            ("scar_load", 0.0, 0.15),          // 0-15% scarred nodes
+            ("note_density", 0.3, 2.0),      // 0.3-2.0 notes per file
+            ("decision_coverage", 0.1, 0.8), // 10-80% of files have decisions
+            ("synapse_health", 0.2, 3.0),    // 0.2-3.0 synapses per note
+            ("churn_balance", 0.3, 1.0),     // 30-100% hotspots covered
+            ("scar_load", 0.0, 0.15),        // 0-15% scarred nodes
         ];
 
         let get_range = |name: &str, default_min: f64, default_max: f64| -> (f64, f64) {
@@ -2474,8 +2491,17 @@ impl Neo4jClient {
         } else {
             0.0
         };
-        let (min, max) = get_range("decision_coverage", default_ranges[1].1, default_ranges[1].2);
-        ratios.push(Self::make_ratio("decision_coverage", decision_cov, min, max));
+        let (min, max) = get_range(
+            "decision_coverage",
+            default_ranges[1].1,
+            default_ranges[1].2,
+        );
+        ratios.push(Self::make_ratio(
+            "decision_coverage",
+            decision_cov,
+            min,
+            max,
+        ));
 
         // 3. Synapse health
         let synapse_ratio = if note_count > 0 {

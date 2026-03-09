@@ -2213,9 +2213,7 @@ impl ToolHandler {
             "heal_scars" => {
                 let node_id = extract_string(args, "node_id")?;
                 let body = json!({"node_id": node_id});
-                let result = http
-                    .post("/api/notes/neurons/heal-scars", &body)
-                    .await?;
+                let result = http.post("/api/notes/neurons/heal-scars", &body).await?;
                 Ok(Some(result))
             }
 
@@ -3316,9 +3314,7 @@ impl ToolHandler {
             "get_homeostasis" => {
                 let project_slug = extract_string(args, "project_slug")?;
                 let query = vec![("project_slug".to_string(), project_slug)];
-                let result = http
-                    .get_with_query("/api/code/homeostasis", &query)
-                    .await?;
+                let result = http.get_with_query("/api/code/homeostasis", &query).await?;
                 Ok(Some(result))
             }
 

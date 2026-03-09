@@ -575,10 +575,7 @@ impl GraphStore for MockGraphStore {
         Ok(None)
     }
 
-    async fn compute_coupling_matrix(
-        &self,
-        workspace_id: Uuid,
-    ) -> Result<CouplingMatrix> {
+    async fn compute_coupling_matrix(&self, workspace_id: Uuid) -> Result<CouplingMatrix> {
         let projects = self.list_workspace_projects(workspace_id).await?;
         Ok(CouplingMatrix {
             workspace_id,
@@ -2408,21 +2405,36 @@ impl GraphStore for MockGraphStore {
     ) -> Result<crate::neo4j::models::MaintenanceSnapshot> {
         use chrono::Utc;
         let notes = self.notes.read().await;
-        let active_notes = notes.values().filter(|n| n.status == crate::notes::NoteStatus::Active).count();
+        let active_notes = notes
+            .values()
+            .filter(|n| n.status == crate::notes::NoteStatus::Active)
+            .count();
         let mean_energy = if active_notes > 0 {
-            notes.values()
+            notes
+                .values()
                 .filter(|n| n.status == crate::notes::NoteStatus::Active)
                 .map(|n| n.energy)
-                .sum::<f64>() / active_notes as f64
+                .sum::<f64>()
+                / active_notes as f64
         } else {
             0.5
         };
         let skills = self.skills.read().await;
-        let skill_count = skills.values()
-            .filter(|s| matches!(s.status, crate::skills::models::SkillStatus::Active | crate::skills::models::SkillStatus::Emerging))
+        let skill_count = skills
+            .values()
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    crate::skills::models::SkillStatus::Active
+                        | crate::skills::models::SkillStatus::Emerging
+                )
+            })
             .count();
         let synapses = self.note_synapses.read().await;
-        let active_synapses: usize = synapses.values().map(|v| v.iter().filter(|(_, w)| *w > 0.0).count()).sum();
+        let active_synapses: usize = synapses
+            .values()
+            .map(|v| v.iter().filter(|(_, w)| *w > 0.0).count())
+            .sum();
         Ok(crate::neo4j::models::MaintenanceSnapshot {
             health_score: 0.8,
             active_synapses: active_synapses as i64,
@@ -2481,8 +2493,11 @@ impl GraphStore for MockGraphStore {
 
         // Scar density from notes
         let notes = self.notes.read().await;
-        let project_notes: Vec<_> = notes.values()
-            .filter(|n| n.project_id == Some(project_id) && n.status == crate::notes::NoteStatus::Active)
+        let project_notes: Vec<_> = notes
+            .values()
+            .filter(|n| {
+                n.project_id == Some(project_id) && n.status == crate::notes::NoteStatus::Active
+            })
             .collect();
         let scar_density = if !project_notes.is_empty() {
             project_notes.iter().map(|n| n.scar_intensity).sum::<f64>() / project_notes.len() as f64
@@ -2530,11 +2545,7 @@ impl GraphStore for MockGraphStore {
         })
     }
 
-    async fn set_scaffolding_override(
-        &self,
-        project_id: Uuid,
-        level: Option<u8>,
-    ) -> Result<()> {
+    async fn set_scaffolding_override(&self, project_id: Uuid, level: Option<u8>) -> Result<()> {
         let mut projects = self.projects.write().await;
         if let Some(p) = projects.get_mut(&project_id) {
             p.scaffolding_override = level.map(|l| l.min(4));
@@ -5857,27 +5868,31 @@ impl GraphStore for MockGraphStore {
         project_id: Uuid,
         _custom_ranges: Option<&[(String, f64, f64)]>,
     ) -> Result<crate::neo4j::models::HomeostasisReport> {
-        use crate::neo4j::models::{HomeostasisReport, HomeostasisRatio, HomeostasisSeverity};
+        use crate::neo4j::models::{HomeostasisRatio, HomeostasisReport, HomeostasisSeverity};
 
         let notes = self.notes.read().await;
-        let project_notes: Vec<_> = notes.values()
-            .filter(|n| n.project_id == Some(project_id) && n.status == crate::notes::NoteStatus::Active)
+        let project_notes: Vec<_> = notes
+            .values()
+            .filter(|n| {
+                n.project_id == Some(project_id) && n.status == crate::notes::NoteStatus::Active
+            })
             .collect();
 
         let total = project_notes.len() as f64;
-        let scarred = project_notes.iter().filter(|n| n.scar_intensity > 0.0).count() as f64;
+        let scarred = project_notes
+            .iter()
+            .filter(|n| n.scar_intensity > 0.0)
+            .count() as f64;
         let scar_load = if total > 0.0 { scarred / total } else { 0.0 };
 
-        let mut ratios = vec![
-            HomeostasisRatio {
-                name: "note_density".to_string(),
-                value: total.max(1.0),
-                target_range: (0.3, 2.0),
-                distance_to_equilibrium: 0.0,
-                severity: HomeostasisSeverity::Ok,
-                recommendation: None,
-            },
-        ];
+        let mut ratios = vec![HomeostasisRatio {
+            name: "note_density".to_string(),
+            value: total.max(1.0),
+            target_range: (0.3, 2.0),
+            distance_to_equilibrium: 0.0,
+            severity: HomeostasisSeverity::Ok,
+            recommendation: None,
+        }];
 
         // Add scar_load ratio if there are scarred notes
         let scar_severity = if scar_load > 0.5 {
@@ -5891,7 +5906,11 @@ impl GraphStore for MockGraphStore {
             name: "scar_load".to_string(),
             value: scar_load,
             target_range: (0.0, 0.2),
-            distance_to_equilibrium: if scar_load > 0.2 { scar_load - 0.2 } else { 0.0 },
+            distance_to_equilibrium: if scar_load > 0.2 {
+                scar_load - 0.2
+            } else {
+                0.0
+            },
             severity: scar_severity,
             recommendation: if scar_load > 0.2 {
                 Some("High scar density — consider reviewing scarred notes".to_string())
@@ -5900,7 +5919,10 @@ impl GraphStore for MockGraphStore {
             },
         });
 
-        let pain_score = ratios.iter().map(|r| r.distance_to_equilibrium).sum::<f64>()
+        let pain_score = ratios
+            .iter()
+            .map(|r| r.distance_to_equilibrium)
+            .sum::<f64>()
             / ratios.len() as f64;
 
         Ok(HomeostasisReport {

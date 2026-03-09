@@ -874,7 +874,15 @@ impl NoteManager {
         force_cross_project: bool,
     ) -> Result<Vec<PropagatedNote>> {
         self.neo4j
-            .get_propagated_notes(entity_type, entity_id, max_depth, min_score, relation_types, source_project_id, force_cross_project)
+            .get_propagated_notes(
+                entity_type,
+                entity_id,
+                max_depth,
+                min_score,
+                relation_types,
+                source_project_id,
+                force_cross_project,
+            )
             .await
     }
 
@@ -895,7 +903,15 @@ impl NoteManager {
         // Get propagated notes from graph traversal (default relations)
         let mut propagated_notes = self
             .neo4j
-            .get_propagated_notes(entity_type, entity_id, max_depth, min_score, None, None, false)
+            .get_propagated_notes(
+                entity_type,
+                entity_id,
+                max_depth,
+                min_score,
+                None,
+                None,
+                false,
+            )
             .await?;
 
         // If entity is a Project, also get workspace-level notes

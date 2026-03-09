@@ -565,10 +565,7 @@ fn protected_routes() -> Router<OrchestratorState> {
             "/api/code/risk-assessment",
             get(code_handlers::get_risk_assessment),
         )
-        .route(
-            "/api/code/homeostasis",
-            get(code_handlers::get_homeostasis),
-        )
+        .route("/api/code/homeostasis", get(code_handlers::get_homeostasis))
         .route(
             "/api/code/structural-drift",
             get(code_handlers::get_structural_drift),
@@ -1050,8 +1047,14 @@ fn protected_routes() -> Router<OrchestratorState> {
             post(handlers::reinforce_isomorphic_synapses),
         )
         .route("/api/admin/detect-skills", post(handlers::detect_skills))
-        .route("/api/admin/detect-skill-fission", post(handlers::detect_skill_fission))
-        .route("/api/admin/detect-skill-fusion", post(handlers::detect_skill_fusion))
+        .route(
+            "/api/admin/detect-skill-fission",
+            post(handlers::detect_skill_fission),
+        )
+        .route(
+            "/api/admin/detect-skill-fusion",
+            post(handlers::detect_skill_fusion),
+        )
         .route(
             "/api/admin/auto-anchor-notes",
             post(handlers::auto_anchor_notes),

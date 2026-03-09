@@ -1605,16 +1605,16 @@ impl ImplementationPlanner {
             } else {
                 for modification in &phase.modifications {
                     // L0-L1: add per-symbol sub-steps for extra guidance
-                    let desc = if scaffolding_level <= 1 && !modification.symbols_affected.is_empty()
-                    {
-                        format!(
-                            "{} — symbols to update: {}",
-                            modification.reason,
-                            modification.symbols_affected.join(", ")
-                        )
-                    } else {
-                        modification.reason.clone()
-                    };
+                    let desc =
+                        if scaffolding_level <= 1 && !modification.symbols_affected.is_empty() {
+                            format!(
+                                "{} — symbols to update: {}",
+                                modification.reason,
+                                modification.symbols_affected.join(", ")
+                            )
+                        } else {
+                            modification.reason.clone()
+                        };
                     let step = StepNodeModel {
                         id: Uuid::new_v4(),
                         order: step_order,
@@ -1754,7 +1754,12 @@ impl ImplementationPlanner {
         // Step 7: Auto-create Plan MCP if requested
         if request.auto_create_plan == Some(true) {
             match self
-                .auto_create_plan(&plan, request.project_id, &request.description, scaffolding_level)
+                .auto_create_plan(
+                    &plan,
+                    request.project_id,
+                    &request.description,
+                    scaffolding_level,
+                )
                 .await
             {
                 Ok(plan_id) => {

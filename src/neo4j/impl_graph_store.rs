@@ -1749,8 +1749,16 @@ impl GraphStore for Neo4jClient {
         source_project_id: Option<Uuid>,
         force_cross_project: bool,
     ) -> anyhow::Result<Vec<PropagatedNote>> {
-        self.get_propagated_notes(entity_type, entity_id, max_depth, min_score, relation_types, source_project_id, force_cross_project)
-            .await
+        self.get_propagated_notes(
+            entity_type,
+            entity_id,
+            max_depth,
+            min_score,
+            relation_types,
+            source_project_id,
+            force_cross_project,
+        )
+        .await
     }
 
     async fn get_workspace_notes_for_project(

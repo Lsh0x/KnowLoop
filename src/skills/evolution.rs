@@ -397,11 +397,8 @@ pub async fn detect_skill_fission(
     let edges = graph_store
         .get_synapse_graph(project_id, config.min_synapse_weight)
         .await?;
-    let detection = crate::skills::detection::detect_skill_candidates(
-        &edges,
-        &project_id.to_string(),
-        &config,
-    );
+    let detection =
+        crate::skills::detection::detect_skill_candidates(&edges, &project_id.to_string(), &config);
 
     if detection.status == crate::skills::detection::ClusterDetectionStatus::InsufficientData {
         return Ok(Vec::new());
@@ -1130,10 +1127,7 @@ mod tests {
         let skill_b = Uuid::new_v4();
         let members_a: Vec<String> = (0..12).map(|i| format!("a{}", i)).collect();
         let members_b: Vec<String> = (0..12).map(|i| format!("b{}", i)).collect();
-        let existing = vec![
-            (skill_a, members_a.clone()),
-            (skill_b, members_b.clone()),
-        ];
+        let existing = vec![(skill_a, members_a.clone()), (skill_b, members_b.clone())];
         // Single candidate overlapping heavily with both
         let mut all_members: Vec<&str> = members_a.iter().map(|s| s.as_str()).collect();
         all_members.extend(members_b.iter().map(|s| s.as_str()));
@@ -1145,7 +1139,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, SkillEvolution::Merge { .. }))
             .count();
-        assert_eq!(merge_count, 0, "Should not merge when combined members > 20");
+        assert_eq!(
+            merge_count, 0,
+            "Should not merge when combined members > 20"
+        );
     }
 
     #[test]

@@ -691,7 +691,9 @@ impl Neo4jClient {
 
         let twins: f64 = match self.graph.execute(twins_q).await {
             Ok(mut r) => match r.next().await {
-                Ok(Some(row)) => (row.get::<i64>("cnt").unwrap_or(0) as f64).min(MAX_TWINS) / MAX_TWINS,
+                Ok(Some(row)) => {
+                    (row.get::<i64>("cnt").unwrap_or(0) as f64).min(MAX_TWINS) / MAX_TWINS
+                }
                 _ => 0.0,
             },
             _ => 0.0,
@@ -734,7 +736,9 @@ impl Neo4jClient {
 
         let shared_notes: f64 = match self.graph.execute(notes_q).await {
             Ok(mut r) => match r.next().await {
-                Ok(Some(row)) => (row.get::<i64>("cnt").unwrap_or(0) as f64).min(MAX_NOTES) / MAX_NOTES,
+                Ok(Some(row)) => {
+                    (row.get::<i64>("cnt").unwrap_or(0) as f64).min(MAX_NOTES) / MAX_NOTES
+                }
                 _ => 0.0,
             },
             _ => 0.0,
@@ -769,7 +773,8 @@ impl Neo4jClient {
             _ => 0.0,
         };
 
-        let coupling = W_TWINS * twins + W_SKILLS * skills + W_NOTES * shared_notes + W_TAGS * tag_overlap;
+        let coupling =
+            W_TWINS * twins + W_SKILLS * skills + W_NOTES * shared_notes + W_TAGS * tag_overlap;
         Ok(coupling)
     }
 
@@ -977,7 +982,8 @@ impl Neo4jClient {
         // If source_project_id is set, weight notes from other projects by coupling_strength.
         // Projects with coupling < 0.2 are suppressed unless force_cross_project is true.
         if let Some(src_pid) = source_project_id {
-            let mut coupling_cache: std::collections::HashMap<Uuid, f64> = std::collections::HashMap::new();
+            let mut coupling_cache: std::collections::HashMap<Uuid, f64> =
+                std::collections::HashMap::new();
             let mut filtered_notes = Vec::with_capacity(propagated_notes.len());
 
             for mut pn in propagated_notes {
@@ -988,7 +994,10 @@ impl Neo4jClient {
                         let coupling = match coupling_cache.get(&pid) {
                             Some(&c) => c,
                             None => {
-                                let c = self.get_pairwise_coupling(src_pid, pid).await.unwrap_or(0.0);
+                                let c = self
+                                    .get_pairwise_coupling(src_pid, pid)
+                                    .await
+                                    .unwrap_or(0.0);
                                 coupling_cache.insert(pid, c);
                                 c
                             }
@@ -2117,7 +2126,11 @@ impl Neo4jClient {
                 if let Ok(Some(row)) = result.next().await {
                     let healed: i64 = row.get("healed").unwrap_or(0);
                     if healed > 0 {
-                        tracing::debug!("Decayed scars on {} nodes (rate: {:.4})", healed, scar_decay_rate);
+                        tracing::debug!(
+                            "Decayed scars on {} nodes (rate: {:.4})",
+                            healed,
+                            scar_decay_rate
+                        );
                     }
                 }
             }

@@ -1525,10 +1525,7 @@ impl Neo4jClient {
     /// 4. Tag overlap: Jaccard similarity of note tags between projects
     ///
     /// Combined into `coupling_strength ∈ [0, 1]` via weighted average.
-    pub async fn compute_coupling_matrix(
-        &self,
-        workspace_id: Uuid,
-    ) -> Result<CouplingMatrix> {
+    pub async fn compute_coupling_matrix(&self, workspace_id: Uuid) -> Result<CouplingMatrix> {
         use std::collections::HashSet;
 
         // Weights for each signal (sum = 1.0)

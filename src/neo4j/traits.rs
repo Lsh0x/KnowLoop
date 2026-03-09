@@ -658,11 +658,7 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<crate::neo4j::models::ScaffoldingLevel>;
 
     /// Set or clear the scaffolding level override on a project (biomimicry T8).
-    async fn set_scaffolding_override(
-        &self,
-        project_id: Uuid,
-        level: Option<u8>,
-    ) -> Result<()>;
+    async fn set_scaffolding_override(&self, project_id: Uuid, level: Option<u8>) -> Result<()>;
 
     /// Detect global stagnation across a project (biomimicry T12).
     async fn detect_global_stagnation(

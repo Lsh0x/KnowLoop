@@ -236,8 +236,11 @@ impl SpreadingActivationEngine {
 
                     // Calculate spread score with scar penalty (biomimicry: Elun Scar)
                     let scar_penalty = 1.0 - neighbor_note.scar_intensity * 0.7;
-                    let spread_score =
-                        parent_activation * synapse_weight * neighbor_energy * config.decay_per_hop * scar_penalty;
+                    let spread_score = parent_activation
+                        * synapse_weight
+                        * neighbor_energy
+                        * config.decay_per_hop
+                        * scar_penalty;
 
                     // Skip if below threshold
                     if spread_score < config.min_activation {

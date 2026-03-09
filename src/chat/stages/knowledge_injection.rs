@@ -294,10 +294,10 @@ impl KnowledgeInjectionStage {
                     .get_propagated_notes(
                         &NoteEntityType::File,
                         file_path,
-                        2,    // max_depth
-                        0.3,  // min_score
-                        None, // all relation types
-                        None, // source_project_id (no cross-project filtering in chat)
+                        2,     // max_depth
+                        0.3,   // min_score
+                        None,  // all relation types
+                        None,  // source_project_id (no cross-project filtering in chat)
                         false, // force_cross_project
                     )
                     .await

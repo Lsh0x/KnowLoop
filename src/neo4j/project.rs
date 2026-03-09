@@ -190,11 +190,7 @@ impl Neo4jClient {
 
     /// Set or clear the scaffolding level override on a project (biomimicry T8).
     /// Pass None to clear the override and return to auto-computed level.
-    pub async fn set_scaffolding_override(
-        &self,
-        id: Uuid,
-        level: Option<u8>,
-    ) -> Result<()> {
+    pub async fn set_scaffolding_override(&self, id: Uuid, level: Option<u8>) -> Result<()> {
         let q = if let Some(lvl) = level {
             query("MATCH (p:Project {id: $id}) SET p.scaffolding_override = $level")
                 .param("id", id.to_string())
