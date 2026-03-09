@@ -125,6 +125,13 @@ impl GraphStore for Neo4jClient {
         self.get_project_workspace(project_id).await
     }
 
+    async fn compute_coupling_matrix(
+        &self,
+        workspace_id: Uuid,
+    ) -> anyhow::Result<crate::neo4j::models::CouplingMatrix> {
+        self.compute_coupling_matrix(workspace_id).await
+    }
+
     // ========================================================================
     // Workspace Milestone operations
     // ========================================================================
@@ -1708,8 +1715,10 @@ impl GraphStore for Neo4jClient {
         max_depth: u32,
         min_score: f64,
         relation_types: Option<&[String]>,
+        source_project_id: Option<Uuid>,
+        force_cross_project: bool,
     ) -> anyhow::Result<Vec<PropagatedNote>> {
-        self.get_propagated_notes(entity_type, entity_id, max_depth, min_score, relation_types)
+        self.get_propagated_notes(entity_type, entity_id, max_depth, min_score, relation_types, source_project_id, force_cross_project)
             .await
     }
 

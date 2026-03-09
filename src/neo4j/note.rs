@@ -657,6 +657,122 @@ impl Neo4jClient {
         Ok(notes)
     }
 
+    /// Compute pairwise coupling strength between two projects.
+    /// Returns a value in [0.0, 1.0] based on 4 signals:
+    /// structural twins, imported skills, shared notes, tag overlap.
+    /// Used to weight cross-project note propagation (biomimicry P2P coupling).
+    async fn get_pairwise_coupling(&self, project_a_id: Uuid, project_b_id: Uuid) -> Result<f64> {
+        if project_a_id == project_b_id {
+            return Ok(1.0);
+        }
+
+        const W_TWINS: f64 = 0.35;
+        const W_SKILLS: f64 = 0.25;
+        const W_NOTES: f64 = 0.20;
+        const W_TAGS: f64 = 0.20;
+        const MAX_TWINS: f64 = 20.0;
+        const MAX_SKILLS: f64 = 10.0;
+        const MAX_NOTES: f64 = 50.0;
+
+        let a = project_a_id.to_string();
+        let b = project_b_id.to_string();
+
+        // Signal 1: Structural twins (files with same WL hash)
+        let twins_q = query(
+            r#"
+            MATCH (pa:Project {id: $a})-[:CONTAINS]->(fa:File)
+            MATCH (pb:Project {id: $b})-[:CONTAINS]->(fb:File)
+            WHERE fa.wl_hash IS NOT NULL AND fa.wl_hash = fb.wl_hash
+            RETURN count(DISTINCT fa) AS cnt
+            "#,
+        )
+        .param("a", a.clone())
+        .param("b", b.clone());
+
+        let twins: f64 = match self.graph.execute(twins_q).await {
+            Ok(mut r) => match r.next().await {
+                Ok(Some(row)) => (row.get::<i64>("cnt").unwrap_or(0) as f64).min(MAX_TWINS) / MAX_TWINS,
+                _ => 0.0,
+            },
+            _ => 0.0,
+        };
+
+        // Signal 2: Imported skills (skills exported from one, imported in the other)
+        let skills_q = query(
+            r#"
+            MATCH (sa:Skill {project_id: $a})-[:IMPORTED_FROM]->(sb:Skill {project_id: $b})
+            RETURN count(sa) AS cnt
+            UNION ALL
+            MATCH (sb2:Skill {project_id: $b})-[:IMPORTED_FROM]->(sa2:Skill {project_id: $a})
+            RETURN count(sb2) AS cnt
+            "#,
+        )
+        .param("a", a.clone())
+        .param("b", b.clone());
+
+        let skills: f64 = match self.graph.execute(skills_q).await {
+            Ok(mut r) => {
+                let mut total = 0i64;
+                while let Ok(Some(row)) = r.next().await {
+                    total += row.get::<i64>("cnt").unwrap_or(0);
+                }
+                (total as f64).min(MAX_SKILLS) / MAX_SKILLS
+            }
+            _ => 0.0,
+        };
+
+        // Signal 3: Shared notes (notes linked to entities in both projects)
+        let notes_q = query(
+            r#"
+            MATCH (n:Note)-[:LINKED_TO]->(ea)<-[:CONTAINS]-(pa:Project {id: $a})
+            MATCH (n)-[:LINKED_TO]->(eb)<-[:CONTAINS]-(pb:Project {id: $b})
+            RETURN count(DISTINCT n) AS cnt
+            "#,
+        )
+        .param("a", a.clone())
+        .param("b", b.clone());
+
+        let shared_notes: f64 = match self.graph.execute(notes_q).await {
+            Ok(mut r) => match r.next().await {
+                Ok(Some(row)) => (row.get::<i64>("cnt").unwrap_or(0) as f64).min(MAX_NOTES) / MAX_NOTES,
+                _ => 0.0,
+            },
+            _ => 0.0,
+        };
+
+        // Signal 4: Tag overlap (Jaccard similarity of note tags)
+        let tags_q = query(
+            r#"
+            MATCH (na:Note {project_id: $a}) WHERE na.tags IS NOT NULL
+            WITH collect(na.tags) AS a_tags_raw
+            WITH reduce(s = [], t IN a_tags_raw | s + t) AS a_tags_flat
+            WITH apoc.coll.toSet(a_tags_flat) AS a_tags
+            MATCH (nb:Note {project_id: $b}) WHERE nb.tags IS NOT NULL
+            WITH a_tags, collect(nb.tags) AS b_tags_raw
+            WITH a_tags, reduce(s = [], t IN b_tags_raw | s + t) AS b_tags_flat
+            WITH a_tags, apoc.coll.toSet(b_tags_flat) AS b_tags
+            WITH a_tags, b_tags,
+                 [t IN a_tags WHERE t IN b_tags] AS intersection
+            RETURN CASE WHEN size(a_tags) + size(b_tags) - size(intersection) = 0 THEN 0.0
+                        ELSE toFloat(size(intersection)) / (size(a_tags) + size(b_tags) - size(intersection))
+                   END AS jaccard
+            "#,
+        )
+        .param("a", a)
+        .param("b", b);
+
+        let tag_overlap: f64 = match self.graph.execute(tags_q).await {
+            Ok(mut r) => match r.next().await {
+                Ok(Some(row)) => row.get::<f64>("jaccard").unwrap_or(0.0),
+                _ => 0.0,
+            },
+            _ => 0.0,
+        };
+
+        let coupling = W_TWINS * twins + W_SKILLS * skills + W_NOTES * shared_notes + W_TAGS * tag_overlap;
+        Ok(coupling)
+    }
+
     /// Get propagated notes for an entity (traversing the graph)
     /// Whitelist of relation types allowed in propagation traversal.
     /// Prevents Cypher injection via user-supplied relation_types parameter.
@@ -685,6 +801,8 @@ impl Neo4jClient {
         max_depth: u32,
         min_score: f64,
         relation_types: Option<&[String]>,
+        source_project_id: Option<Uuid>,
+        force_cross_project: bool,
     ) -> Result<Vec<PropagatedNote>> {
         let node_label = match entity_type {
             EntityType::Project => "Project",
@@ -853,6 +971,62 @@ impl Neo4jClient {
                 relation_path,
                 path_rel_weight,
             });
+        }
+
+        // Cross-project coupling weighting (biomimicry P2P coupling)
+        // If source_project_id is set, weight notes from other projects by coupling_strength.
+        // Projects with coupling < 0.2 are suppressed unless force_cross_project is true.
+        if let Some(src_pid) = source_project_id {
+            let mut coupling_cache: std::collections::HashMap<Uuid, f64> = std::collections::HashMap::new();
+            let mut filtered_notes = Vec::with_capacity(propagated_notes.len());
+
+            for mut pn in propagated_notes {
+                let note_pid = pn.note.project_id;
+                match note_pid {
+                    Some(pid) if pid != src_pid => {
+                        // Cross-project note — look up coupling (cached per foreign project)
+                        let coupling = match coupling_cache.get(&pid) {
+                            Some(&c) => c,
+                            None => {
+                                let c = self.get_pairwise_coupling(src_pid, pid).await.unwrap_or(0.0);
+                                coupling_cache.insert(pid, c);
+                                c
+                            }
+                        };
+
+                        if coupling < 0.2 && !force_cross_project {
+                            // Suppress low-coupling cross-project propagation
+                            tracing::debug!(
+                                note_id = %pn.note.id,
+                                source_project = %src_pid,
+                                note_project = %pid,
+                                coupling,
+                                "Suppressed cross-project note propagation (coupling < 0.2)"
+                            );
+                            continue;
+                        }
+
+                        // Weight the score by coupling strength
+                        pn.relevance_score *= coupling;
+                        if pn.relevance_score >= min_score {
+                            filtered_notes.push(pn);
+                        }
+                    }
+                    _ => {
+                        // Same project or global note — keep as-is
+                        filtered_notes.push(pn);
+                    }
+                }
+            }
+
+            // Re-sort after weighting
+            filtered_notes.sort_by(|a, b| {
+                b.relevance_score
+                    .partial_cmp(&a.relevance_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            return Ok(filtered_notes);
         }
 
         Ok(propagated_notes)

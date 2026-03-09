@@ -106,6 +106,12 @@ pub trait GraphStore: Send + Sync {
     /// Get the workspace a project belongs to
     async fn get_project_workspace(&self, project_id: Uuid) -> Result<Option<WorkspaceNode>>;
 
+    /// Compute the P2P coupling matrix for all projects in a workspace.
+    async fn compute_coupling_matrix(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<crate::neo4j::models::CouplingMatrix>;
+
     // ========================================================================
     // Workspace Milestone operations
     // ========================================================================
@@ -1346,6 +1352,8 @@ pub trait GraphStore: Send + Sync {
         max_depth: u32,
         min_score: f64,
         relation_types: Option<&[String]>,
+        source_project_id: Option<Uuid>,
+        force_cross_project: bool,
     ) -> Result<Vec<PropagatedNote>>;
 
     /// Get workspace-level notes for a project (propagated from parent workspace)

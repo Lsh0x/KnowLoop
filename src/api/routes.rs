@@ -1162,6 +1162,10 @@ fn protected_routes() -> Router<OrchestratorState> {
             "/api/workspaces/{slug}/topology",
             get(workspace_handlers::get_workspace_topology),
         )
+        .route(
+            "/api/workspaces/{slug}/coupling-matrix",
+            get(workspace_handlers::get_coupling_matrix),
+        )
         // Workspace Intelligence (aggregated graph + summary)
         .route(
             "/api/workspaces/{slug}/graph",

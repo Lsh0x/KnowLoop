@@ -218,6 +218,7 @@ impl ToolHandler {
             ("workspace", "add_project") => "add_project_to_workspace",
             ("workspace", "remove_project") => "remove_project_from_workspace",
             ("workspace", "get_topology") => "get_workspace_topology",
+            ("workspace", "get_coupling_matrix") => "get_coupling_matrix",
 
             // Workspace Milestone
             ("workspace_milestone", "list_all") => "list_all_workspace_milestones",
@@ -1859,6 +1860,13 @@ impl ToolHandler {
                 if let Some(v) = args.get("relation_types").and_then(|v| v.as_str()) {
                     query.push(("relation_types".to_string(), v.to_string()));
                 }
+                // P2P coupling: cross-project weighting params
+                if let Some(v) = args.get("source_project_id").and_then(|v| v.as_str()) {
+                    query.push(("source_project_id".to_string(), v.to_string()));
+                }
+                if let Some(v) = args.get("force_cross_project").and_then(|v| v.as_bool()) {
+                    query.push(("force_cross_project".to_string(), v.to_string()));
+                }
                 let result = http.get_with_query("/api/notes/propagated", &query).await?;
                 Ok(Some(result))
             }
@@ -2290,6 +2298,14 @@ impl ToolHandler {
                 let slug = extract_string(args, "slug")?;
                 let result = http
                     .get(&format!("/api/workspaces/{}/topology", slug))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "get_coupling_matrix" => {
+                let slug = extract_string(args, "slug")?;
+                let result = http
+                    .get(&format!("/api/workspaces/{}/coupling-matrix", slug))
                     .await?;
                 Ok(Some(result))
             }

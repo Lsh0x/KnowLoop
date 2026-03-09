@@ -101,6 +101,11 @@ pub struct ContextNotesQuery {
     /// E.g. "CONTAINS,IMPORTS,CALLS,CO_CHANGED,IMPLEMENTS_TRAIT"
     /// If absent, defaults to CONTAINS|IMPORTS|CALLS (backward compatible).
     pub relation_types: Option<String>,
+    /// Source project UUID for cross-project coupling weighting.
+    /// When set, notes from other projects are weighted by P2P coupling strength.
+    pub source_project_id: Option<Uuid>,
+    /// Force cross-project propagation even when coupling < 0.2
+    pub force_cross_project: Option<bool>,
 }
 
 // ============================================================================
@@ -487,6 +492,8 @@ pub async fn get_propagated_notes(
             query.max_depth.unwrap_or(3),
             query.min_score.unwrap_or(0.1),
             relation_types.as_deref(),
+            query.source_project_id,
+            query.force_cross_project.unwrap_or(false),
         )
         .await?;
 

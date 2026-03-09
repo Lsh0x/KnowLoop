@@ -620,6 +620,8 @@ fn note_tool() -> ToolDefinition {
                 "entity_id": {"type": "string", "description": "Entity identifier (link_to_entity/unlink_from_entity/get_context/get_entity)"},
                 "slug": {"type": "string", "description": "Project slug (list_project/get_propagated)"},
                 "file_path": {"type": "string", "description": "File path (get_propagated)"},
+                "source_project_id": {"type": "string", "description": "Source project UUID for cross-project coupling weighting (get_propagated)"},
+                "force_cross_project": {"type": "boolean", "description": "Force cross-project propagation even when coupling < 0.2 (get_propagated, default false)"},
                 "limit": {"type": "integer", "description": "Max items"},
                 "offset": {"type": "integer", "description": "Skip items"},
                 "temperature": {"type": "number", "description": "Thermal noise 0.0-1.0 for stochastic exploration (search_semantic, default 0 = deterministic)"}
@@ -632,7 +634,7 @@ fn note_tool() -> ToolDefinition {
 fn workspace_tool() -> ToolDefinition {
     ToolDefinition {
         name: "workspace".to_string(),
-        description: "Manage workspaces. Actions: list, create, get, update, delete, get_overview, list_projects, add_project, remove_project, get_topology".to_string(),
+        description: "Manage workspaces. Actions: list, create, get, update, delete, get_overview, list_projects, add_project, remove_project, get_topology, get_coupling_matrix".to_string(),
         input_schema: InputSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({

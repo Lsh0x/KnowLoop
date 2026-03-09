@@ -575,6 +575,18 @@ impl GraphStore for MockGraphStore {
         Ok(None)
     }
 
+    async fn compute_coupling_matrix(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<CouplingMatrix> {
+        let projects = self.list_workspace_projects(workspace_id).await?;
+        Ok(CouplingMatrix {
+            workspace_id,
+            entries: Vec::new(),
+            project_count: projects.len(),
+        })
+    }
+
     // ========================================================================
     // Workspace Milestone operations
     // ========================================================================
@@ -5035,6 +5047,8 @@ impl GraphStore for MockGraphStore {
         _max_depth: u32,
         _min_score: f64,
         _relation_types: Option<&[String]>,
+        _source_project_id: Option<Uuid>,
+        _force_cross_project: bool,
     ) -> Result<Vec<PropagatedNote>> {
         // Simplified: propagation requires graph traversal; return empty
         Ok(vec![])

@@ -1183,6 +1183,51 @@ pub struct StructuralDriftReport {
     pub critical_count: usize,
 }
 
+// ============================================================================
+// P2P Coupling (Biomimicry — inter-project influence field)
+// ============================================================================
+
+/// Coupling breakdown between two projects — 4 signals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CouplingSignals {
+    /// Number of structural twins (files with similar fingerprints) across the two projects.
+    pub structural_twins: usize,
+    /// Number of skills imported from one project to the other.
+    pub imported_skills: usize,
+    /// Number of notes shared/propagated between projects.
+    pub shared_notes: usize,
+    /// Jaccard overlap of note tags between the two projects.
+    pub tag_overlap: f64,
+}
+
+/// Coupling entry between two projects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectCoupling {
+    /// First project ID.
+    pub project_a_id: Uuid,
+    /// First project name.
+    pub project_a_name: String,
+    /// Second project ID.
+    pub project_b_id: Uuid,
+    /// Second project name.
+    pub project_b_name: String,
+    /// Combined coupling strength ∈ [0, 1].
+    pub coupling_strength: f64,
+    /// Breakdown by signal.
+    pub signals: CouplingSignals,
+}
+
+/// Full coupling matrix for a workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CouplingMatrix {
+    /// Workspace ID.
+    pub workspace_id: Uuid,
+    /// All pairwise coupling entries.
+    pub entries: Vec<ProjectCoupling>,
+    /// Number of projects in the workspace.
+    pub project_count: usize,
+}
+
 /// GDS metrics for a single node (file or function).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeGdsMetrics {
