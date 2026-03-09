@@ -2236,7 +2236,7 @@ impl Neo4jClient {
         // 1. Notes without any LINKED_TO relations
         let orphan_notes_q = query(
             r#"
-            MATCH (n:KnowledgeNote {project_id: $pid})
+            MATCH (n:Note {project_id: $pid})
             WHERE NOT (n)-[:LINKED_TO]->()
             RETURN n.id AS id, left(n.content, 80) AS preview
             LIMIT 100
@@ -2370,7 +2370,7 @@ impl Neo4jClient {
             // 1. Note density: notes / files
             OPTIONAL MATCH (p:Project {id: $pid})-[:CONTAINS]->(f:File)
             WITH count(DISTINCT f) AS file_count
-            OPTIONAL MATCH (n:KnowledgeNote {project_id: $pid})
+            OPTIONAL MATCH (n:Note {project_id: $pid})
             WHERE n.status = 'active'
             WITH file_count, count(DISTINCT n) AS note_count
 
@@ -2383,7 +2383,7 @@ impl Neo4jClient {
                  count(DISTINCT d2) AS total_decisions
 
             // 3. Synapse health: active synapses / active notes
-            OPTIONAL MATCH (n1:KnowledgeNote {project_id: $pid})-[syn:SYNAPSE]->(n2:KnowledgeNote)
+            OPTIONAL MATCH (n1:Note {project_id: $pid})-[syn:SYNAPSE]->(n2:Note)
             WHERE syn.weight > 0.1
             WITH file_count, note_count, files_with_decisions, total_decisions,
                  count(syn) AS active_synapses
@@ -2395,12 +2395,12 @@ impl Neo4jClient {
                  active_synapses, count(DISTINCT hf) AS hotspot_count
             OPTIONAL MATCH (p:Project {id: $pid})-[:CONTAINS]->(hf2:File)
             WHERE hf2.churn_score IS NOT NULL AND hf2.churn_score > 0.5
-            AND EXISTS { MATCH (n:KnowledgeNote)-[:LINKED_TO]->(hf2) WHERE n.status = 'active' }
+            AND EXISTS { MATCH (n:Note)-[:LINKED_TO]->(hf2) WHERE n.status = 'active' }
             WITH file_count, note_count, files_with_decisions, total_decisions,
                  active_synapses, hotspot_count, count(DISTINCT hf2) AS covered_hotspots
 
             // 5. Scar load: scarred nodes / total notes+decisions
-            OPTIONAL MATCH (sn:KnowledgeNote {project_id: $pid})
+            OPTIONAL MATCH (sn:Note {project_id: $pid})
             WHERE sn.scar_intensity IS NOT NULL AND sn.scar_intensity > 0.0
             WITH file_count, note_count, files_with_decisions, total_decisions,
                  active_synapses, hotspot_count, covered_hotspots,
@@ -2409,7 +2409,10 @@ impl Neo4jClient {
             WHERE sd.scar_intensity IS NOT NULL AND sd.scar_intensity > 0.0
             WITH file_count, note_count, files_with_decisions, total_decisions,
                  active_synapses, hotspot_count, covered_hotspots,
-                 scarred_notes + count(sd) AS scarred_total
+                 scarred_notes, count(sd) AS scarred_decisions
+            WITH file_count, note_count, files_with_decisions, total_decisions,
+                 active_synapses, hotspot_count, covered_hotspots,
+                 scarred_notes + scarred_decisions AS scarred_total
 
             RETURN file_count, note_count, files_with_decisions, total_decisions,
                    active_synapses, hotspot_count, covered_hotspots, scarred_total
