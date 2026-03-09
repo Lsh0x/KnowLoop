@@ -90,6 +90,41 @@ impl ContextBuilder {
         });
         all_notes.dedup_by_key(|n| n.id);
 
+        // Biomimicry: Frustration-Catharsis — inject signals when frustration is elevated
+        let frustration_signals =
+            FrustrationSignals::from_score(task_details.task.frustration_score);
+
+        // When frustrated, widen the search for additional context (thermal noise injection)
+        if let Some(ref signals) = frustration_signals {
+            if signals.widen_search {
+                // Fetch broader semantic notes to increase search radius
+                let extra_notes = self
+                    .get_notes_for_entity(&EntityType::Plan, &plan_id.to_string())
+                    .await
+                    .unwrap_or_default();
+                for note in extra_notes {
+                    if !all_notes.iter().any(|n| n.id == note.id) {
+                        all_notes.push(note);
+                    }
+                }
+
+                if signals.level == FrustrationLevel::Critical {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        frustration_score = task_details.task.frustration_score,
+                        "🔴 CATHARSIS THRESHOLD REACHED: task frustration ≥ 0.9 — agent should consider deep reasoning or task re-evaluation"
+                    );
+                } else {
+                    tracing::info!(
+                        task_id = %task_id,
+                        frustration_score = task_details.task.frustration_score,
+                        level = ?signals.level,
+                        "Frustration-Catharsis: widened knowledge search for frustrated task"
+                    );
+                }
+            }
+        }
+
         Ok(AgentContext {
             task: task_details.task,
             steps: task_details.steps,
@@ -99,6 +134,7 @@ impl ContextBuilder {
             similar_code,
             related_decisions,
             notes: all_notes,
+            frustration_signals,
         })
     }
 

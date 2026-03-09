@@ -62,6 +62,9 @@ pub struct ReasonFeedbackRequest {
     pub followed_nodes: Vec<Uuid>,
     /// Outcome of following the reasoning path.
     pub outcome: FeedbackOutcome,
+    /// Optional task ID to increment frustration on failure (biomimicry).
+    #[serde(default)]
+    pub task_id: Option<Uuid>,
 }
 
 /// Feedback outcome.
@@ -250,6 +253,27 @@ pub async fn reason_feedback(
                     error = %e,
                     "Failed to apply knowledge scars during reasoning feedback"
                 );
+            }
+        }
+    }
+
+    // Biomimicry: Frustration-Catharsis — increment frustration on failure
+    if matches!(body.outcome, FeedbackOutcome::Failure) {
+        if let Some(task_id) = body.task_id {
+            match neo4j.increment_frustration(task_id, 0.3).await {
+                Ok(new_score) => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        frustration_score = new_score,
+                        "Frustration incremented (+0.3) on reasoning failure"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to increment frustration on reasoning failure"
+                    );
+                }
             }
         }
     }

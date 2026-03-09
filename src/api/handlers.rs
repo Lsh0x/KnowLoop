@@ -1300,8 +1300,25 @@ pub async fn update_step(
         state
             .orchestrator
             .plan_manager()
-            .update_step_status(step_id, status)
+            .update_step_status(step_id, status.clone())
             .await?;
+
+        // Biomimicry: Frustration decay — completing a step reduces frustration on parent task
+        if status == crate::neo4j::models::StepStatus::Completed {
+            // Find parent task and decrement frustration by 0.1
+            if let Ok(Some(task_id)) = state
+                .orchestrator
+                .neo4j()
+                .get_step_parent_task_id(step_id)
+                .await
+            {
+                let _ = state
+                    .orchestrator
+                    .neo4j()
+                    .decrement_frustration(task_id, 0.1)
+                    .await;
+            }
+        }
     }
     if req.description.is_some() || req.verification.is_some() {
         state

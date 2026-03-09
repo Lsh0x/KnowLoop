@@ -5627,6 +5627,45 @@ impl GraphStore for MockGraphStore {
         })
     }
 
+    async fn increment_frustration(&self, task_id: Uuid, delta: f64) -> Result<f64> {
+        let mut tasks = self.tasks.write().await;
+        if let Some(task) = tasks.get_mut(&task_id) {
+            task.frustration_score = (task.frustration_score + delta).min(1.0);
+            Ok(task.frustration_score)
+        } else {
+            anyhow::bail!("Task not found: {}", task_id)
+        }
+    }
+
+    async fn decrement_frustration(&self, task_id: Uuid, delta: f64) -> Result<f64> {
+        let mut tasks = self.tasks.write().await;
+        if let Some(task) = tasks.get_mut(&task_id) {
+            task.frustration_score = (task.frustration_score - delta).max(0.0);
+            Ok(task.frustration_score)
+        } else {
+            anyhow::bail!("Task not found: {}", task_id)
+        }
+    }
+
+    async fn get_frustration(&self, task_id: Uuid) -> Result<f64> {
+        let tasks = self.tasks.read().await;
+        if let Some(task) = tasks.get(&task_id) {
+            Ok(task.frustration_score)
+        } else {
+            anyhow::bail!("Task not found: {}", task_id)
+        }
+    }
+
+    async fn get_step_parent_task_id(&self, step_id: Uuid) -> Result<Option<Uuid>> {
+        let task_steps = self.task_steps.read().await;
+        for (task_id, step_ids) in task_steps.iter() {
+            if step_ids.contains(&step_id) {
+                return Ok(Some(*task_id));
+            }
+        }
+        Ok(None)
+    }
+
     async fn init_note_energy(&self) -> Result<usize> {
         let mut notes = self.notes.write().await;
         let mut count = 0;

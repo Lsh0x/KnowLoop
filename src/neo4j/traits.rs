@@ -1583,6 +1583,24 @@ pub trait GraphStore: Send + Sync {
         custom_ranges: Option<&[(String, f64, f64)]>,
     ) -> Result<crate::neo4j::models::HomeostasisReport>;
 
+    // ========================================================================
+    // Frustration-Catharsis (Biomimicry)
+    // ========================================================================
+
+    /// Increment a task's frustration_score by delta (clamped to [0, 1]).
+    /// Returns the new frustration_score.
+    async fn increment_frustration(&self, task_id: Uuid, delta: f64) -> Result<f64>;
+
+    /// Decrement a task's frustration_score by delta (clamped to [0, 1]).
+    /// Returns the new frustration_score.
+    async fn decrement_frustration(&self, task_id: Uuid, delta: f64) -> Result<f64>;
+
+    /// Get the frustration_score for a task.
+    async fn get_frustration(&self, task_id: Uuid) -> Result<f64>;
+
+    /// Get the parent task ID for a step (via HAS_STEP relationship).
+    async fn get_step_parent_task_id(&self, step_id: Uuid) -> Result<Option<Uuid>>;
+
     /// Initialize energy for all notes that don't have it set.
     /// Sets energy = 1.0 and last_activated = coalesce(last_confirmed_at, created_at).
     /// Idempotent. Returns the number of notes initialized.

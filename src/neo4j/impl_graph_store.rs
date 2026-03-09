@@ -1911,6 +1911,22 @@ impl GraphStore for Neo4jClient {
         self.compute_homeostasis(project_id, custom_ranges).await
     }
 
+    async fn increment_frustration(&self, task_id: Uuid, delta: f64) -> anyhow::Result<f64> {
+        self.increment_frustration(task_id, delta).await
+    }
+
+    async fn decrement_frustration(&self, task_id: Uuid, delta: f64) -> anyhow::Result<f64> {
+        self.decrement_frustration(task_id, delta).await
+    }
+
+    async fn get_frustration(&self, task_id: Uuid) -> anyhow::Result<f64> {
+        self.get_frustration(task_id).await
+    }
+
+    async fn get_step_parent_task_id(&self, step_id: Uuid) -> anyhow::Result<Option<Uuid>> {
+        self.get_step_parent_task_id(step_id).await
+    }
+
     async fn init_note_energy(&self) -> anyhow::Result<usize> {
         self.init_note_energy().await
     }

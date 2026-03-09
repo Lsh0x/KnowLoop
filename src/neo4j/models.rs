@@ -368,6 +368,10 @@ pub struct TaskNode {
     pub updated_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Frustration score (0.0-1.0) — bio-inspired adaptive stress signal.
+    /// Accumulates on blocked/failure events, decays on step completion.
+    #[serde(default)]
+    pub frustration_score: f64,
 }
 
 /// Status of a task
