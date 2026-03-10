@@ -426,8 +426,14 @@ Task 1 (completed)
 
 You've learned the basics! Here's what to explore next:
 
+### Essential Next Step
+
+- **[Foundation Kit](./foundation-kit.md)** — Seed your instance with foundational knowledge (workflow rules, safety gotchas, tool strategies). **Do this before anything else** — a blank instance doesn't know what it doesn't know.
+
 ### Advanced Features
 
+- **[Protocols & FSM](./protocols.md)** — Build a safe, self-aware setup with guardrails for every code change
+- **[Knowledge Fabric](./advanced-knowledge-fabric.md)** — Bio-inspired features: scars, homeostasis, scaffolding
 - **[Multi-Agent Workflows](./multi-agent-workflow.md)** — Coordinate multiple AI agents
 - **Milestones & Releases** — Group tasks for version planning
 - **Constraints** — Add rules that must be followed (security, style, etc.)
@@ -435,7 +441,7 @@ You've learned the basics! Here's what to explore next:
 ### Deep Dives
 
 - **[API Reference](../api/reference.md)** — Full REST API documentation
-- **[MCP Tools Reference](../api/mcp-tools.md)** — All 19 mega-tools explained
+- **[MCP Tools Reference](../api/mcp-tools.md)** — All 22 mega-tools explained
 
 ### Integration Guides
 
