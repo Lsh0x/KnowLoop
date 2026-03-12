@@ -30,6 +30,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         feature_graph_tool(),
         code_tool(),
         reasoning_tool(),
+        episode_tool(),
         analysis_profile_tool(),
         admin_tool(),
         skill_tool(),
@@ -895,6 +896,30 @@ fn code_tool() -> ToolDefinition {
     }
 }
 
+fn episode_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "episode".to_string(),
+        description: "Manage episodic memory. Actions: collect, list, anonymize, export_artifact"
+            .to_string(),
+        input_schema: InputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "action": {
+                    "type": "string",
+                    "enum": ["collect", "list", "anonymize", "export_artifact"],
+                    "description": "Operation to perform"
+                },
+                "run_id": {"type": "string", "description": "ProtocolRun UUID to collect episode from (collect/anonymize)"},
+                "project_id": {"type": "string", "description": "Project UUID (collect/list/anonymize/export_artifact)"},
+                "limit": {"type": "integer", "description": "Max episodes to return (list, default 20)"},
+                "max_episodes": {"type": "integer", "description": "Max episodes in artifact (export_artifact, default 50)"},
+                "include_structure": {"type": "boolean", "description": "Include structural edges in artifact (export_artifact, default true)"}
+            })),
+            required: Some(vec!["action".to_string()]),
+        },
+    }
+}
+
 fn reasoning_tool() -> ToolDefinition {
     ToolDefinition {
         name: "reasoning".to_string(),
@@ -1095,8 +1120,8 @@ mod tests {
         let tools = all_tools();
         assert_eq!(
             tools.len(),
-            22,
-            "Expected 22 mega-tools, got {}",
+            23,
+            "Expected 23 mega-tools, got {}",
             tools.len()
         );
     }

@@ -6,6 +6,7 @@
 use super::auth_handlers;
 use super::chat_handlers;
 use super::code_handlers;
+use super::episode_handlers;
 use super::handlers::{self, OrchestratorState};
 use super::hook_handlers;
 use super::note_handlers;
@@ -1038,6 +1039,22 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/reason/{tree_id}/feedback",
             post(reason_handlers::reason_feedback),
+        )
+        // ================================================================
+        // Episodes (Episodic Memory)
+        // ================================================================
+        .route("/api/episodes", get(episode_handlers::list_episodes))
+        .route(
+            "/api/episodes/collect",
+            post(episode_handlers::collect_episode),
+        )
+        .route(
+            "/api/episodes/anonymize",
+            post(episode_handlers::anonymize_episode),
+        )
+        .route(
+            "/api/episodes/export-artifact",
+            post(episode_handlers::export_artifact),
         )
         // ================================================================
         // Admin — Embedding Backfill
