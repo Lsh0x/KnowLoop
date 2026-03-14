@@ -7,13 +7,7 @@
 //! # Environment Variables
 //!
 //! - `PO_SERVER_URL` (required): REST API base URL (e.g. `http://127.0.0.1:8080`)
-//! - `PO_AUTH_TOKEN` (optional): Explicit JWT session token for authenticated requests.
-//!   Typically injected by ChatManager when spawning MCP as a subprocess.
-//! - `PO_JWT_SECRET` (optional): JWT signing secret — when set, the MCP server
-//!   auto-generates a 7-day token at startup. Preferred for standalone usage
-//!   (e.g., Claude Code direct launch) since it never expires on its own.
-//!
-//! Token resolution order: `PO_AUTH_TOKEN` > `PO_JWT_SECRET` > no auth.
+//! - `PO_AUTH_TOKEN` (optional): JWT session token for authenticated requests
 //!
 //! # Architecture
 //!
@@ -24,8 +18,7 @@
 //!
 //! # Claude Code Integration
 //!
-//! The server is auto-configured by the PO backend at startup via
-//! `setup_claude.rs` which writes to `~/.claude/mcp.json`:
+//! Add to your Claude Code MCP settings (e.g., `~/.claude/mcp.json`):
 //!
 //! ```json
 //! {
@@ -34,7 +27,7 @@
 //!       "command": "/path/to/mcp_server",
 //!       "env": {
 //!         "PO_SERVER_URL": "http://127.0.0.1:8080",
-//!         "PO_JWT_SECRET": "<jwt-signing-secret-from-config.yaml>"
+//!         "PO_AUTH_TOKEN": "<jwt-session-token>"
 //!       }
 //!     }
 //!   }
@@ -67,9 +60,9 @@ async fn main() -> Result<()> {
     })?;
 
     info!("MCP server starting in HTTP proxy mode");
-    let auth_source = if std::env::var("PO_AUTH_TOKEN").is_ok() {
+    let auth_source = if std::env::var("PO_AUTH_TOKEN").is_ok_and(|v| !v.is_empty()) {
         "PO_AUTH_TOKEN"
-    } else if std::env::var("PO_JWT_SECRET").is_ok() {
+    } else if std::env::var("PO_JWT_SECRET").is_ok_and(|v| !v.is_empty()) {
         "PO_JWT_SECRET (auto-generated)"
     } else {
         "none"
