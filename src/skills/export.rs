@@ -11,11 +11,13 @@ use uuid::Uuid;
 use crate::identity::InstanceIdentity;
 use crate::neo4j::traits::GraphStore;
 use crate::protocol::models::RunStatus;
+use crate::skills::models::TriggerType;
 use crate::skills::package::{
     sign_package, ExecutionHistory, PackageMetadata, PackageStats, PortableDecision, PortableNote,
     PortableProtocol, PortableRelevanceVector, PortableSkill, PortableState, PortableTransition,
     SkillPackage, SourceMetadata, CURRENT_SCHEMA_VERSION, FORMAT_ID,
 };
+use crate::utils::paths::sanitize_pattern;
 
 /// Export a skill and its members as a portable package.
 ///
@@ -86,10 +88,27 @@ pub async fn export_skill(
         })
         .collect();
 
+    // Sanitize FileGlob trigger patterns: strip absolute project root
+    let sanitized_triggers = skill
+        .trigger_patterns
+        .iter()
+        .map(|t| {
+            if t.pattern_type == TriggerType::FileGlob {
+                let mut t = t.clone();
+                if let Some(ref root) = project_root {
+                    t.pattern_value = sanitize_pattern(&t.pattern_value, root);
+                }
+                t
+            } else {
+                t.clone()
+            }
+        })
+        .collect();
+
     let portable_skill = PortableSkill {
         name: skill.name.clone(),
         description: skill.description.clone(),
-        trigger_patterns: skill.trigger_patterns.clone(),
+        trigger_patterns: sanitized_triggers,
         context_template: skill.context_template.clone(),
         tags: skill.tags.clone(),
         cohesion: skill.cohesion,
@@ -300,16 +319,15 @@ fn sanitize_paths(content: &str, project_root: Option<&str>) -> String {
         return content.to_string();
     }
 
-    // Normalize: ensure root ends with /
-    let root_with_slash = if root.ends_with('/') {
-        root.to_string()
-    } else {
-        format!("{}/", root)
-    };
+    // Use the central path_utils for consistent path stripping.
+    // Content may contain inline absolute paths (e.g., "see /Users/foo/project/src/main.rs")
+    // so we do a simple string replacement with normalized root.
+    let root_trimmed = root.trim_end_matches('/');
+    let root_with_slash = format!("{}/", root_trimmed);
 
     // Replace root_with_slash first (more specific), then bare root
     let result = content.replace(&root_with_slash, "");
-    result.replace(root, "")
+    result.replace(root_trimmed, "")
 }
 
 // ============================================================================
@@ -365,6 +383,7 @@ mod tests {
             last_assertion_result: None,
             memory_horizon: crate::notes::MemoryHorizon::Operational,
             scar_intensity: 0.0,
+            sharing_consent: Default::default(),
         };
         store
             .add_skill_member(skill_id, "note", note1.id)

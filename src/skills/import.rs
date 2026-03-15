@@ -392,7 +392,30 @@ fn create_imported_skill(package: &SkillPackage, project_id: Uuid) -> SkillNode 
         name: package.skill.name.clone(),
         description: package.skill.description.clone(),
         status: SkillStatus::Imported,
-        trigger_patterns: package.skill.trigger_patterns.clone(),
+        // Sanitize FileGlob triggers: strip any leftover absolute paths from old packages
+        trigger_patterns: package
+            .skill
+            .trigger_patterns
+            .iter()
+            .map(|t| {
+                if t.pattern_type == crate::skills::TriggerType::FileGlob
+                    && t.pattern_value.starts_with('/')
+                {
+                    // Old-format absolute glob — strip any recognizable project prefix.
+                    // Without the source root we can only heuristically strip up to src/ etc.
+                    let mut t = t.clone();
+                    // Try to find a known code directory marker and cut there
+                    if let Some(idx) = t.pattern_value.find("/src/") {
+                        t.pattern_value = t.pattern_value[idx + 1..].to_string();
+                    } else if let Some(idx) = t.pattern_value.find("/lib/") {
+                        t.pattern_value = t.pattern_value[idx + 1..].to_string();
+                    }
+                    t
+                } else {
+                    t.clone()
+                }
+            })
+            .collect(),
         context_template: package.skill.context_template.clone(),
         energy: 0.0, // must prove itself
         cohesion: package.skill.cohesion,
@@ -452,6 +475,7 @@ fn portable_note_to_note(
         changes: vec![],
         assertion_rule: None,
         last_assertion_result: None,
+        sharing_consent: Default::default(),
     })
 }
 
@@ -508,6 +532,7 @@ fn decision_to_note(
         changes: vec![],
         assertion_rule: None,
         last_assertion_result: None,
+        sharing_consent: Default::default(),
     })
 }
 
@@ -591,6 +616,7 @@ fn episode_to_note(
         changes: vec![],
         assertion_rule: None,
         last_assertion_result: None,
+        sharing_consent: Default::default(),
     })
 }
 
@@ -1278,6 +1304,7 @@ mod tests {
             analytics_computed_at: None,
             last_co_change_computed_at: None,
             scaffolding_override: None,
+            sharing_policy: None,
         };
         store.create_project(&source_project).await.unwrap();
 
@@ -1293,6 +1320,7 @@ mod tests {
             analytics_computed_at: None,
             last_co_change_computed_at: None,
             scaffolding_override: None,
+            sharing_policy: None,
         };
         store.create_project(&target_project).await.unwrap();
 
@@ -1330,6 +1358,7 @@ mod tests {
             last_assertion_result: None,
             memory_horizon: MemoryHorizon::Operational,
             scar_intensity: 0.0,
+            sharing_consent: Default::default(),
         };
         let note_id = note.id;
         store.create_note(&note).await.unwrap();

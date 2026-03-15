@@ -619,6 +619,14 @@ pub async fn detect_skills_pipeline(
 ) -> anyhow::Result<DetectSkillsPipelineResult> {
     let project_id_str = project_id.to_string();
 
+    // Load project root_path for path relativization in trigger generation
+    let root_path = graph_store
+        .get_project(project_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.root_path);
+
     // Step 0: Auto-anchor notes to files mentioned in their content.
     // This ensures all notes have fresh LINKED_TO relations before clustering,
     // so that generated FileGlob triggers reference correct files.
@@ -759,6 +767,7 @@ pub async fn detect_skills_pipeline(
                 &member_notes,
                 &all_project_notes,
                 &embeddings,
+                root_path.as_deref(),
             );
             skill.trigger_patterns = trigger_result.triggers;
 
@@ -1008,6 +1017,7 @@ mod tests {
             last_assertion_result: None,
             memory_horizon: crate::notes::MemoryHorizon::Operational,
             scar_intensity: 0.0,
+            sharing_consent: Default::default(),
         }
     }
 
@@ -1242,6 +1252,7 @@ mod tests {
             analytics_computed_at: None,
             last_co_change_computed_at: None,
             scaffolding_override: None,
+            sharing_policy: None,
         };
         store.create_project(&project).await.unwrap();
 
@@ -1280,6 +1291,7 @@ mod tests {
             last_assertion_result: None,
             memory_horizon: crate::notes::MemoryHorizon::Operational,
             scar_intensity: 0.0,
+            sharing_consent: Default::default(),
         };
         store.create_note(&note).await.unwrap();
 
