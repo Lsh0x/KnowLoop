@@ -80,6 +80,22 @@ pub fn extract(
                     parsed.imports.push(import);
                 }
             }
+            "mod_item" => {
+                // Extract `mod foo;` declarations as imports.
+                // Only file-level declarations (no body) — inline modules
+                // (`mod foo { ... }`) are not file imports.
+                if node.child_by_field_name("body").is_none() {
+                    if let Some(name) = get_field_text(&node, "name", source) {
+                        parsed.imports.push(ImportNode {
+                            path: format!("self::{}", name),
+                            alias: None,
+                            items: vec![],
+                            file_path: file_path.to_string(),
+                            line: node.start_position().row as u32 + 1,
+                        });
+                    }
+                }
+            }
             "impl_item" => {
                 extract_impl(&node, source, file_path, parsed)?;
             }
