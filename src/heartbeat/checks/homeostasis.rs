@@ -35,10 +35,7 @@ impl HeartbeatCheck for HomeostasisCheck {
         let projects = ctx.graph.list_projects().await?;
 
         for project in &projects {
-            debug!(
-                "HomeostasisCheck: evaluating project '{}'",
-                project.name
-            );
+            debug!("HomeostasisCheck: evaluating project '{}'", project.name);
 
             // 1. Compute homeostasis report from the graph
             let report = match ctx.graph.compute_homeostasis(project.id, None).await {
@@ -77,8 +74,8 @@ impl HeartbeatCheck for HomeostasisCheck {
                 dead_notes_ratio: if neural.dead_notes_count > 0 {
                     // Approximate: dead_notes / (dead_notes + active_synapses as proxy for active notes)
                     // This is a heuristic; consolidate_memory will handle the actual cleanup.
-                    let total = (neural.dead_notes_count as f64)
-                        + (neural.active_synapses.max(1) as f64);
+                    let total =
+                        (neural.dead_notes_count as f64) + (neural.active_synapses.max(1) as f64);
                     neural.dead_notes_count as f64 / total
                 } else {
                     0.0
@@ -115,8 +112,7 @@ impl HeartbeatCheck for HomeostasisCheck {
             );
 
             // 5. Execute corrective actions
-            let graph_arc: Arc<dyn crate::neo4j::traits::GraphStore> =
-                Arc::clone(&ctx.graph);
+            let graph_arc: Arc<dyn crate::neo4j::traits::GraphStore> = Arc::clone(&ctx.graph);
             match execute_actions(&graph_arc, &actions).await {
                 Ok(executed) => {
                     info!(
