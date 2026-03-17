@@ -864,10 +864,7 @@ async fn reinforce_hook_activation(
     // 3. Track re-activation for route quality measurement
     if !note_ids.is_empty() {
         let reactivated = graph_store.track_reactivation(note_ids).await?;
-        tracing::debug!(
-            reactivated,
-            "Re-activation tracking completed"
-        );
+        tracing::debug!(reactivated, "Re-activation tracking completed");
     }
 
     Ok(())
@@ -2344,15 +2341,25 @@ mod tests {
     #[tokio::test]
     async fn test_track_reactivation_increments_count() {
         use crate::neo4j::mock::MockGraphStore;
-        use crate::notes::Note;
+        use crate::notes::{Note, NoteType};
         use std::sync::Arc;
 
         let mock = Arc::new(MockGraphStore::new());
 
         // Create two notes
-        let mut note_a = Note::new(None, "gotcha", "Reactivation test A");
+        let mut note_a = Note::new(
+            None,
+            NoteType::Gotcha,
+            "Reactivation test A".into(),
+            "test".into(),
+        );
         note_a.energy = 0.5;
-        let mut note_b = Note::new(None, "tip", "Reactivation test B");
+        let mut note_b = Note::new(
+            None,
+            NoteType::Tip,
+            "Reactivation test B".into(),
+            "test".into(),
+        );
         note_b.energy = 0.3;
 
         let id_a = note_a.id;
@@ -2388,14 +2395,24 @@ mod tests {
     #[tokio::test]
     async fn test_reinforce_hook_tracks_reactivation() {
         use crate::neo4j::mock::MockGraphStore;
-        use crate::notes::Note;
+        use crate::notes::{Note, NoteType};
         use std::sync::Arc;
 
         let mock = Arc::new(MockGraphStore::new());
 
-        let mut note_a = Note::new(None, "gotcha", "Hook reactivation A");
+        let mut note_a = Note::new(
+            None,
+            NoteType::Gotcha,
+            "Hook reactivation A".into(),
+            "test".into(),
+        );
         note_a.energy = 0.5;
-        let mut note_b = Note::new(None, "tip", "Hook reactivation B");
+        let mut note_b = Note::new(
+            None,
+            NoteType::Tip,
+            "Hook reactivation B".into(),
+            "test".into(),
+        );
         note_b.energy = 0.5;
 
         let id_a = note_a.id;

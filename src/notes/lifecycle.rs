@@ -750,9 +750,7 @@ impl NoteLifecycleManager {
         match &note.memory_horizon {
             MemoryHorizon::Ephemeral => {
                 // Reactivation is a stronger signal than raw activation count
-                if activation_count >= 3
-                    || reactivation_count >= 2
-                    || note.computed_energy() >= 0.5
+                if activation_count >= 3 || reactivation_count >= 2 || note.computed_energy() >= 0.5
                 {
                     PromotionResult {
                         note_id,
@@ -760,7 +758,9 @@ impl NoteLifecycleManager {
                         new_horizon: Some(MemoryHorizon::Operational),
                         reason: format!(
                             "Ephemeral→Operational: activations={}, reactivations={}, energy={:.2}",
-                            activation_count, reactivation_count, note.computed_energy()
+                            activation_count,
+                            reactivation_count,
+                            note.computed_energy()
                         ),
                     }
                 } else {
@@ -834,7 +834,12 @@ impl NoteLifecycleManager {
     /// Rules (pure arithmetic, 0 LLM calls):
     /// - `activation_count == 0 AND age > 90 days` -> archive (dead note)
     /// - `energy < 0.05 AND age > 60 days` -> archive (low-energy note)
-    pub fn should_auto_archive(&self, note: &Note, activation_count: i64, now: DateTime<Utc>) -> bool {
+    pub fn should_auto_archive(
+        &self,
+        note: &Note,
+        activation_count: i64,
+        now: DateTime<Utc>,
+    ) -> bool {
         if note.status != NoteStatus::Active {
             return false;
         }
@@ -1241,5 +1246,86 @@ mod tests {
         note.status = NoteStatus::Active;
 
         assert!(!manager.should_promote_to_consolidated(&note, 8, Utc::now()));
+    }
+
+    // --- Reactivation-aware promotion tests ---
+
+    #[test]
+    fn test_ephemeral_promotion_via_reactivation() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new_full(
+            None,
+            NoteType::Gotcha,
+            NoteImportance::Medium,
+            NoteScope::Project,
+            "Reactivation promotes ephemeral".to_string(),
+            vec![],
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Ephemeral;
+        note.energy = 0.2; // Low energy, below 0.5 threshold
+        note.reactivation_count = 2; // Meets reactivation threshold (>= 2)
+
+        let result = manager.evaluate_promotion(&note, 1); // activation_count=1, below 3 threshold
+        assert!(
+            result.new_horizon.is_some(),
+            "Reactivation count >= 2 should promote ephemeral to operational"
+        );
+        assert_eq!(result.new_horizon.unwrap(), MemoryHorizon::Operational);
+    }
+
+    #[test]
+    fn test_operational_consolidation_via_reactivation() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new_full(
+            None,
+            NoteType::Pattern,
+            NoteImportance::Medium,
+            NoteScope::Project,
+            "Reactivation consolidates operational".to_string(),
+            vec![],
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Operational;
+        note.energy = 0.4; // Below 0.8 threshold
+        note.reactivation_count = 5; // Meets consolidation threshold (>= 5)
+
+        let result = manager.evaluate_promotion(&note, 5); // activation_count=5, below 10 threshold
+        assert!(
+            result.new_horizon.is_some(),
+            "Reactivation count >= 5 should promote operational to consolidated"
+        );
+        assert_eq!(result.new_horizon.unwrap(), MemoryHorizon::Consolidated);
+    }
+
+    #[test]
+    fn test_reactivated_ephemeral_gets_longer_grace_period() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new_full(
+            None,
+            NoteType::Tip,
+            NoteImportance::Low,
+            NoteScope::Project,
+            "Reactivated ephemeral should get 72h grace".to_string(),
+            vec![],
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Ephemeral;
+        note.reactivation_count = 1;
+        // 50 hours ago: past 48h but within 72h
+        note.last_activated = Some(Utc::now() - chrono::Duration::hours(50));
+
+        assert!(
+            !manager.should_archive_ephemeral(&note, Utc::now()),
+            "Reactivated note at 50h idle should NOT be archived (72h grace)"
+        );
+
+        // Non-reactivated version SHOULD be archived at 50h
+        let mut note_no_react = note.clone();
+        note_no_react.reactivation_count = 0;
+        assert!(
+            manager.should_archive_ephemeral(&note_no_react, Utc::now()),
+            "Non-reactivated note at 50h idle SHOULD be archived (48h grace)"
+        );
     }
 }
