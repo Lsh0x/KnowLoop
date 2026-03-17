@@ -5951,7 +5951,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_milestone_emits_event() {
         let (orch, mut rx) = orch_with_bus().await;
-        let ms = test_milestone(Uuid::new_v4(), "v1 launch");
+        let project = test_project();
+        orch.neo4j().create_project(&project).await.unwrap();
+        let ms = test_milestone(project.id, "v1 launch");
         orch.create_milestone(&ms).await.unwrap();
         let ev = rx.try_recv().unwrap();
         assert_eq!(ev.entity_type, EventEntityType::Milestone);

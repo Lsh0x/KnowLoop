@@ -11,7 +11,11 @@ impl Neo4jClient {
     // Milestone operations
     // ========================================================================
 
-    /// Create a milestone
+    /// Create a milestone.
+    ///
+    /// Uses MATCH on the Project node to create the HAS_MILESTONE relation.
+    /// Returns an error if the Project does not exist in Neo4j (the MATCH
+    /// would silently produce zero rows, so we verify via RETURN).
     pub async fn create_milestone(&self, milestone: &MilestoneNode) -> Result<()> {
         let q = query(
             r#"
@@ -27,6 +31,7 @@ impl Neo4jClient {
                 project_id: $project_id
             })
             CREATE (p)-[:HAS_MILESTONE]->(m)
+            RETURN m.id AS created_id
             "#,
         )
         .param("id", milestone.id.to_string())
@@ -60,7 +65,13 @@ impl Neo4jClient {
         )
         .param("created_at", milestone.created_at.to_rfc3339());
 
-        self.graph.run(q).await?;
+        let mut result = self.graph.execute(q).await?;
+        if result.next().await?.is_none() {
+            anyhow::bail!(
+                "Failed to create milestone: Project {} not found in Neo4j",
+                milestone.project_id
+            );
+        }
         Ok(())
     }
 
@@ -327,9 +338,14 @@ impl Neo4jClient {
         }
     }
 
-    /// Get tasks linked to a project milestone (with plan info)
+    /// Get tasks linked to a project milestone (with plan info).
+    ///
     /// Merges tasks from direct links (INCLUDES_TASK) and
-    /// plan-based links (TARGETS_MILESTONE → HAS_TASK)
+    /// plan-based links (TARGETS_MILESTONE → HAS_TASK).
+    ///
+    /// Uses a single-pass query that collects the first matching plan per task
+    /// to avoid cartesian products (a task linked to N plans would previously
+    /// produce N duplicate rows).
     pub async fn get_milestone_tasks_with_plans(
         &self,
         milestone_id: Uuid,
@@ -342,9 +358,11 @@ impl Neo4jClient {
             WITH [x IN collect(DISTINCT t1) + collect(DISTINCT t2) WHERE x IS NOT NULL] AS tasks
             UNWIND tasks AS t
             OPTIONAL MATCH (pl:Plan)-[:HAS_TASK]->(t)
-            RETURN t, COALESCE(pl.id, '') AS plan_id,
-                   COALESCE(pl.title, '') AS plan_title,
-                   COALESCE(pl.status, '') AS plan_status
+            WITH t, collect(pl)[0] AS first_plan
+            RETURN t,
+                   COALESCE(first_plan.id, '') AS plan_id,
+                   COALESCE(first_plan.title, '') AS plan_title,
+                   COALESCE(first_plan.status, '') AS plan_status
             ORDER BY COALESCE(t.priority, 0) DESC, t.created_at
             "#,
         )
@@ -371,9 +389,12 @@ impl Neo4jClient {
         Ok(tasks)
     }
 
-    /// Get all steps for all tasks linked to a project milestone (batch query)
+    /// Get all steps for all tasks linked to a project milestone (batch query).
+    ///
     /// Includes steps from both direct (INCLUDES_TASK) and
-    /// plan-based (TARGETS_MILESTONE → HAS_TASK) task links
+    /// plan-based (TARGETS_MILESTONE → HAS_TASK) task links.
+    /// Uses DISTINCT on task collection to avoid duplicate steps from
+    /// cartesian products when tasks are linked via multiple paths.
     pub async fn get_milestone_steps_batch(
         &self,
         milestone_id: Uuid,
@@ -385,6 +406,7 @@ impl Neo4jClient {
             OPTIONAL MATCH (p:Plan)-[:TARGETS_MILESTONE]->(m), (p)-[:HAS_TASK]->(t2:Task)
             WITH [x IN collect(DISTINCT t1) + collect(DISTINCT t2) WHERE x IS NOT NULL] AS tasks
             UNWIND tasks AS t
+            WITH DISTINCT t
             MATCH (t)-[:HAS_STEP]->(s:Step)
             RETURN t.id AS task_id, s
             ORDER BY t.id, s.order
@@ -449,7 +471,9 @@ impl Neo4jClient {
         Ok(())
     }
 
-    /// Get tasks for a milestone (direct + plan-based links)
+    /// Get tasks for a milestone (direct + plan-based links).
+    /// Uses DISTINCT after UNWIND to prevent duplicates when a task
+    /// is reachable via both INCLUDES_TASK and TARGETS_MILESTONE paths.
     pub async fn get_milestone_tasks(&self, milestone_id: Uuid) -> Result<Vec<TaskNode>> {
         let q = query(
             r#"
@@ -458,6 +482,7 @@ impl Neo4jClient {
             OPTIONAL MATCH (p:Plan)-[:TARGETS_MILESTONE]->(m), (p)-[:HAS_TASK]->(t2:Task)
             WITH [x IN collect(DISTINCT t1) + collect(DISTINCT t2) WHERE x IS NOT NULL] AS tasks
             UNWIND tasks AS t
+            WITH DISTINCT t
             RETURN t
             ORDER BY COALESCE(t.priority, 0) DESC, t.created_at
             "#,
