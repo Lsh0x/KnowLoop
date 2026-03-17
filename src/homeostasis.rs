@@ -209,7 +209,7 @@ pub fn compute_backfill_params(total_notes: usize, synapse_health: f64) -> Backf
     } else if total_notes <= 1000 {
         (total_notes / 20).max(10)
     } else {
-        (total_notes / 50).min(50).max(10)
+        (total_notes / 50).clamp(10, 50)
     };
 
     let max_neighbors = if synapse_health < 0.1 {

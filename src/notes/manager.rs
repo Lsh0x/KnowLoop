@@ -386,7 +386,6 @@ impl NoteManager {
         self.spawn_auto_anchor(&note);
 
         // RFC auto-start: find rfc-lifecycle protocol and start a run
-        let mut note = note;
         if note.note_type == NoteType::Rfc {
             if let Some(project_id) = note.project_id {
                 match self.auto_start_rfc_lifecycle(&mut note, project_id).await {
