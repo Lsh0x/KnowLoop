@@ -191,6 +191,7 @@ async fn test_workspace_project_association() {
         last_synced: None,
         analytics_computed_at: None,
         last_co_change_computed_at: None,
+        default_note_energy: None,
         scaffolding_override: None,
         sharing_policy: None,
     };
@@ -429,6 +430,7 @@ async fn test_resource_project_links() {
         last_synced: None,
         analytics_computed_at: None,
         last_co_change_computed_at: None,
+        default_note_energy: None,
         scaffolding_override: None,
         sharing_policy: None,
     };
@@ -444,6 +446,7 @@ async fn test_resource_project_links() {
         last_synced: None,
         analytics_computed_at: None,
         last_co_change_computed_at: None,
+        default_note_energy: None,
         scaffolding_override: None,
         sharing_policy: None,
     };
@@ -687,6 +690,7 @@ async fn test_component_project_mapping() {
         last_synced: None,
         analytics_computed_at: None,
         last_co_change_computed_at: None,
+        default_note_energy: None,
         scaffolding_override: None,
         sharing_policy: None,
     };
@@ -1086,6 +1090,7 @@ async fn test_multiple_projects_in_workspace() {
             last_synced: None,
             analytics_computed_at: None,
             last_co_change_computed_at: None,
+            default_note_energy: None,
             scaffolding_override: None,
             sharing_policy: None,
         };

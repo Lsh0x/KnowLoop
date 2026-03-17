@@ -25,6 +25,10 @@ pub struct ProjectNode {
     /// Used for incremental computation — only new commits since this date are processed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_co_change_computed_at: Option<DateTime<Utc>>,
+    /// Default energy for new notes (0.0-1.0). Set by homeostasis when note_density
+    /// is too high (ReduceInitialEnergy), reset to None (=1.0) when density normalizes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub default_note_energy: Option<f64>,
     /// Manual scaffolding level override (0-4). When set, bypasses auto-computation.
     /// Biomimicry T8: allows forcing a specific cognitive level.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1303,6 +1307,8 @@ pub struct HomeostasisReport {
     pub pain_score: f64,
     /// Overall recommendations
     pub recommendations: Vec<String>,
+    /// Total number of active notes in the project (used by adaptive backfill).
+    pub total_notes_count: i64,
 }
 
 // ============================================================================
@@ -1468,6 +1474,9 @@ pub struct NeuralMetrics {
     pub avg_energy: f64,
     pub weak_synapses_ratio: f64,
     pub dead_notes_count: i64,
+    /// Total number of notes linked to the project's files.
+    /// Used to compute accurate dead_notes_ratio = dead_notes_count / total_notes_count.
+    pub total_notes_count: i64,
     /// Average reactivation rate across active notes.
     /// High value = knowledge routes are frequently useful and stable.
     pub avg_reactivation_rate: f64,

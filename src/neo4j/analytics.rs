@@ -1472,11 +1472,12 @@ impl Neo4jClient {
             WITH total_notes, active_synapses, coalesce(avg_weight, 0) AS avg_weight,
                  coalesce(weak_synapses, 0) AS weak_synapses, count(n) AS dead_notes
             OPTIONAL MATCH (rn:Note) WHERE rn.reactivation_count IS NOT NULL AND rn.reactivation_count > 0
-            WITH active_synapses, avg_weight, weak_synapses, dead_notes,
+            WITH total_notes, active_synapses, avg_weight, weak_synapses, dead_notes,
                  avg(coalesce(rn.reactivation_count, 0)) AS avg_reactivation
             RETURN active_synapses, avg_weight AS avg_energy,
                    CASE WHEN active_synapses > 0 THEN toFloat(weak_synapses) / active_synapses ELSE 0.0 END AS weak_synapses_ratio,
                    dead_notes AS dead_notes_count,
+                   total_notes AS total_notes_count,
                    coalesce(avg_reactivation, 0.0) AS avg_reactivation_rate
             "#,
         )
@@ -1491,6 +1492,7 @@ impl Neo4jClient {
                 avg_energy: row.get::<f64>("avg_energy").unwrap_or(0.0),
                 weak_synapses_ratio: row.get::<f64>("weak_synapses_ratio").unwrap_or(0.0),
                 dead_notes_count: row.get::<i64>("dead_notes_count").unwrap_or(0),
+                total_notes_count: row.get::<i64>("total_notes_count").unwrap_or(0),
                 avg_reactivation_rate: row.get::<f64>("avg_reactivation_rate").unwrap_or(0.0),
             })
         } else {
@@ -1499,6 +1501,7 @@ impl Neo4jClient {
                 avg_energy: 0.0,
                 weak_synapses_ratio: 0.0,
                 dead_notes_count: 0,
+                total_notes_count: 0,
                 avg_reactivation_rate: 0.0,
             })
         }
@@ -2474,11 +2477,13 @@ impl Neo4jClient {
             WHERE n.status = 'active'
             WITH file_count, count(DISTINCT n) AS note_count
 
-            // 2. Decision coverage: decisions with AFFECTS / total files modified
-            // Decisions don't have project_id — traverse Task→Plan→Project chain
-            OPTIONAL MATCH (p2:Project {id: $pid})-[:HAS_PLAN]->(:Plan)-[:HAS_TASK]->(:Task)-[:INFORMED_BY]->(d:Decision)-[:AFFECTS]->(target)
+            // 2. Decision coverage: files with AFFECTS decisions / total files
+            // Count project files that have at least one Decision→AFFECTS link
+            // (regardless of whether the decision is reachable via task chain)
+            OPTIONAL MATCH (p2:Project {id: $pid})-[:CONTAINS]->(af:File)
+            WHERE EXISTS { MATCH (:Decision)-[:AFFECTS]->(af) }
             WITH file_count, note_count,
-                 count(DISTINCT target) AS files_with_decisions
+                 count(DISTINCT af) AS files_with_decisions
             OPTIONAL MATCH (p3:Project {id: $pid})-[:HAS_PLAN]->(:Plan)-[:HAS_TASK]->(:Task)-[:INFORMED_BY]->(d2:Decision)
             WITH file_count, note_count, files_with_decisions,
                  count(DISTINCT d2) AS total_decisions
@@ -2628,6 +2633,7 @@ impl Neo4jClient {
             ratios,
             pain_score,
             recommendations,
+            total_notes_count: note_count,
         })
     }
 

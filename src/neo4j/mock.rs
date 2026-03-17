@@ -2633,6 +2633,14 @@ impl GraphStore for MockGraphStore {
         Ok(())
     }
 
+    async fn set_default_note_energy(&self, project_id: Uuid, energy: Option<f64>) -> Result<()> {
+        let mut projects = self.projects.write().await;
+        if let Some(p) = projects.get_mut(&project_id) {
+            p.default_note_energy = energy.map(|e| e.clamp(0.0, 1.0));
+        }
+        Ok(())
+    }
+
     async fn detect_global_stagnation(
         &self,
         project_id: Uuid,
@@ -6278,6 +6286,7 @@ impl GraphStore for MockGraphStore {
             ratios,
             pain_score,
             recommendations: vec![],
+            total_notes_count: project_notes.len() as i64,
         })
     }
 
@@ -8289,6 +8298,7 @@ impl GraphStore for MockGraphStore {
             avg_energy: 0.0,
             weak_synapses_ratio: 0.0,
             dead_notes_count: 0,
+            total_notes_count: 0,
             avg_reactivation_rate: 0.0,
         })
     }

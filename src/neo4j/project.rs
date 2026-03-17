@@ -203,6 +203,20 @@ impl Neo4jClient {
         Ok(())
     }
 
+    /// Set or clear default_note_energy on a project (homeostasis).
+    pub async fn set_default_note_energy(&self, id: Uuid, energy: Option<f64>) -> Result<()> {
+        let q = if let Some(e) = energy {
+            query("MATCH (p:Project {id: $id}) SET p.default_note_energy = $energy")
+                .param("id", id.to_string())
+                .param("energy", e.clamp(0.0, 1.0))
+        } else {
+            query("MATCH (p:Project {id: $id}) REMOVE p.default_note_energy")
+                .param("id", id.to_string())
+        };
+        self.graph.run(q).await?;
+        Ok(())
+    }
+
     /// Delete a project and all its data
     pub async fn delete_project(&self, id: Uuid, project_name: &str) -> Result<()> {
         // ================================================================
@@ -376,6 +390,10 @@ impl Neo4jClient {
                 .get::<String>("last_co_change_computed_at")
                 .ok()
                 .and_then(|s| s.parse().ok()),
+            default_note_energy: node
+                .get::<f64>("default_note_energy")
+                .ok()
+                .filter(|&v| v < 1.0), // None means default (1.0)
             scaffolding_override: node
                 .get::<i64>("scaffolding_override")
                 .ok()

@@ -825,6 +825,14 @@ impl GraphStore for Neo4jClient {
         self.set_scaffolding_override(project_id, level).await
     }
 
+    async fn set_default_note_energy(
+        &self,
+        project_id: Uuid,
+        energy: Option<f64>,
+    ) -> anyhow::Result<()> {
+        self.set_default_note_energy(project_id, energy).await
+    }
+
     async fn detect_global_stagnation(
         &self,
         project_id: Uuid,
