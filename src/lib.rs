@@ -1256,6 +1256,7 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         use heartbeat::engine::HeartbeatEngine;
 
         let graph = orchestrator.neo4j_arc();
+        let search: Option<Arc<dyn meilisearch::SearchStore>> = Some(orchestrator.meili_arc());
         let emitter: Option<Arc<dyn events::EventEmitter>> =
             Some(event_bus.clone() as Arc<dyn events::EventEmitter>);
 
@@ -1269,7 +1270,7 @@ pub async fn start_server(mut config: Config) -> Result<()> {
             Box::new(HomeostasisCheck),
         ];
 
-        let engine = HeartbeatEngine::new(graph, emitter, checks);
+        let engine = HeartbeatEngine::new(graph, search, emitter, checks);
         let handle = engine.start_owned();
         // Keep handle alive for the lifetime of the process
         std::mem::forget(handle);

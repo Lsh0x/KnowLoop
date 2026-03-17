@@ -17,7 +17,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
+use crate::meilisearch::SearchStore;
 use crate::neo4j::traits::GraphStore;
+use crate::notes::manager::NoteManager;
 
 /// Maximum number of corrective actions per evaluation cycle.
 const MAX_ACTIONS_PER_CYCLE: usize = 3;
@@ -145,13 +147,17 @@ impl HomeostasisController {
 ///
 /// Each action maps to a specific GraphStore method:
 /// - `DecaySynapses` → `graph.decay_synapses(amount, prune_threshold)`
-/// - `BackfillSynapses` → logged only (requires NoteManager + SearchStore)
+/// - `BackfillSynapses` → `NoteManager::backfill_synapses` (requires SearchStore)
 /// - `ArchiveDeadNotes` → `graph.consolidate_memory()` (promotes + archives)
 /// - `ReduceInitialEnergy` → logged only (informational, caller adjusts defaults)
+///
+/// When `search` is `Some`, BackfillSynapses is fully executed via NoteManager.
+/// When `None`, it is logged as a recommendation only.
 ///
 /// Returns the count of successfully executed actions.
 pub async fn execute_actions(
     graph: &Arc<dyn GraphStore>,
+    search: Option<&Arc<dyn SearchStore>>,
     actions: &[HomeostasisAction],
 ) -> Result<usize> {
     let mut executed = 0;
@@ -177,12 +183,32 @@ pub async fn execute_actions(
                 }
             }
             HomeostasisAction::BackfillSynapses => {
-                // BackfillSynapses requires NoteManager (embedding search) which
-                // is not available from GraphStore alone. Log for the caller.
-                info!(
-                    "homeostasis: BackfillSynapses recommended — \
-                     requires NoteManager, skipping in graph-only context"
-                );
+                if let Some(search) = search {
+                    info!("homeostasis: executing BackfillSynapses via NoteManager");
+                    let note_manager = NoteManager::new(Arc::clone(graph), Arc::clone(search));
+                    // Use conservative parameters for heartbeat context:
+                    // - batch_size=20 (small batches to stay within timeout)
+                    // - min_similarity=0.0 (auto-calibrate from existing weights)
+                    // - max_neighbors=3 (top-K=3, recommended density target)
+                    match note_manager.backfill_synapses(20, 0.0, 3, None).await {
+                        Ok(progress) => {
+                            debug!(
+                                created = progress.synapses_created,
+                                processed = progress.processed,
+                                "homeostasis: BackfillSynapses completed"
+                            );
+                            executed += 1;
+                        }
+                        Err(e) => {
+                            warn!("homeostasis: BackfillSynapses failed: {}", e);
+                        }
+                    }
+                } else {
+                    info!(
+                        "homeostasis: BackfillSynapses recommended — \
+                         no SearchStore available, skipping"
+                    );
+                }
             }
             HomeostasisAction::ArchiveDeadNotes => {
                 info!("homeostasis: executing ArchiveDeadNotes via consolidate_memory");

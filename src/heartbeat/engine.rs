@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::events::EventEmitter;
+use crate::meilisearch::SearchStore;
 use crate::neo4j::traits::GraphStore;
 
 use super::{HeartbeatCheck, HeartbeatContext};
@@ -20,6 +21,7 @@ use super::{HeartbeatCheck, HeartbeatContext};
 /// Checks that exceed 5s are skipped via `tokio::time::timeout`.
 pub struct HeartbeatEngine {
     graph: Arc<dyn GraphStore>,
+    search: Option<Arc<dyn SearchStore>>,
     emitter: Option<Arc<dyn EventEmitter>>,
     checks: Vec<Box<dyn HeartbeatCheck>>,
     tick_interval: Duration,
@@ -31,12 +33,14 @@ impl HeartbeatEngine {
     /// Create a new engine with the given graph store and checks.
     pub fn new(
         graph: Arc<dyn GraphStore>,
+        search: Option<Arc<dyn SearchStore>>,
         emitter: Option<Arc<dyn EventEmitter>>,
         checks: Vec<Box<dyn HeartbeatCheck>>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             graph,
+            search,
             emitter,
             checks,
             tick_interval: Duration::from_secs(30),
@@ -50,6 +54,7 @@ impl HeartbeatEngine {
     /// so it runs for the lifetime of the process.
     pub fn start_owned(self) -> HeartbeatHandle {
         let graph = self.graph;
+        let search = self.search;
         let emitter = self.emitter;
         let checks = self.checks;
         let tick_interval = self.tick_interval;
@@ -59,7 +64,11 @@ impl HeartbeatEngine {
         let check_count = checks.len();
 
         tokio::spawn(async move {
-            let ctx = HeartbeatContext { graph, emitter };
+            let ctx = HeartbeatContext {
+                graph,
+                search,
+                emitter,
+            };
 
             // Track last-run time per check
             let mut last_run: Vec<Option<Instant>> = vec![None; checks.len()];
@@ -199,7 +208,7 @@ mod tests {
     #[test]
     fn test_engine_new() {
         let graph = Arc::new(MockGraphStore::new());
-        let engine = HeartbeatEngine::new(graph, None, vec![]);
+        let engine = HeartbeatEngine::new(graph, None, None, vec![]);
         assert_eq!(engine.checks.len(), 0);
         assert_eq!(engine.tick_interval, Duration::from_secs(30));
     }
@@ -211,7 +220,7 @@ mod tests {
         let checks: Vec<Box<dyn HeartbeatCheck>> = vec![Box::new(CountingCheck {
             count: count.clone(),
         })];
-        let engine = HeartbeatEngine::new(graph, None, checks);
+        let engine = HeartbeatEngine::new(graph, None, None, checks);
         assert_eq!(engine.checks.len(), 1);
     }
 
@@ -223,7 +232,7 @@ mod tests {
             count: count.clone(),
         })];
 
-        let mut engine = HeartbeatEngine::new(graph, None, checks);
+        let mut engine = HeartbeatEngine::new(graph, None, None, checks);
         engine.tick_interval = Duration::from_millis(10);
         let handle = engine.start_owned();
 
@@ -241,7 +250,7 @@ mod tests {
         let graph = Arc::new(MockGraphStore::new());
         let checks: Vec<Box<dyn HeartbeatCheck>> = vec![Box::new(FailingCheck)];
 
-        let mut engine = HeartbeatEngine::new(graph, None, checks);
+        let mut engine = HeartbeatEngine::new(graph, None, None, checks);
         engine.tick_interval = Duration::from_millis(10);
         let handle = engine.start_owned();
 
@@ -253,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_shutdown_idempotent() {
         let graph = Arc::new(MockGraphStore::new());
-        let engine = HeartbeatEngine::new(graph, None, vec![]);
+        let engine = HeartbeatEngine::new(graph, None, None, vec![]);
         let handle = engine.start_owned();
 
         handle.shutdown();

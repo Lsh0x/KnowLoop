@@ -137,7 +137,7 @@ impl HeartbeatCheck for HomeostasisCheck {
 
             // 6. Execute corrective actions
             let graph_arc: Arc<dyn crate::neo4j::traits::GraphStore> = Arc::clone(&ctx.graph);
-            match execute_actions(&graph_arc, &actions).await {
+            match execute_actions(&graph_arc, ctx.search.as_ref(), &actions).await {
                 Ok(executed) => {
                     info!(
                         "HomeostasisCheck: executed {}/{} actions for '{}'",
