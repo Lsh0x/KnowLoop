@@ -1,0 +1,22 @@
+[package]
+name = "neural-routing-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core types, traits, and storage for neural route learning"
+license = "MIT AND BUSL-1.1"
+
+[dependencies]
+# Workspace shared
+serde = { workspace = true }
+serde_json = { workspace = true }
+neo4rs = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
