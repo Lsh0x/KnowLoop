@@ -77,8 +77,10 @@ pub fn mock_trajectory_store() -> Arc<dyn neural_routing_runtime::TrajectoryStor
 /// Create a mock neural router for tests (disabled by default, no real store).
 pub fn mock_neural_router() -> Arc<tokio::sync::RwLock<neural_routing_runtime::DualTrackRouter>> {
     let store: Arc<dyn neural_routing_runtime::TrajectoryStore> = Arc::new(NoopStore);
-    let mut config = neural_routing_runtime::NeuralRoutingConfig::default();
-    config.enabled = false; // disabled in tests by default
+    let config = neural_routing_runtime::NeuralRoutingConfig {
+        enabled: false, // disabled in tests by default
+        ..Default::default()
+    };
     let router = neural_routing_runtime::DualTrackRouter::new(store, config);
     Arc::new(tokio::sync::RwLock::new(router))
 }
