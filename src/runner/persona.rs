@@ -258,9 +258,10 @@ impl PersonaStack {
             }
         }
 
-        // Truncate if over budget
-        if out.len() > budget_chars {
-            out.truncate(budget_chars.saturating_sub(4));
+        // Truncate if over budget (char-safe to avoid panic on multi-byte UTF-8)
+        if out.chars().count() > budget_chars {
+            let safe: String = out.chars().take(budget_chars.saturating_sub(4)).collect();
+            out = safe;
             out.push_str("...\n");
         }
 

@@ -770,13 +770,16 @@ fn truncate_content(content: &str, max_chars: usize) -> String {
         .collect();
     let trimmed = normalized.trim();
 
-    if trimmed.len() <= max_chars {
+    if trimmed.chars().count() <= max_chars {
         trimmed.to_string()
     } else {
-        // Find a word boundary near max_chars
-        let truncated = &trimmed[..max_chars];
+        // Collect the first max_chars characters (char-safe, no byte slicing)
+        let truncated: String = trimmed.chars().take(max_chars).collect();
+        // Find a word boundary near max_chars for cleaner truncation
         match truncated.rfind(' ') {
-            Some(pos) if pos > max_chars / 2 => format!("{}…", &trimmed[..pos]),
+            Some(pos) if pos > truncated.len() / 2 => {
+                format!("{}…", &truncated[..pos])
+            }
             _ => format!("{}…", truncated),
         }
     }

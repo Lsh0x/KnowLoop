@@ -58,14 +58,15 @@ pub async fn fetch_scar_suggestions(graph: &dyn GraphStore, ctx: &RefContext) ->
 
 /// Truncate content to a maximum length, preserving word boundaries.
 fn truncate_content(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         return s.to_string();
     }
 
-    // Find last space before max_len
-    let truncated = &s[..max_len];
+    // Collect first max_len characters (char-safe, no byte slicing on original)
+    let truncated: String = s.chars().take(max_len).collect();
+    // Find last space for cleaner word boundary
     match truncated.rfind(' ') {
-        Some(pos) if pos > max_len / 2 => format!("{}...", &s[..pos]),
+        Some(pos) if pos > truncated.len() / 2 => format!("{}...", &truncated[..pos]),
         _ => format!("{}...", truncated),
     }
 }
