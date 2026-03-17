@@ -25,6 +25,10 @@ pub struct ProjectNode {
     /// Used for incremental computation — only new commits since this date are processed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_co_change_computed_at: Option<DateTime<Utc>>,
+    /// Default energy for new notes (0.0-1.0). Set by homeostasis when note_density
+    /// is too high (ReduceInitialEnergy), reset to None (=1.0) when density normalizes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub default_note_energy: Option<f64>,
     /// Manual scaffolding level override (0-4). When set, bypasses auto-computation.
     /// Biomimicry T8: allows forcing a specific cognitive level.
     #[serde(skip_serializing_if = "Option::is_none", default)]

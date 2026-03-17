@@ -164,12 +164,27 @@ impl HeartbeatCheck for HomeostasisCheck {
                 cursor.clone()
             };
 
+            // Reset default_note_energy when density drops back to normal
+            if metrics.note_density <= 2.5 {
+                if let Err(e) = ctx
+                    .graph
+                    .set_default_note_energy(project.id, None)
+                    .await
+                {
+                    warn!(
+                        "HomeostasisCheck: failed to reset default_note_energy for '{}': {}",
+                        project.name, e
+                    );
+                }
+            }
+
             let graph_arc: Arc<dyn crate::neo4j::traits::GraphStore> = Arc::clone(&ctx.graph);
             match execute_actions(
                 &graph_arc,
                 ctx.search.as_ref(),
                 &actions,
                 Some(&current_cursor),
+                Some(project.id),
             )
             .await
             {

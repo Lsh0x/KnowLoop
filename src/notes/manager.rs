@@ -333,7 +333,7 @@ impl NoteManager {
             ));
         }
 
-        let note = Note::new_full(
+        let mut note = Note::new_full(
             input.project_id,
             input.note_type,
             input.importance.unwrap_or_default(),
@@ -342,6 +342,17 @@ impl NoteManager {
             input.tags.unwrap_or_default(),
             created_by.to_string(),
         );
+
+        // Apply project-level default_note_energy if set (homeostasis throttle).
+        // When note_density is high, homeostasis sets a lower initial energy
+        // so new notes start "cooler" and must prove their worth via activation.
+        if let Some(project_id) = input.project_id {
+            if let Ok(Some(project)) = self.neo4j.get_project(project_id).await {
+                if let Some(energy) = project.default_note_energy {
+                    note.energy = energy;
+                }
+            }
+        }
 
         // Store in Neo4j
         self.neo4j.create_note(&note).await?;

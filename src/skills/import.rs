@@ -1315,7 +1315,8 @@ mod tests {
             last_synced: None,
             analytics_computed_at: None,
             last_co_change_computed_at: None,
-            scaffolding_override: None,
+            default_note_energy: None,
+        scaffolding_override: None,
             sharing_policy: None,
         };
         store.create_project(&source_project).await.unwrap();
@@ -1331,7 +1332,8 @@ mod tests {
             last_synced: None,
             analytics_computed_at: None,
             last_co_change_computed_at: None,
-            scaffolding_override: None,
+            default_note_energy: None,
+        scaffolding_override: None,
             sharing_policy: None,
         };
         store.create_project(&target_project).await.unwrap();

@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::meilisearch::SearchStore;
 use crate::neo4j::traits::GraphStore;
@@ -200,6 +201,7 @@ pub async fn execute_actions(
     search: Option<&Arc<dyn SearchStore>>,
     actions: &[HomeostasisAction],
     cursor: Option<&BackfillCursor>,
+    project_id: Option<Uuid>,
 ) -> Result<ExecuteResult> {
     let mut executed = 0;
     let mut new_cursor: Option<BackfillCursor> = None;
@@ -283,13 +285,34 @@ pub async fn execute_actions(
                 }
             }
             HomeostasisAction::ReduceInitialEnergy(energy) => {
-                info!(
-                    energy,
-                    "homeostasis: ReduceInitialEnergy recommended — \
-                     new notes should start at this energy level"
-                );
-                // Informational only: the caller (e.g., NoteManager) should
-                // read this and adjust its default energy for new notes.
+                if let Some(pid) = project_id {
+                    info!(
+                        energy,
+                        project_id = %pid,
+                        "homeostasis: persisting ReduceInitialEnergy on project"
+                    );
+                    match graph
+                        .set_default_note_energy(pid, Some(*energy))
+                        .await
+                    {
+                        Ok(()) => {
+                            debug!(
+                                energy,
+                                "homeostasis: default_note_energy persisted"
+                            );
+                            executed += 1;
+                        }
+                        Err(e) => {
+                            warn!("homeostasis: ReduceInitialEnergy failed: {}", e);
+                        }
+                    }
+                } else {
+                    info!(
+                        energy,
+                        "homeostasis: ReduceInitialEnergy recommended — \
+                         no project_id, skipping persistence"
+                    );
+                }
             }
         }
     }
@@ -548,27 +571,51 @@ mod tests {
             amount: 0.02,
             prune_threshold: 0.15,
         }];
-        let result = execute_actions(&graph, None, &actions, None).await.unwrap();
+        let result = execute_actions(&graph, None, &actions, None, None)
+            .await
+            .unwrap();
         assert_eq!(result.executed, 1);
         assert!(result.backfill_cursor.is_none(), "no backfill → no cursor");
     }
 
     #[tokio::test]
-    async fn test_execute_reduce_initial_energy_is_informational() {
+    async fn test_execute_reduce_initial_energy_without_project_skips() {
         let graph: Arc<dyn GraphStore> = Arc::new(MockGraphStore::new());
         let actions = vec![HomeostasisAction::ReduceInitialEnergy(0.5)];
-        let result = execute_actions(&graph, None, &actions, None).await.unwrap();
-        // ReduceInitialEnergy is informational-only, doesn't count as executed
+        // No project_id → skips persistence
+        let result = execute_actions(&graph, None, &actions, None, None)
+            .await
+            .unwrap();
         assert_eq!(result.executed, 0);
         assert!(result.backfill_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_reduce_initial_energy_with_project_persists() {
+        let mock = Arc::new(MockGraphStore::new());
+        // Create a project first
+        let project = crate::test_helpers::test_project();
+        mock.create_project(&project).await.unwrap();
+        let graph: Arc<dyn GraphStore> = mock.clone();
+
+        let actions = vec![HomeostasisAction::ReduceInitialEnergy(0.5)];
+        let result = execute_actions(&graph, None, &actions, None, Some(project.id))
+            .await
+            .unwrap();
+        assert_eq!(result.executed, 1);
+
+        // Verify the value was persisted
+        let p = mock.get_project(project.id).await.unwrap().unwrap();
+        assert_eq!(p.default_note_energy, Some(0.5));
     }
 
     #[tokio::test]
     async fn test_execute_backfill_without_search_skips() {
         let graph: Arc<dyn GraphStore> = Arc::new(MockGraphStore::new());
         let actions = vec![HomeostasisAction::BackfillSynapses];
-        // No SearchStore → backfill is skipped (logged as recommendation)
-        let result = execute_actions(&graph, None, &actions, None).await.unwrap();
+        let result = execute_actions(&graph, None, &actions, None, None)
+            .await
+            .unwrap();
         assert_eq!(result.executed, 0);
         assert!(
             result.backfill_cursor.is_none(),
@@ -582,8 +629,7 @@ mod tests {
         let search: Arc<dyn crate::meilisearch::SearchStore> = Arc::new(MockSearchStore::new());
         let actions = vec![HomeostasisAction::BackfillSynapses];
 
-        // MockGraphStore has no notes → backfill completes immediately with total=0
-        let result = execute_actions(&graph, Some(&search), &actions, None)
+        let result = execute_actions(&graph, Some(&search), &actions, None, None)
             .await
             .unwrap();
         assert_eq!(result.executed, 1);
@@ -598,15 +644,13 @@ mod tests {
         let search: Arc<dyn crate::meilisearch::SearchStore> = Arc::new(MockSearchStore::new());
         let actions = vec![HomeostasisAction::BackfillSynapses];
 
-        // Start with a cursor at offset 10
         let cursor = BackfillCursor {
             offset: 10,
             completed: false,
         };
-        let result = execute_actions(&graph, Some(&search), &actions, Some(&cursor))
+        let result = execute_actions(&graph, Some(&search), &actions, Some(&cursor), None)
             .await
             .unwrap();
-        // MockGraphStore has no notes → completes
         let new_cursor = result.backfill_cursor.expect("should have cursor");
         assert!(new_cursor.completed);
     }
@@ -623,10 +667,9 @@ mod tests {
             HomeostasisAction::BackfillSynapses,
         ];
 
-        let result = execute_actions(&graph, Some(&search), &actions, None)
+        let result = execute_actions(&graph, Some(&search), &actions, None, None)
             .await
             .unwrap();
-        // Decay succeeds + Backfill succeeds (empty graph)
         assert_eq!(result.executed, 2);
         assert!(result.backfill_cursor.is_some());
     }

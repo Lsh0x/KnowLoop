@@ -67,7 +67,8 @@ mod tests {
             created_at: Utc::now(),
             analytics_computed_at: None,
             last_co_change_computed_at: None,
-            scaffolding_override: None,
+            default_note_energy: None,
+        scaffolding_override: None,
             sharing_policy: None,
         };
         graph.projects.write().await.insert(project_id, project);

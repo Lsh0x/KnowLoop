@@ -149,6 +149,7 @@ pub async fn create_project(
         last_synced: None,
         analytics_computed_at: None,
         last_co_change_computed_at: None,
+        default_note_energy: None,
         scaffolding_override: None,
         sharing_policy: None,
     };
