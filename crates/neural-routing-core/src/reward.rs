@@ -14,11 +14,7 @@ use crate::models::TrajectoryNode;
 pub trait RewardStrategy: Send + Sync {
     /// Decompose a total reward into per-step rewards.
     /// Returns a Vec of (node_index, local_reward) tuples.
-    async fn decompose(
-        &self,
-        nodes: &[TrajectoryNode],
-        total_reward: f64,
-    ) -> Result<Vec<f64>>;
+    async fn decompose(&self, nodes: &[TrajectoryNode], total_reward: f64) -> Result<Vec<f64>>;
 
     /// Name of this strategy (for logging/config).
     fn name(&self) -> &str;
@@ -67,11 +63,7 @@ impl Default for TDRewardStrategy {
 
 #[async_trait]
 impl RewardStrategy for TDRewardStrategy {
-    async fn decompose(
-        &self,
-        nodes: &[TrajectoryNode],
-        total_reward: f64,
-    ) -> Result<Vec<f64>> {
+    async fn decompose(&self, nodes: &[TrajectoryNode], total_reward: f64) -> Result<Vec<f64>> {
         if nodes.is_empty() {
             return Ok(vec![]);
         }
@@ -121,11 +113,7 @@ pub struct HindsightRewardStrategy;
 
 #[async_trait]
 impl RewardStrategy for HindsightRewardStrategy {
-    async fn decompose(
-        &self,
-        nodes: &[TrajectoryNode],
-        total_reward: f64,
-    ) -> Result<Vec<f64>> {
+    async fn decompose(&self, nodes: &[TrajectoryNode], total_reward: f64) -> Result<Vec<f64>> {
         if nodes.is_empty() {
             return Ok(vec![]);
         }
@@ -165,11 +153,7 @@ pub struct AttentionRewardStrategy;
 
 #[async_trait]
 impl RewardStrategy for AttentionRewardStrategy {
-    async fn decompose(
-        &self,
-        nodes: &[TrajectoryNode],
-        total_reward: f64,
-    ) -> Result<Vec<f64>> {
+    async fn decompose(&self, nodes: &[TrajectoryNode], total_reward: f64) -> Result<Vec<f64>> {
         if nodes.is_empty() {
             return Ok(vec![]);
         }

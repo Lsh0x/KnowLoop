@@ -42,7 +42,12 @@ mod tests {
         let now = Utc::now();
         let recent_good = compute_score(0.9, &now, 0.95, 1.0, 30);
         let old_good = compute_score(0.9, &(now - Duration::days(60)), 0.95, 1.0, 30);
-        assert!(recent_good > old_good, "Recent should beat old: {} vs {}", recent_good, old_good);
+        assert!(
+            recent_good > old_good,
+            "Recent should beat old: {} vs {}",
+            recent_good,
+            old_good
+        );
     }
 
     #[test]
@@ -65,6 +70,10 @@ mod tests {
     fn test_score_bounds() {
         let now = Utc::now();
         let score = compute_score(1.0, &now, 1.0, 1.0, 30);
-        assert!(score > 0.0 && score <= 1.0, "Score should be in (0, 1]: {}", score);
+        assert!(
+            score > 0.0 && score <= 1.0,
+            "Score should be in (0, 1]: {}",
+            score
+        );
     }
 }

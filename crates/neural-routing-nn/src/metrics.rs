@@ -62,8 +62,16 @@ impl NNMetrics {
             total_queries: total,
             hits,
             cache_hits,
-            hit_rate: if total > 0 { hits as f64 / total as f64 } else { 0.0 },
-            cache_hit_rate: if total > 0 { cache_hits as f64 / total as f64 } else { 0.0 },
+            hit_rate: if total > 0 {
+                hits as f64 / total as f64
+            } else {
+                0.0
+            },
+            cache_hit_rate: if total > 0 {
+                cache_hits as f64 / total as f64
+            } else {
+                0.0
+            },
             avg_similarity: if hits > 0 { sim_sum / hits as f64 } else { 0.0 },
             avg_reward: if hits > 0 { rew_sum / hits as f64 } else { 0.0 },
         }

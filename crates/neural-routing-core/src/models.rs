@@ -106,7 +106,7 @@ pub struct TrajectoryStats {
 }
 
 /// Distribution of rewards across trajectories.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RewardDistribution {
     pub min: f64,
     pub max: f64,
@@ -114,4 +114,36 @@ pub struct RewardDistribution {
     pub p50: f64,
     pub p75: f64,
     pub p90: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Relations: USED_TOOL / TOUCHED_ENTITY
+// ---------------------------------------------------------------------------
+
+/// Record of a tool used at a decision point (USED_TOOL relation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUsage {
+    /// MCP tool name (e.g., "code", "note", "plan").
+    pub tool_name: String,
+    /// MCP action within the tool (e.g., "search", "get_context").
+    pub action: String,
+    /// Serialized key parameters (stripped of PII).
+    pub params_hash: String,
+    /// Execution duration in milliseconds.
+    pub duration_ms: Option<u64>,
+    /// Whether the tool call succeeded.
+    pub success: bool,
+}
+
+/// Record of an entity touched at a decision point (TOUCHED_ENTITY relation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TouchedEntity {
+    /// Entity type: "file", "function", "note", "skill", "struct", "trait".
+    pub entity_type: String,
+    /// Entity identifier (file path, function name, UUID, etc.).
+    pub entity_id: String,
+    /// How the entity was touched: "read", "write", "search_hit", "context_load".
+    pub access_mode: String,
+    /// Relevance score (0.0-1.0) — how important was this entity to the decision.
+    pub relevance: Option<f64>,
 }

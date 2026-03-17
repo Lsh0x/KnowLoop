@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use neural_routing_core::{NNRoute, Router, TrajectoryStore, error::Result};
+use neural_routing_core::{error::Result, NNRoute, Router, TrajectoryStore};
 use neural_routing_nn::NNRouter;
 
 use crate::config::{NeuralRoutingConfig, RoutingMode};
@@ -23,10 +23,7 @@ pub struct DualTrackRouter {
 }
 
 impl DualTrackRouter {
-    pub fn new(
-        store: Arc<dyn TrajectoryStore>,
-        config: NeuralRoutingConfig,
-    ) -> Self {
+    pub fn new(store: Arc<dyn TrajectoryStore>, config: NeuralRoutingConfig) -> Self {
         let cpu_guard = CpuGuard::new(config.cpu_guard.clone().into());
         let nn_router = NNRouter::new(store, config.nn.clone());
 
@@ -93,7 +90,10 @@ impl Router for DualTrackRouter {
                 match tokio::time::timeout(timeout, self.nn_router.route(query_embedding)).await {
                     Ok(result) => result,
                     Err(_) => {
-                        tracing::warn!("DualTrack: NN Router timed out after {}ms", self.config.inference.timeout_ms);
+                        tracing::warn!(
+                            "DualTrack: NN Router timed out after {}ms",
+                            self.config.inference.timeout_ms
+                        );
                         Ok(None)
                     }
                 }
@@ -112,14 +112,17 @@ impl Router for DualTrackRouter {
 
         match self.config.mode {
             RoutingMode::NN => {
-                self.nn_router.route_with_context(query_embedding, available_tools).await
+                self.nn_router
+                    .route_with_context(query_embedding, available_tools)
+                    .await
             }
             RoutingMode::Full => {
                 // Same as above — policy net will be added in Phase 3
                 let timeout = Duration::from_millis(self.config.inference.timeout_ms);
                 match tokio::time::timeout(
                     timeout,
-                    self.nn_router.route_with_context(query_embedding, available_tools),
+                    self.nn_router
+                        .route_with_context(query_embedding, available_tools),
                 )
                 .await
                 {

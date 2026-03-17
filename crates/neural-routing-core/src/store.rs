@@ -54,8 +54,240 @@ impl Neo4jTrajectoryStore {
                 .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
         }
 
-        tracing::info!("Neural routing indexes ensured");
+        // Relation indexes for USED_TOOL and TOUCHED_ENTITY
+        let relation_queries = vec![
+            // Index on USED_TOOL relation properties for efficient lookup
+            "CREATE INDEX used_tool_name_idx IF NOT EXISTS FOR ()-[r:USED_TOOL]-() ON (r.tool_name)",
+            // Index on TOUCHED_ENTITY relation properties
+            "CREATE INDEX touched_entity_type_idx IF NOT EXISTS FOR ()-[r:TOUCHED_ENTITY]-() ON (r.entity_type, r.entity_id)",
+        ];
+
+        for q in relation_queries {
+            self.graph
+                .run(query(q))
+                .await
+                .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+        }
+
+        tracing::info!("Neural routing indexes ensured (including USED_TOOL/TOUCHED_ENTITY)");
         Ok(())
+    }
+
+    /// Link a trajectory node to a tool it used (USED_TOOL relation).
+    pub async fn link_tool_usage(&self, node_id: &Uuid, usage: &ToolUsage) -> Result<()> {
+        let q = query(
+            "MATCH (tn:TrajectoryNode {id: $node_id})
+             MERGE (tool:ToolNode {tool_name: $tool_name, action: $action})
+             MERGE (tn)-[r:USED_TOOL]->(tool)
+             SET r.params_hash = $params_hash,
+                 r.duration_ms = $duration_ms,
+                 r.success = $success",
+        )
+        .param("node_id", node_id.to_string())
+        .param("tool_name", usage.tool_name.clone())
+        .param("action", usage.action.clone())
+        .param("params_hash", usage.params_hash.clone())
+        .param("duration_ms", usage.duration_ms.unwrap_or(0) as i64)
+        .param("success", usage.success);
+
+        self.graph
+            .run(q)
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+
+        tracing::trace!(
+            node_id = %node_id,
+            tool = %usage.tool_name,
+            action = %usage.action,
+            "Linked tool usage"
+        );
+        Ok(())
+    }
+
+    /// Link a trajectory node to an entity it touched (TOUCHED_ENTITY relation).
+    ///
+    /// The entity is matched by type+id in the existing graph (File, Function, Note, Skill, etc.).
+    /// If the target entity doesn't exist, a lightweight proxy node is created.
+    pub async fn link_touched_entity(&self, node_id: &Uuid, entity: &TouchedEntity) -> Result<()> {
+        // Use MERGE on a generic TouchedNode to avoid coupling to PO's exact label scheme.
+        // The entity_type+entity_id pair is the unique key.
+        let q = query(
+            "MATCH (tn:TrajectoryNode {id: $node_id})
+             MERGE (e:TouchedNode {entity_type: $entity_type, entity_id: $entity_id})
+             MERGE (tn)-[r:TOUCHED_ENTITY]->(e)
+             SET r.access_mode = $access_mode,
+                 r.relevance = $relevance,
+                 r.entity_type = $entity_type,
+                 r.entity_id = $entity_id",
+        )
+        .param("node_id", node_id.to_string())
+        .param("entity_type", entity.entity_type.clone())
+        .param("entity_id", entity.entity_id.clone())
+        .param("access_mode", entity.access_mode.clone())
+        .param("relevance", entity.relevance.unwrap_or(0.0));
+
+        self.graph
+            .run(q)
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+
+        tracing::trace!(
+            node_id = %node_id,
+            entity_type = %entity.entity_type,
+            entity_id = %entity.entity_id,
+            "Linked touched entity"
+        );
+        Ok(())
+    }
+
+    /// Batch-link multiple tool usages for a trajectory node.
+    pub async fn link_tool_usages_batch(&self, node_id: &Uuid, usages: &[ToolUsage]) -> Result<()> {
+        if usages.is_empty() {
+            return Ok(());
+        }
+
+        let mut txn = self
+            .graph
+            .start_txn()
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+
+        for usage in usages {
+            let q = query(
+                "MATCH (tn:TrajectoryNode {id: $node_id})
+                 MERGE (tool:ToolNode {tool_name: $tool_name, action: $action})
+             MERGE (tn)-[r:USED_TOOL]->(tool)
+                 SET r.params_hash = $params_hash,
+                     r.duration_ms = $duration_ms,
+                     r.success = $success",
+            )
+            .param("node_id", node_id.to_string())
+            .param("tool_name", usage.tool_name.clone())
+            .param("action", usage.action.clone())
+            .param("params_hash", usage.params_hash.clone())
+            .param("duration_ms", usage.duration_ms.unwrap_or(0) as i64)
+            .param("success", usage.success);
+
+            txn.run(q)
+                .await
+                .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+        }
+
+        txn.commit()
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Batch-link multiple touched entities for a trajectory node.
+    pub async fn link_touched_entities_batch(
+        &self,
+        node_id: &Uuid,
+        entities: &[TouchedEntity],
+    ) -> Result<()> {
+        if entities.is_empty() {
+            return Ok(());
+        }
+
+        let mut txn = self
+            .graph
+            .start_txn()
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+
+        for entity in entities {
+            let q = query(
+                "MATCH (tn:TrajectoryNode {id: $node_id})
+                 MERGE (e:TouchedNode {entity_type: $entity_type, entity_id: $entity_id})
+                 MERGE (tn)-[r:TOUCHED_ENTITY]->(e)
+                 SET r.access_mode = $access_mode,
+                     r.relevance = $relevance,
+                     r.entity_type = $entity_type,
+                     r.entity_id = $entity_id",
+            )
+            .param("node_id", node_id.to_string())
+            .param("entity_type", entity.entity_type.clone())
+            .param("entity_id", entity.entity_id.clone())
+            .param("access_mode", entity.access_mode.clone())
+            .param("relevance", entity.relevance.unwrap_or(0.0));
+
+            txn.run(q)
+                .await
+                .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+        }
+
+        txn.commit()
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Get all tool usages for a trajectory node.
+    pub async fn get_node_tool_usages(&self, node_id: &Uuid) -> Result<Vec<ToolUsage>> {
+        let q = query(
+            "MATCH (tn:TrajectoryNode {id: $node_id})-[r:USED_TOOL]->(tool:ToolNode)
+             RETURN tool.tool_name AS tool_name, tool.action AS action,
+                    r.params_hash AS params_hash, r.duration_ms AS duration_ms,
+                    r.success AS success",
+        )
+        .param("node_id", node_id.to_string());
+
+        let mut result = self
+            .graph
+            .execute(q)
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+
+        let mut usages = Vec::new();
+        while let Some(row) = result
+            .next()
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?
+        {
+            usages.push(ToolUsage {
+                tool_name: row.get("tool_name").unwrap_or_default(),
+                action: row.get("action").unwrap_or_default(),
+                params_hash: row.get("params_hash").unwrap_or_default(),
+                duration_ms: row.get::<i64>("duration_ms").ok().map(|v| v as u64),
+                success: row.get("success").unwrap_or(true),
+            });
+        }
+
+        Ok(usages)
+    }
+
+    /// Get all touched entities for a trajectory node.
+    pub async fn get_node_touched_entities(&self, node_id: &Uuid) -> Result<Vec<TouchedEntity>> {
+        let q = query(
+            "MATCH (tn:TrajectoryNode {id: $node_id})-[r:TOUCHED_ENTITY]->(e:TouchedNode)
+             RETURN r.entity_type AS entity_type, r.entity_id AS entity_id,
+                    r.access_mode AS access_mode, r.relevance AS relevance",
+        )
+        .param("node_id", node_id.to_string());
+
+        let mut result = self
+            .graph
+            .execute(q)
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+
+        let mut entities = Vec::new();
+        while let Some(row) = result
+            .next()
+            .await
+            .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?
+        {
+            entities.push(TouchedEntity {
+                entity_type: row.get("entity_type").unwrap_or_default(),
+                entity_id: row.get("entity_id").unwrap_or_default(),
+                access_mode: row.get("access_mode").unwrap_or_default(),
+                relevance: row.get::<f64>("relevance").ok(),
+            });
+        }
+
+        Ok(entities)
     }
 }
 
@@ -181,8 +413,12 @@ impl TrajectoryStore for Neo4jTrajectoryStore {
             .await
             .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?
         {
-            let t: neo4rs::Node = row.get("t").map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
-            let nodes_raw: Vec<neo4rs::Node> = row.get("nodes").map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+            let t: neo4rs::Node = row
+                .get("t")
+                .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+            let nodes_raw: Vec<neo4rs::Node> = row
+                .get("nodes")
+                .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
 
             let nodes = nodes_raw
                 .into_iter()
@@ -210,6 +446,25 @@ impl TrajectoryStore for Neo4jTrajectoryStore {
         if let Some(max_r) = filter.max_reward {
             conditions.push("t.total_reward <= $max_reward".to_string());
             cypher_params.push(("max_reward".into(), serde_json::json!(max_r)));
+        }
+        if let Some(ref from_date) = filter.from_date {
+            conditions.push("t.created_at >= datetime($from_date)".to_string());
+            cypher_params.push((
+                "from_date".into(),
+                serde_json::json!(from_date.to_rfc3339()),
+            ));
+        }
+        if let Some(ref to_date) = filter.to_date {
+            conditions.push("t.created_at <= datetime($to_date)".to_string());
+            cypher_params.push(("to_date".into(), serde_json::json!(to_date.to_rfc3339())));
+        }
+        if let Some(min_s) = filter.min_steps {
+            conditions.push("t.step_count >= $min_steps".to_string());
+            cypher_params.push(("min_steps".into(), serde_json::json!(min_s as i64)));
+        }
+        if let Some(max_s) = filter.max_steps {
+            conditions.push("t.step_count <= $max_steps".to_string());
+            cypher_params.push(("max_steps".into(), serde_json::json!(max_s as i64)));
         }
 
         let limit = filter.limit.unwrap_or(50).min(200);
@@ -254,7 +509,9 @@ impl TrajectoryStore for Neo4jTrajectoryStore {
             .await
             .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?
         {
-            let t: neo4rs::Node = row.get("t").map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+            let t: neo4rs::Node = row
+                .get("t")
+                .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
             trajectories.push(parse_trajectory(&t, vec![])?);
         }
 
@@ -290,8 +547,12 @@ impl TrajectoryStore for Neo4jTrajectoryStore {
             .await
             .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?
         {
-            let t: neo4rs::Node = row.get("t").map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
-            let score: f64 = row.get("score").map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+            let t: neo4rs::Node = row
+                .get("t")
+                .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+            let score: f64 = row
+                .get("score")
+                .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
             let trajectory = parse_trajectory(&t, vec![])?;
             results.push((trajectory, score));
         }
@@ -381,8 +642,16 @@ impl TrajectoryStore for Neo4jTrajectoryStore {
         let q = query(
             "MATCH (t:Trajectory {id: $id})
              OPTIONAL MATCH (t)-[:CONTAINS]->(tn:TrajectoryNode)
+             OPTIONAL MATCH (tn)-[:USED_TOOL]->(tool:ToolNode)
+             OPTIONAL MATCH (tn)-[:TOUCHED_ENTITY]->(touched:TouchedNode)
              DETACH DELETE t, tn
-             RETURN count(t) > 0 AS deleted",
+             WITH tool, touched
+             WHERE tool IS NOT NULL AND NOT EXISTS { MATCH ()-[:USED_TOOL]->(tool) }
+             DETACH DELETE tool
+             WITH touched
+             WHERE touched IS NOT NULL AND NOT EXISTS { MATCH ()-[:TOUCHED_ENTITY]->(touched) }
+             DETACH DELETE touched
+             RETURN true AS deleted",
         )
         .param("id", id.to_string());
 
@@ -409,7 +678,9 @@ impl TrajectoryStore for Neo4jTrajectoryStore {
 // ---------------------------------------------------------------------------
 
 fn parse_trajectory(node: &neo4rs::Node, nodes: Vec<TrajectoryNode>) -> Result<Trajectory> {
-    let id_str: String = node.get("id").map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+    let id_str: String = node
+        .get("id")
+        .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| NeuralRoutingError::Neo4j(format!("Invalid trajectory UUID: {}", e)))?;
 
@@ -421,12 +692,20 @@ fn parse_trajectory(node: &neo4rs::Node, nodes: Vec<TrajectoryNode>) -> Result<T
         step_count: node.get::<i64>("step_count").unwrap_or(0) as usize,
         duration_ms: node.get::<i64>("duration_ms").unwrap_or(0) as u64,
         nodes,
-        created_at: chrono::Utc::now(), // TODO: parse from Neo4j datetime
+        created_at: {
+            // Parse ISO 8601 datetime string stored via datetime($created_at)
+            let dt_str: String = node.get("created_at").unwrap_or_default();
+            chrono::DateTime::parse_from_rfc3339(&dt_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now())
+        },
     })
 }
 
 fn parse_trajectory_node(node: &neo4rs::Node) -> Result<TrajectoryNode> {
-    let id_str: String = node.get("id").map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
+    let id_str: String = node
+        .get("id")
+        .map_err(|e| NeuralRoutingError::Neo4j(e.to_string()))?;
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| NeuralRoutingError::Neo4j(format!("Invalid node UUID: {}", e)))?;
 

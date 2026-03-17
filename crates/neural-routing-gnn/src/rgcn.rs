@@ -5,6 +5,7 @@
 
 /// Placeholder for R-GCN implementation.
 /// Will be implemented in Phase 2 (T2.2).
+#[derive(Default)]
 pub struct RGCNLayer {
     _private: (),
 }
@@ -12,6 +13,6 @@ pub struct RGCNLayer {
 impl RGCNLayer {
     /// Create a new R-GCN layer (placeholder).
     pub fn new() -> Self {
-        Self { _private: () }
+        Self::default()
     }
 }

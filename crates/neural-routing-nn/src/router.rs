@@ -6,11 +6,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moka::future::Cache;
+use neural_routing_core::{error::Result, NNRoute, PlannedAction, Router, TrajectoryStore};
 use serde::{Deserialize, Serialize};
-use neural_routing_core::{
-    NNRoute, PlannedAction, Router, TrajectoryStore,
-    error::Result,
-};
 
 use crate::metrics::NNMetrics;
 use crate::scoring::compute_score;
@@ -114,7 +111,11 @@ impl NNRouter {
         // Search store
         let candidates = self
             .store
-            .search_similar(query_embedding, self.config.top_k, self.config.min_similarity)
+            .search_similar(
+                query_embedding,
+                self.config.top_k,
+                self.config.min_similarity,
+            )
             .await?;
 
         if candidates.is_empty() {
@@ -194,9 +195,7 @@ impl NNRouter {
             .record_hit(best_similarity, full_trajectory.total_reward);
 
         // Cache the result (before tool filtering for broader reuse)
-        self.cache
-            .insert(cache_key, Arc::new(route.clone()))
-            .await;
+        self.cache.insert(cache_key, Arc::new(route.clone())).await;
 
         Ok(Some(route))
     }
@@ -223,7 +222,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use neural_routing_core::{
-        Trajectory, TrajectoryFilter, TrajectoryNode, TrajectoryStats, RewardDistribution,
+        RewardDistribution, Trajectory, TrajectoryFilter, TrajectoryNode, TrajectoryStats,
     };
     use std::sync::Mutex;
     use uuid::Uuid;
@@ -295,7 +294,12 @@ mod tests {
                 avg_step_count: 0.0,
                 avg_duration_ms: 0.0,
                 reward_distribution: RewardDistribution {
-                    min: 0.0, max: 0.0, p25: 0.0, p50: 0.0, p75: 0.0, p90: 0.0,
+                    min: 0.0,
+                    max: 0.0,
+                    p25: 0.0,
+                    p50: 0.0,
+                    p75: 0.0,
+                    p90: 0.0,
                 },
             })
         }
@@ -384,7 +388,10 @@ mod tests {
         assert!(result.is_some());
         let route = result.unwrap();
         assert_eq!(route.actions.len(), 2);
-        assert!(!route.actions.iter().any(|a| a.action_type == "analyze_impact"));
+        assert!(!route
+            .actions
+            .iter()
+            .any(|a| a.action_type == "analyze_impact"));
     }
 
     #[tokio::test]

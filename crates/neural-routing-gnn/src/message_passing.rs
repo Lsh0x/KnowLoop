@@ -10,16 +10,32 @@ use candle_core::Tensor;
 /// 3. `update()` — update node representation
 pub trait MessagePassing {
     /// Compute messages along edges.
-    fn message(&self, x: &Tensor, edge_index: &Tensor, edge_type: Option<&Tensor>) -> candle_core::Result<Tensor>;
+    fn message(
+        &self,
+        x: &Tensor,
+        edge_index: &Tensor,
+        edge_type: Option<&Tensor>,
+    ) -> candle_core::Result<Tensor>;
 
     /// Aggregate messages at each node.
-    fn aggregate(&self, messages: &Tensor, edge_index: &Tensor, num_nodes: usize) -> candle_core::Result<Tensor>;
+    fn aggregate(
+        &self,
+        messages: &Tensor,
+        edge_index: &Tensor,
+        num_nodes: usize,
+    ) -> candle_core::Result<Tensor>;
 
     /// Update node representations.
     fn update(&self, x: &Tensor, aggregated: &Tensor) -> candle_core::Result<Tensor>;
 
     /// Full forward pass: message -> aggregate -> update.
-    fn forward(&self, x: &Tensor, edge_index: &Tensor, edge_type: Option<&Tensor>, num_nodes: usize) -> candle_core::Result<Tensor> {
+    fn forward(
+        &self,
+        x: &Tensor,
+        edge_index: &Tensor,
+        edge_type: Option<&Tensor>,
+        num_nodes: usize,
+    ) -> candle_core::Result<Tensor> {
         let messages = self.message(x, edge_index, edge_type)?;
         let aggregated = self.aggregate(&messages, edge_index, num_nodes)?;
         self.update(x, &aggregated)

@@ -69,7 +69,10 @@ impl CpuGuard {
     /// Wait until the guard is not paused. Returns immediately if not paused.
     pub async fn wait_if_paused(&self) {
         while self.paused.load(Ordering::Relaxed) {
-            tracing::debug!("CpuGuard: paused, waiting for CPU to drop below {}%", self.config.resume_threshold);
+            tracing::debug!(
+                "CpuGuard: paused, waiting for CPU to drop below {}%",
+                self.config.resume_threshold
+            );
             self.notify.notified().await;
         }
     }

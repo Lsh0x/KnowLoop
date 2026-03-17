@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use neural_routing_core::RewardConfig;
 use neural_routing_nn::NNConfig;
 use neural_routing_policy::TrainingConfig;
 
@@ -40,6 +41,10 @@ pub struct NeuralRoutingConfig {
     /// CPU guard configuration.
     #[serde(default)]
     pub cpu_guard: CpuGuardSettings,
+
+    /// Reward decomposition configuration.
+    #[serde(default)]
+    pub reward: RewardConfig,
 }
 
 impl Default for NeuralRoutingConfig {
@@ -52,6 +57,7 @@ impl Default for NeuralRoutingConfig {
             collection: CollectionConfig::default(),
             nn: NNConfig::default(),
             cpu_guard: CpuGuardSettings::default(),
+            reward: RewardConfig::default(),
         }
     }
 }
@@ -89,8 +95,9 @@ impl Default for InferenceConfig {
 /// Trajectory collection settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionConfig {
-    /// Enable trajectory collection (always recommended).
-    #[serde(default = "default_true")]
+    /// Enable trajectory collection.
+    /// Default: false (opt-in). Set to true or NEURAL_ROUTING_COLLECT=true to enable.
+    #[serde(default)]
     pub enabled: bool,
     /// Flush batch size — trajectories are buffered and flushed in batches.
     #[serde(default = "default_buffer_size")]
@@ -100,7 +107,7 @@ pub struct CollectionConfig {
 impl Default for CollectionConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             buffer_size: 50,
         }
     }
@@ -141,13 +148,27 @@ impl From<CpuGuardSettings> for CpuGuardConfig {
 }
 
 // Default value helpers for serde
-fn default_true() -> bool { true }
-fn default_mode() -> RoutingMode { RoutingMode::NN }
-fn default_timeout_ms() -> u64 { 15 }
-fn default_buffer_size() -> usize { 50 }
-fn default_pause_threshold() -> f32 { 80.0 }
-fn default_resume_threshold() -> f32 { 50.0 }
-fn default_poll_interval_secs() -> u64 { 2 }
+fn default_true() -> bool {
+    true
+}
+fn default_mode() -> RoutingMode {
+    RoutingMode::NN
+}
+fn default_timeout_ms() -> u64 {
+    15
+}
+fn default_buffer_size() -> usize {
+    50
+}
+fn default_pause_threshold() -> f32 {
+    80.0
+}
+fn default_resume_threshold() -> f32 {
+    50.0
+}
+fn default_poll_interval_secs() -> u64 {
+    2
+}
 
 #[cfg(test)]
 mod tests {
@@ -159,7 +180,7 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.mode, RoutingMode::NN);
         assert_eq!(config.inference.timeout_ms, 15);
-        assert!(config.collection.enabled);
+        assert!(!config.collection.enabled); // default: false (opt-in)
         assert_eq!(config.nn.top_k, 5);
     }
 

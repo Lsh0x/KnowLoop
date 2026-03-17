@@ -5,6 +5,7 @@
 
 /// Placeholder for GraphSAGE implementation.
 /// Will be implemented in Phase 2 (T2.3).
+#[derive(Default)]
 pub struct GraphSAGELayer {
     _private: (),
 }
@@ -12,6 +13,6 @@ pub struct GraphSAGELayer {
 impl GraphSAGELayer {
     /// Create a new GraphSAGE layer (placeholder).
     pub fn new() -> Self {
-        Self { _private: () }
+        Self::default()
     }
 }

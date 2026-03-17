@@ -8,12 +8,12 @@
 //! Built on candle (HuggingFace) — pure Rust, no Python dependency.
 //! Always compiled (build full), activation controlled at runtime via settings.
 
-pub mod transformer;
 pub mod cql;
 pub mod ewc;
 pub mod training;
+pub mod transformer;
 
-/// Re-export key types
-pub use transformer::DecisionTransformer;
 pub use cql::CQLPolicy;
 pub use training::TrainingConfig;
+/// Re-export key types
+pub use transformer::DecisionTransformer;

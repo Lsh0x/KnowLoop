@@ -34,7 +34,7 @@ pub fn validate_embedding(embedding: &[f32]) -> Result<()> {
                 i
             )));
         }
-        if v < -1.0 || v > 1.0 {
+        if !(-1.0..=1.0).contains(&v) {
             return Err(NeuralRoutingError::InvalidVector(format!(
                 "dimension {} value {} is out of bounds [-1.0, 1.0]",
                 i, v
@@ -57,7 +57,11 @@ pub fn validate_embedding(embedding: &[f32]) -> Result<()> {
 
 /// Normalize a vector to unit L2 norm in-place.
 pub fn l2_normalize(embedding: &mut [f32]) {
-    let norm: f64 = embedding.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>().sqrt();
+    let norm: f64 = embedding
+        .iter()
+        .map(|&v| (v as f64) * (v as f64))
+        .sum::<f64>()
+        .sqrt();
     if norm > 1e-10 {
         let inv_norm = 1.0 / norm as f32;
         for v in embedding.iter_mut() {
