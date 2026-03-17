@@ -933,6 +933,23 @@ mod tests {
     }
 
     #[test]
+    fn test_persona_stack_render_truncation_multibyte_utf8() {
+        // Verify char-safe truncation in render_for_prompt doesn't panic on multi-byte UTF-8
+        let mut stack = PersonaStack::new(4000);
+        // Use a persona name with accented chars to ensure multi-byte safety
+        stack.push(make_entry(
+            "néo4j-spécialiste",
+            0.9,
+            PersonaTrigger::TaskAssign,
+        ));
+
+        // Very small budget forces the truncation path (line 262)
+        let rendered = stack.render_for_prompt(10);
+        // Should not panic and should contain the truncation marker
+        assert!(rendered.ends_with("...\n") || rendered.chars().count() <= 14);
+    }
+
+    #[test]
     fn test_persona_trigger_display() {
         assert_eq!(PersonaTrigger::TaskAssign.to_string(), "task_assign");
         assert_eq!(PersonaTrigger::FileMatch.to_string(), "file_match");

@@ -107,6 +107,38 @@ mod tests {
     }
 
     #[test]
+    fn test_truncate_content_multibyte_utf8() {
+        // French accented characters are multi-byte in UTF-8
+        let text = "Les résultats à vérifier sont très élevés";
+        let result = truncate_content(text, 20);
+        assert!(result.ends_with("..."));
+        // Must not panic on multi-byte boundaries
+        assert!(result.chars().count() <= 24); // 20 chars + "..."
+    }
+
+    #[test]
+    fn test_truncate_content_emoji() {
+        let text = "🔥 Fix critical bug ✅ Tests pass 🎉 Released";
+        let result = truncate_content(text, 25);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_content_cjk() {
+        let text = "代码分析工具非常有用 code analysis tool";
+        let result = truncate_content(text, 8);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_content_mixed_scripts_exact_boundary() {
+        let text = "café";
+        let result = truncate_content(text, 4);
+        assert_eq!(result, "café");
+        assert!(!result.ends_with("..."));
+    }
+
+    #[test]
     fn test_min_scar_intensity_threshold() {
         assert!((MIN_SCAR_INTENSITY - 0.6).abs() < f64::EPSILON);
     }

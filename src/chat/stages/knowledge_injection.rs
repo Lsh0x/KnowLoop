@@ -954,6 +954,44 @@ mod tests {
         assert_eq!(result, "");
     }
 
+    #[test]
+    fn test_truncate_content_multibyte_utf8() {
+        // French accents: "é" = 2 bytes, "à" = 2 bytes
+        let text = "Les résultats à vérifier sont très élevés";
+        let result = truncate_content(text, 20);
+        assert!(result.ends_with('…'));
+        // Must not panic on multi-byte chars
+        assert!(result.chars().count() <= 21); // 20 + ellipsis
+    }
+
+    #[test]
+    fn test_truncate_content_emoji() {
+        // Emojis: "🔥" = 4 bytes, "✅" = 3 bytes
+        let text = "🔥 Fix critical bug ✅ Tests pass 🎉 Released";
+        let result = truncate_content(text, 25);
+        assert!(result.ends_with('…'));
+        // Must not panic on 4-byte emoji boundaries
+        assert!(result.chars().count() <= 26);
+    }
+
+    #[test]
+    fn test_truncate_content_cjk() {
+        // CJK characters: each 3 bytes in UTF-8
+        let text = "代码分析工具非常有用 code analysis tool";
+        let result = truncate_content(text, 8);
+        assert!(result.ends_with('…'));
+        assert!(result.chars().count() <= 9);
+    }
+
+    #[test]
+    fn test_truncate_content_mixed_scripts_exact_boundary() {
+        // Exactly at boundary — no truncation needed
+        let text = "café"; // 4 chars, 5 bytes (é = 2 bytes)
+        let result = truncate_content(text, 4);
+        assert_eq!(result, "café");
+        assert!(!result.ends_with('…'));
+    }
+
     // ── KnowledgeInjectionConfig tests ──────────────────────────────────
 
     #[test]
