@@ -226,6 +226,7 @@ mod tests {
         Trajectory, TrajectoryFilter, TrajectoryNode, TrajectoryStats, RewardDistribution,
     };
     use std::sync::Mutex;
+    use uuid::Uuid;
 
     /// Mock TrajectoryStore for testing.
     struct MockStore {

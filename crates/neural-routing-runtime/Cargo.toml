@@ -1,0 +1,30 @@
+[package]
+name = "neural-routing-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime orchestration for neural route learning — DualTrack router, inference engine, CpuGuard"
+license = "MIT AND BUSL-1.1"
+
+[dependencies]
+neural-routing-core = { path = "../neural-routing-core" }
+neural-routing-nn = { path = "../neural-routing-nn" }
+neural-routing-gnn = { path = "../neural-routing-gnn" }
+neural-routing-policy = { path = "../neural-routing-policy" }
+
+# Workspace shared
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+# CPU monitoring for CpuGuard
+sysinfo = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+tokio-test = "0.4"
