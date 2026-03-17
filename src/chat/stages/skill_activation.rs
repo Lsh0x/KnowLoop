@@ -60,6 +60,8 @@ impl Default for SkillActivationConfig {
 pub struct SkillActivationStage {
     graph: Arc<dyn GraphStore>,
     config: SkillActivationConfig,
+    /// Trajectory collector for decision capture (fire-and-forget).
+    collector: Option<Arc<neural_routing_runtime::TrajectoryCollector>>,
 }
 
 impl SkillActivationStage {
@@ -68,12 +70,26 @@ impl SkillActivationStage {
         Self {
             graph,
             config: SkillActivationConfig::default(),
+            collector: None,
         }
     }
 
     /// Create with custom configuration.
     pub fn with_config(graph: Arc<dyn GraphStore>, config: SkillActivationConfig) -> Self {
-        Self { graph, config }
+        Self {
+            graph,
+            config,
+            collector: None,
+        }
+    }
+
+    /// Attach a trajectory collector for decision capture.
+    pub fn with_collector(
+        mut self,
+        collector: Arc<neural_routing_runtime::TrajectoryCollector>,
+    ) -> Self {
+        self.collector = Some(collector);
+        self
     }
 
     /// Extract file paths mentioned in the user message.
@@ -223,6 +239,47 @@ impl EnrichmentStage for SkillActivationStage {
 
         if !content_parts.is_empty() {
             ctx.add_section("Activated Skills", content_parts.join("\n"), self.name());
+        }
+
+        // ── Trajectory collection: record skill activation decision ────────
+        if let Some(ref collector) = self.collector {
+            let alternatives_count = matches.len();
+            let (chosen_name, chosen_confidence) = matches
+                .first()
+                .map(|(s, c)| (s.name.clone(), *c))
+                .unwrap_or_else(|| ("none".to_string(), 0.0));
+
+            let touched: Vec<neural_routing_runtime::TouchedEntity> = matches
+                .iter()
+                .map(|(s, _)| neural_routing_runtime::TouchedEntity {
+                    entity_type: "Skill".to_string(),
+                    entity_id: s.id.to_string(),
+                    access_mode: "activate".to_string(),
+                    relevance: Some(chosen_confidence),
+                })
+                .collect();
+
+            collector.record_decision(neural_routing_runtime::DecisionRecord {
+                session_id: input.session_id.to_string(),
+                context_embedding: vec![],
+                action_type: "skill.activate".to_string(),
+                action_params: serde_json::json!({
+                    "chosen_skill": chosen_name,
+                    "activated_count": alternatives_count,
+                }),
+                alternatives_count,
+                chosen_index: 0,
+                confidence: chosen_confidence,
+                tool_usages: vec![neural_routing_runtime::ToolUsage {
+                    tool_name: "skill_activation".to_string(),
+                    action: "match".to_string(),
+                    params_hash: format!("project:{}", project_id),
+                    duration_ms: None,
+                    success: true,
+                }],
+                touched_entities: touched,
+                timestamp_ms: 0,
+            });
         }
 
         // Async boost energy for activated skills (Hebbian reinforcement)

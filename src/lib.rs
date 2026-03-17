@@ -95,6 +95,9 @@ pub struct YamlConfig {
     /// Runner section (optional — configures autonomous plan execution)
     #[serde(default)]
     pub runner: runner::RunnerConfig,
+    /// Neural routing section (optional — trajectory-based route learning)
+    #[serde(default)]
+    pub neural_routing: neural_routing_runtime::NeuralRoutingConfig,
 }
 
 /// Skill registry configuration section (optional)
@@ -556,6 +559,11 @@ pub struct Config {
     /// Priority: env var (REGISTRY_REMOTE_URL) > YAML (registry.remote_url) > None.
     pub registry_remote_url: Option<String>,
 
+    // ── Neural Routing config ─────────────────────────────────────────
+    /// Neural routing configuration (trajectory-based route learning).
+    /// Runtime-controlled — always compiled, enabled/disabled via settings.
+    pub neural_routing: neural_routing_runtime::NeuralRoutingConfig,
+
     /// Resolved path to the config.yaml file that was loaded (if any).
     /// Used for persisting runtime changes back to disk.
     pub config_yaml_path: Option<std::path::PathBuf>,
@@ -643,6 +651,31 @@ impl Config {
             registry_remote_url: std::env::var("REGISTRY_REMOTE_URL")
                 .ok()
                 .or(yaml.registry.remote_url),
+            // Neural routing config (env var overrides > YAML > defaults)
+            neural_routing: {
+                let mut nr = yaml.neural_routing;
+                if let Ok(v) = std::env::var("NEURAL_ROUTING_ENABLED") {
+                    nr.enabled = v == "true" || v == "1";
+                }
+                if let Ok(v) = std::env::var("NEURAL_ROUTING_MODE") {
+                    nr.mode = match v.as_str() {
+                        "full" => neural_routing_runtime::config::RoutingMode::Full,
+                        _ => neural_routing_runtime::config::RoutingMode::NN,
+                    };
+                }
+                if let Ok(v) = std::env::var("NEURAL_ROUTING_TRAINING_MODE") {
+                    nr.training.mode = v;
+                }
+                if let Ok(v) = std::env::var("NEURAL_ROUTING_MAX_THREADS") {
+                    if let Ok(n) = v.parse() {
+                        nr.training.max_threads = n;
+                    }
+                }
+                if let Ok(v) = std::env::var("NEURAL_ROUTING_COLLECT") {
+                    nr.collection.enabled = v == "true" || v == "1";
+                }
+                nr
+            },
             config_yaml_path: resolved_path,
         })
     }
@@ -730,6 +763,14 @@ pub struct AppState {
     pub meili: Arc<dyn meilisearch::SearchStore>,
     pub parser: Arc<parser::CodeParser>,
     pub config: Arc<Config>,
+    /// Neural routing — DualTrack router (NN + policy net fallback).
+    /// Always present (build full), but only active when config.neural_routing.enabled = true.
+    pub neural_router: Arc<tokio::sync::RwLock<neural_routing_runtime::DualTrackRouter>>,
+    /// Trajectory collector — fire-and-forget decision capture for neural route learning.
+    /// Present when config.neural_routing.collection.enabled = true.
+    pub trajectory_collector: Option<Arc<neural_routing_runtime::TrajectoryCollector>>,
+    /// Trajectory store — Neo4j CRUD + vector search for stored trajectories.
+    pub trajectory_store: Arc<dyn neural_routing_runtime::TrajectoryStore>,
 }
 
 impl AppState {
@@ -751,11 +792,54 @@ impl AppState {
 
         let parser = Arc::new(parser::CodeParser::new()?);
 
+        // Initialize neural routing with its own Neo4j connection pool
+        let nr_graph = Arc::new(
+            neo4rs::Graph::new(
+                &config.neo4j_uri,
+                &config.neo4j_user,
+                &config.neo4j_password,
+            )
+            .await?,
+        );
+        let nr_store = Arc::new(neural_routing_runtime::Neo4jTrajectoryStore::new(nr_graph));
+        let trajectory_store: Arc<dyn neural_routing_runtime::TrajectoryStore> = nr_store.clone();
+        let trajectory_store_api: Arc<dyn neural_routing_runtime::TrajectoryStore> =
+            nr_store.clone();
+        let dual_router = neural_routing_runtime::DualTrackRouter::new(
+            trajectory_store,
+            config.neural_routing.clone(),
+        );
+        if config.neural_routing.enabled {
+            tracing::info!(
+                mode = ?config.neural_routing.mode,
+                "Neural routing initialized"
+            );
+        }
+        let neural_router = Arc::new(tokio::sync::RwLock::new(dual_router));
+
+        // Initialize trajectory collector (fire-and-forget decision capture)
+        let trajectory_collector = if config.neural_routing.collection.enabled {
+            let (collector, _handle) = neural_routing_runtime::TrajectoryCollector::new(
+                nr_store,
+                &config.neural_routing.collection,
+            );
+            tracing::info!(
+                "Trajectory collector initialized (buffer_size={})",
+                config.neural_routing.collection.buffer_size
+            );
+            Some(Arc::new(collector))
+        } else {
+            None
+        };
+
         Ok(Self {
             neo4j,
             meili,
             parser,
             config: Arc::new(config),
+            neural_router,
+            trajectory_collector,
+            trajectory_store: trajectory_store_api,
         })
     }
 }
@@ -840,6 +924,11 @@ pub async fn start_server(mut config: Config) -> Result<()> {
     // them into the local broadcast bus. This makes the local bus the single
     // source of truth — WS handlers only need to listen to the local bus.
     event_bus.start_nats_bridge();
+
+    // Extract neural_router, trajectory_collector, and trajectory_store before state is moved into Orchestrator
+    let neural_router = state.neural_router.clone();
+    let trajectory_collector = state.trajectory_collector.clone();
+    let trajectory_store = state.trajectory_store.clone();
 
     // Create orchestrator with hybrid emitter
     let orchestrator =
@@ -1112,6 +1201,9 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         if let Some(ref nats) = nats_emitter {
             cm = cm.with_nats(nats.clone());
         }
+        if let Some(ref tc) = trajectory_collector {
+            cm = cm.with_trajectory_collector(tc.clone());
+        }
         let cm = Arc::new(cm);
         cm.start_cleanup_task();
         tracing::info!("Chat manager initialized");
@@ -1313,6 +1405,9 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         public_url: config.public_url.clone(),
         ws_ticket_store,
         registry_remote_url: config.registry_remote_url.clone(),
+        neural_router: neural_router.clone(),
+        trajectory_collector,
+        trajectory_store: Some(trajectory_store),
         oidc_client,
         identity: {
             match identity::InstanceIdentity::load_or_generate(None) {

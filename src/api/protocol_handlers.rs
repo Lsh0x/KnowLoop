@@ -984,6 +984,39 @@ pub async fn fire_transition(
         }
     }
 
+    // ── Trajectory collection: record protocol transition decision ────────
+    if let Some(ref collector) = state.trajectory_collector {
+        collector.record_decision(neural_routing_runtime::DecisionRecord {
+            session_id: format!("protocol-run:{}", run_id),
+            context_embedding: vec![],
+            action_type: "protocol.transition".to_string(),
+            action_params: serde_json::json!({
+                "run_id": run_id,
+                "trigger": body.trigger,
+                "success": result.success,
+                "current_state_name": result.current_state_name,
+                "run_completed": result.run_completed,
+            }),
+            alternatives_count: 1,
+            chosen_index: 0,
+            confidence: if result.success { 0.9 } else { 0.1 },
+            tool_usages: vec![neural_routing_runtime::ToolUsage {
+                tool_name: "protocol".to_string(),
+                action: "transition".to_string(),
+                params_hash: format!("trigger:{}", body.trigger),
+                duration_ms: None,
+                success: result.success,
+            }],
+            touched_entities: vec![neural_routing_runtime::TouchedEntity {
+                entity_type: "ProtocolRun".to_string(),
+                entity_id: run_id.to_string(),
+                access_mode: "write".to_string(),
+                relevance: Some(1.0),
+            }],
+            timestamp_ms: 0,
+        });
+    }
+
     Ok(Json(result))
 }
 

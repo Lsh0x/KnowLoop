@@ -175,6 +175,8 @@ pub struct KnowledgeInjectionStage {
     graph: Arc<dyn GraphStore>,
     search: Arc<dyn SearchStore>,
     config: KnowledgeInjectionConfig,
+    /// Trajectory collector for decision capture (fire-and-forget).
+    collector: Option<Arc<neural_routing_runtime::TrajectoryCollector>>,
 }
 
 impl KnowledgeInjectionStage {
@@ -184,6 +186,7 @@ impl KnowledgeInjectionStage {
             graph,
             search,
             config: KnowledgeInjectionConfig::default(),
+            collector: None,
         }
     }
 
@@ -197,7 +200,17 @@ impl KnowledgeInjectionStage {
             graph,
             search,
             config,
+            collector: None,
         }
+    }
+
+    /// Attach a trajectory collector for decision capture.
+    pub fn with_collector(
+        mut self,
+        collector: Arc<neural_routing_runtime::TrajectoryCollector>,
+    ) -> Self {
+        self.collector = Some(collector);
+        self
     }
 
     /// Extract UUIDs from the user message.
@@ -884,6 +897,56 @@ impl EnrichmentStage for KnowledgeInjectionStage {
             predictions.len()
         );
 
+        // ── Trajectory collection: record context loading decision ────────
+        if let Some(ref collector) = self.collector {
+            let touched: Vec<neural_routing_runtime::TouchedEntity> =
+                notes
+                    .iter()
+                    .take(5)
+                    .map(|n| neural_routing_runtime::TouchedEntity {
+                        entity_type: "Note".to_string(),
+                        entity_id: n.id.clone(),
+                        access_mode: "read".to_string(),
+                        relevance: Some(n.score),
+                    })
+                    .chain(decisions.iter().take(3).map(|d| {
+                        neural_routing_runtime::TouchedEntity {
+                            entity_type: "Decision".to_string(),
+                            entity_id: d.id.clone(),
+                            access_mode: "read".to_string(),
+                            relevance: Some(d.score),
+                        }
+                    }))
+                    .collect();
+
+            collector.record_decision(neural_routing_runtime::DecisionRecord {
+                session_id: input.session_id.to_string(),
+                context_embedding: vec![],
+                action_type: "context.knowledge_injection".to_string(),
+                action_params: serde_json::json!({
+                    "notes_count": notes.len(),
+                    "decisions_count": decisions.len(),
+                    "predictions_count": predictions.len(),
+                }),
+                alternatives_count: notes.len() + decisions.len(),
+                chosen_index: 0,
+                confidence: if notes.is_empty() && decisions.is_empty() {
+                    0.0_f64
+                } else {
+                    notes.first().map(|n| n.score).unwrap_or(0.5_f64)
+                },
+                tool_usages: vec![neural_routing_runtime::ToolUsage {
+                    tool_name: "knowledge_injection".to_string(),
+                    action: "query".to_string(),
+                    params_hash: format!("slug:{}", project_slug),
+                    duration_ms: None,
+                    success: !notes.is_empty() || !decisions.is_empty(),
+                }],
+                touched_entities: touched,
+                timestamp_ms: 0,
+            });
+        }
+
         // Render and inject into context
         if let Some(content) = self.render_knowledge(
             &notes,
@@ -1479,6 +1542,7 @@ mod tests {
             graph,
             search,
             config,
+            collector: None,
         }
     }
 

@@ -37,6 +37,8 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         protocol_tool(),
         persona_tool(),
         sharing_tool(),
+        neural_routing_tool(),
+        trajectory_tool(),
     ]
 }
 
@@ -1217,6 +1219,126 @@ fn sharing_tool() -> ToolDefinition {
     }
 }
 
+fn neural_routing_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "neural_routing".to_string(),
+        description: "Manage neural route learning (trajectory-based reasoning). Actions: status, get_config, enable, disable, set_mode, update_config".to_string(),
+        input_schema: InputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "action": {
+                    "type": "string",
+                    "description": "The operation to perform",
+                    "enum": ["status", "get_config", "enable", "disable", "set_mode", "update_config"]
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Routing mode for set_mode: nn (Nearest Neighbor only) or full (Policy Net + NN fallback)",
+                    "enum": ["nn", "full"]
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Enable/disable neural routing (for update_config)"
+                },
+                "inference_timeout_ms": {
+                    "type": "integer",
+                    "description": "Inference timeout in milliseconds (for update_config)"
+                },
+                "nn_fallback": {
+                    "type": "boolean",
+                    "description": "Enable NN fallback when policy net times out (for update_config)"
+                },
+                "collection_enabled": {
+                    "type": "boolean",
+                    "description": "Enable trajectory collection (for update_config)"
+                },
+                "collection_buffer_size": {
+                    "type": "integer",
+                    "description": "Trajectory collection buffer size (for update_config)"
+                },
+                "nn_top_k": {
+                    "type": "integer",
+                    "description": "Number of nearest neighbors to consider (for update_config)"
+                },
+                "nn_min_similarity": {
+                    "type": "number",
+                    "description": "Minimum cosine similarity threshold (for update_config)"
+                },
+                "nn_max_route_age_days": {
+                    "type": "integer",
+                    "description": "Maximum age of trajectories to consider in days (for update_config)"
+                }
+            })),
+            required: Some(vec!["action".to_string()]),
+        },
+    }
+}
+
+fn trajectory_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "trajectory".to_string(),
+        description:
+            "Query and explore decision trajectories. Actions: list, get, search_similar, stats"
+                .to_string(),
+        input_schema: InputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "action": {
+                    "type": "string",
+                    "description": "The operation to perform",
+                    "enum": ["list", "get", "search_similar", "stats"]
+                },
+                "trajectory_id": {
+                    "type": "string",
+                    "description": "Trajectory UUID (required for get)"
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Filter by session ID (list)"
+                },
+                "min_reward": {
+                    "type": "number",
+                    "description": "Minimum reward filter (list)"
+                },
+                "max_reward": {
+                    "type": "number",
+                    "description": "Maximum reward filter (list)"
+                },
+                "min_steps": {
+                    "type": "integer",
+                    "description": "Minimum step count filter (list)"
+                },
+                "max_steps": {
+                    "type": "integer",
+                    "description": "Maximum step count filter (list)"
+                },
+                "embedding": {
+                    "type": "array",
+                    "items": { "type": "number" },
+                    "description": "Query embedding 256d for similarity search (search_similar)"
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of results for search_similar (default: 10)"
+                },
+                "min_similarity": {
+                    "type": "number",
+                    "description": "Minimum cosine similarity threshold for search_similar (default: 0.7)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (list, default: 50)"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Pagination offset (list)"
+                }
+            })),
+            required: Some(vec!["action".to_string()]),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1226,8 +1348,8 @@ mod tests {
         let tools = all_tools();
         assert_eq!(
             tools.len(),
-            25,
-            "Expected 25 mega-tools, got {}",
+            27,
+            "Expected 27 mega-tools, got {}",
             tools.len()
         );
     }
@@ -1512,6 +1634,7 @@ mod tests {
             "skill",
             "persona",
             "sharing",
+            "neural_routing",
         ];
         for name in &mega_names {
             assert!(

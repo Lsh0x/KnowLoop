@@ -371,6 +371,41 @@ impl ChatManager {
         self
     }
 
+    /// Attach a trajectory collector to the enrichment pipeline stages.
+    ///
+    /// Rebuilds the pipeline so that `SkillActivationStage` and
+    /// `KnowledgeInjectionStage` fire decision records to the collector.
+    pub fn with_trajectory_collector(
+        mut self,
+        collector: std::sync::Arc<neural_routing_runtime::TrajectoryCollector>,
+    ) -> Self {
+        let mut pipeline = super::enrichment::EnrichmentPipeline::new(
+            super::enrichment::EnrichmentConfig::from_env(),
+        );
+        pipeline.add_stage(Box::new(
+            super::stages::SkillActivationStage::new(self.graph.clone())
+                .with_collector(collector.clone()),
+        ));
+        pipeline.add_stage(Box::new(super::stages::BiomimicryStage::new(
+            self.graph.clone(),
+        )));
+        pipeline.add_stage(Box::new(super::stages::UserProfileStage::new(
+            self.graph.clone(),
+        )));
+        pipeline.add_stage(Box::new(
+            super::stages::KnowledgeInjectionStage::new(self.graph.clone(), self.search.clone())
+                .with_collector(collector),
+        ));
+        pipeline.add_stage(Box::new(super::stages::StatusInjectionStage::new(
+            self.graph.clone(),
+        )));
+        pipeline.add_stage(Box::new(super::stages::FileContextStage::new(
+            self.graph.clone(),
+        )));
+        self.enrichment_pipeline = std::sync::Arc::new(pipeline);
+        self
+    }
+
     /// Replace the enrichment pipeline with a custom-configured one.
     ///
     /// Use this to configure which enrichment stages are enabled/disabled,

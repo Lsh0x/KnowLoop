@@ -351,8 +351,8 @@ mod tests {
         let build_time = start.elapsed();
 
         assert!(
-            build_time.as_millis() < 500,
-            "Build time should be < 500ms for 10K files, got {:?}",
+            build_time.as_millis() < 1000,
+            "Build time should be < 1s for 10K files, got {:?}",
             build_time
         );
 

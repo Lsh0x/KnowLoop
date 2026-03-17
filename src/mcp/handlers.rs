@@ -107,6 +107,9 @@ fn unstringify_json_values(args: &mut Value) {
 /// Handles MCP tool calls by proxying to the REST API.
 pub struct ToolHandler {
     client: McpHttpClient,
+    /// Trajectory collector for decision capture (fire-and-forget).
+    /// None when collection is disabled.
+    collector: Option<std::sync::Arc<neural_routing_runtime::TrajectoryCollector>>,
 }
 
 impl ToolHandler {
@@ -114,6 +117,18 @@ impl ToolHandler {
     pub fn new(http_client: McpHttpClient) -> Self {
         Self {
             client: http_client,
+            collector: None,
+        }
+    }
+
+    /// Create a new ToolHandler with trajectory collection enabled.
+    pub fn with_collector(
+        http_client: McpHttpClient,
+        collector: std::sync::Arc<neural_routing_runtime::TrajectoryCollector>,
+    ) -> Self {
+        Self {
+            client: http_client,
+            collector: Some(collector),
         }
     }
 
@@ -162,6 +177,8 @@ impl ToolHandler {
             "episode",
             "persona",
             "sharing",
+            "neural_routing",
+            "trajectory",
         ];
 
         if !mega_tools.contains(&name) {
@@ -540,6 +557,20 @@ impl ToolHandler {
             ("sharing", "list_tombstones") => "list_tombstones",
             ("sharing", "last_report") => "get_last_privacy_report",
 
+            // Neural Routing
+            ("neural_routing", "status") => "get_neural_routing_status",
+            ("neural_routing", "get_config") => "get_neural_routing_config",
+            ("neural_routing", "enable") => "enable_neural_routing",
+            ("neural_routing", "disable") => "disable_neural_routing",
+            ("neural_routing", "set_mode") => "set_neural_routing_mode",
+            ("neural_routing", "update_config") => "update_neural_routing_config",
+
+            // Trajectory
+            ("trajectory", "list") => "list_trajectories",
+            ("trajectory", "get") => "get_trajectory",
+            ("trajectory", "search_similar") => "search_similar_trajectories",
+            ("trajectory", "stats") => "get_trajectory_stats",
+
             // Reasoning Tree
             ("reasoning", "reason") => "reason",
             ("reasoning", "reason_feedback") => "reason_feedback",
@@ -613,6 +644,7 @@ impl ToolHandler {
     /// (e.g. "list_projects") for backward-compatible routing.
     pub async fn handle(&self, name: &str, args: Option<Value>) -> Result<Value> {
         let args = args.unwrap_or(json!({}));
+        let start = std::time::Instant::now();
 
         // ── Mega-tool resolution ────────────────────────────────────────
         let (resolved_name, resolved_args) = self.resolve_mega_tool(name, &args)?;
@@ -621,11 +653,57 @@ impl ToolHandler {
         unstringify_json_values(&mut args);
 
         // ── HTTP routing ────────────────────────────────────────────────
-        if let Some(result) = self.try_handle_http(name, &args).await? {
-            return Ok(result);
+        let result = self.try_handle_http(name, &args).await;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+
+        // ── Trajectory collection (fire-and-forget) ─────────────────────
+        if let Some(ref collector) = self.collector {
+            // Extract mega-tool name and action from the original call
+            let (tool_name, action) = if let Some(dot) = name.find('_') {
+                (&name[..dot], &name[dot + 1..])
+            } else {
+                (name, "default")
+            };
+
+            // Hash params to avoid storing PII — keep only structural keys
+            let params_hash = {
+                let keys: Vec<&str> = args
+                    .as_object()
+                    .map(|m| m.keys().map(|k| k.as_str()).collect())
+                    .unwrap_or_default();
+                format!("{:?}", keys)
+            };
+
+            let success = result.as_ref().map(|r| r.is_some()).unwrap_or(false);
+
+            let tool_usage = neural_routing_runtime::ToolUsage {
+                tool_name: tool_name.to_string(),
+                action: action.to_string(),
+                params_hash,
+                duration_ms: Some(elapsed_ms),
+                success,
+            };
+
+            // Use a placeholder session_id — the real session binding happens at the chat level
+            collector.record_decision(neural_routing_runtime::DecisionRecord {
+                session_id: "mcp-direct".to_string(),
+                context_embedding: vec![],
+                action_type: format!("{}.{}", tool_name, action),
+                action_params: args.clone(),
+                alternatives_count: 1,
+                chosen_index: 0,
+                confidence: if success { 0.8 } else { 0.2 },
+                tool_usages: vec![tool_usage],
+                touched_entities: vec![],
+                timestamp_ms: elapsed_ms,
+            });
         }
 
-        Err(anyhow!("Unknown tool: '{}'", name))
+        match result {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) => Err(anyhow!("Unknown tool: '{}'", name)),
+            Err(e) => Err(e),
+        }
     }
 
     // ========================================================================
@@ -5333,6 +5411,110 @@ impl ToolHandler {
                 let result = http
                     .get(&format!("/api/projects/{}/sharing/last-report", slug))
                     .await?;
+                Ok(Some(result))
+            }
+
+            // ── Neural Routing ────────────────────────────────────────
+            "get_neural_routing_status" => {
+                let result = http.get("/api/neural-routing/status").await?;
+                Ok(Some(result))
+            }
+            "get_neural_routing_config" => {
+                let result = http.get("/api/neural-routing/config").await?;
+                Ok(Some(result))
+            }
+            "enable_neural_routing" => {
+                let result = http.post("/api/neural-routing/enable", &json!({})).await?;
+                Ok(Some(result))
+            }
+            "disable_neural_routing" => {
+                let result = http.post("/api/neural-routing/disable", &json!({})).await?;
+                Ok(Some(result))
+            }
+            "set_neural_routing_mode" => {
+                let mut body = serde_json::Map::new();
+                if let Some(v) = args.get("mode") {
+                    body.insert("mode".to_string(), v.clone());
+                }
+                let result = http
+                    .put("/api/neural-routing/mode", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+            "update_neural_routing_config" => {
+                let mut body = serde_json::Map::new();
+                for key in &[
+                    "enabled",
+                    "mode",
+                    "inference_timeout_ms",
+                    "nn_fallback",
+                    "collection_enabled",
+                    "collection_buffer_size",
+                    "nn_top_k",
+                    "nn_min_similarity",
+                    "nn_max_route_age_days",
+                ] {
+                    if let Some(v) = args.get(*key) {
+                        body.insert(key.to_string(), v.clone());
+                    }
+                }
+                let result = http
+                    .put("/api/neural-routing/config", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            // ── Trajectories ──────────────────────────────────────────
+            "list_trajectories" => {
+                let mut query_params = Vec::new();
+                for key in &[
+                    "session_id",
+                    "min_reward",
+                    "max_reward",
+                    "min_steps",
+                    "max_steps",
+                    "limit",
+                    "offset",
+                ] {
+                    if let Some(v) = args.get(*key) {
+                        let val = if v.is_string() {
+                            v.as_str().unwrap().to_string()
+                        } else {
+                            v.to_string()
+                        };
+                        query_params.push(format!("{}={}", key, val));
+                    }
+                }
+                let qs = if query_params.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{}", query_params.join("&"))
+                };
+                let result = http.get(&format!("/api/trajectories{}", qs)).await?;
+                Ok(Some(result))
+            }
+            "get_trajectory" => {
+                let id = args
+                    .get("trajectory_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("trajectory_id is required"))?;
+                let result = http.get(&format!("/api/trajectories/{}", id)).await?;
+                Ok(Some(result))
+            }
+            "search_similar_trajectories" => {
+                let mut body = serde_json::Map::new();
+                for key in &["embedding", "top_k", "min_similarity"] {
+                    if let Some(v) = args.get(*key) {
+                        body.insert(key.to_string(), v.clone());
+                    }
+                }
+                let result = http
+                    .post("/api/trajectories/similar", &Value::Object(body))
+                    .await?;
+                Ok(Some(result))
+            }
+            "get_trajectory_stats" => {
+                let result = http.get("/api/trajectories/stats").await?;
                 Ok(Some(result))
             }
 

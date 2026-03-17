@@ -524,6 +524,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         });
         create_router(state)
@@ -556,6 +559,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         });
         (create_router(state), slug)

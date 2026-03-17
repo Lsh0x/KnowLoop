@@ -44,6 +44,7 @@ fn test_config() -> Config {
         embedding_api_key: None,
         embedding_dimensions: None,
         registry_remote_url: None,
+        neural_routing: Default::default(),
         config_yaml_path: None,
     }
 }

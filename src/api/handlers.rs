@@ -63,6 +63,14 @@ pub struct ServerState {
     /// Pre-built OIDC client — constructed once at server startup.
     /// None when OIDC is not configured (legacy Google-only or no auth).
     pub oidc_client: Option<Arc<crate::auth::oidc::OidcClient>>,
+    /// Neural routing — DualTrack router (NN + policy net fallback).
+    /// Always present (build full), but only active when config.neural_routing.enabled = true.
+    pub neural_router: Arc<tokio::sync::RwLock<neural_routing_runtime::DualTrackRouter>>,
+    /// Trajectory collector — fire-and-forget decision capture.
+    /// None when collection is disabled.
+    pub trajectory_collector: Option<Arc<neural_routing_runtime::TrajectoryCollector>>,
+    /// Trajectory store — Neo4j CRUD + vector search for stored trajectories.
+    pub trajectory_store: Option<Arc<dyn neural_routing_runtime::TrajectoryStore>>,
 }
 
 /// Shared orchestrator state
@@ -5429,6 +5437,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         });
         (create_router(state), milestone.id, task1.id, task2.id)
@@ -5635,6 +5646,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         }
     }
@@ -5788,6 +5802,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         });
         create_router(state)
@@ -6558,6 +6575,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         });
         (create_router(state), plan.id, task1.id, task2.id)
@@ -6660,6 +6680,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         });
         let app = create_router(state);
