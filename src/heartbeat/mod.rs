@@ -15,6 +15,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::events::EventEmitter;
+use crate::meilisearch::SearchStore;
 use crate::neo4j::traits::GraphStore;
 
 // ============================================================================
@@ -25,6 +26,8 @@ use crate::neo4j::traits::GraphStore;
 pub struct HeartbeatContext {
     /// Shared graph store for Neo4j operations.
     pub graph: Arc<dyn GraphStore>,
+    /// Optional search store for MeiliSearch operations (e.g., backfill_synapses).
+    pub search: Option<Arc<dyn SearchStore>>,
     /// Optional event emitter for broadcasting CrudEvents (e.g., AlertCreated).
     pub emitter: Option<Arc<dyn EventEmitter>>,
 }

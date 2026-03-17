@@ -167,7 +167,7 @@ pub async fn activate_for_hook(
         // Filter by energy
         let mut active_notes: Vec<_> = all_notes
             .into_iter()
-            .filter(|n| n.energy >= config.min_note_energy)
+            .filter(|n| n.computed_energy() >= config.min_note_energy)
             .collect();
 
         // Contextual scoring: sort by relevance when file/pattern context available
@@ -229,7 +229,7 @@ pub async fn activate_for_hook(
 
         let mut active_notes: Vec<_> = notes
             .into_iter()
-            .filter(|n| n.energy >= config.min_note_energy)
+            .filter(|n| n.computed_energy() >= config.min_note_energy)
             .collect();
 
         // Contextual scoring: sort by relevance when file/pattern context available
@@ -376,7 +376,7 @@ pub async fn activate_for_hook_cached(
 
         let mut active_notes: Vec<_> = all_notes
             .into_iter()
-            .filter(|n| n.energy >= config.min_note_energy)
+            .filter(|n| n.computed_energy() >= config.min_note_energy)
             .collect();
 
         // Contextual scoring: sort by relevance when file/pattern context available
@@ -437,7 +437,7 @@ pub async fn activate_for_hook_cached(
 
         let mut active_notes: Vec<_> = notes
             .into_iter()
-            .filter(|n| n.energy >= config.min_note_energy)
+            .filter(|n| n.computed_energy() >= config.min_note_energy)
             .collect();
 
         // Contextual scoring: sort by relevance when file/pattern context available
@@ -859,6 +859,12 @@ async fn reinforce_hook_activation(
             synapses = reinforced,
             "Hook Hebbian reinforcement completed"
         );
+    }
+
+    // 3. Track re-activation for route quality measurement
+    if !note_ids.is_empty() {
+        let reactivated = graph_store.track_reactivation(note_ids).await?;
+        tracing::debug!(reactivated, "Re-activation tracking completed");
     }
 
     Ok(())
@@ -1638,6 +1644,10 @@ mod tests {
             staleness_score: 0.0,
             energy,
             last_activated: None,
+            reactivation_count: 0,
+            last_reactivated: None,
+            freshness_pinged_at: None,
+            activation_count: 0,
             supersedes: None,
             superseded_by: None,
             changes: vec![],
@@ -2240,6 +2250,187 @@ mod tests {
         // (In the actual pipeline, take(notes_included) is used)
         let activated_ids: Vec<Uuid> = notes.iter().take(notes_included).map(|n| n.id).collect();
         assert_eq!(activated_ids.len(), notes_included);
+    }
+
+    // --- Behavioral synapses ---
+
+    #[tokio::test]
+    async fn test_behavioral_synapse_source_tagging() {
+        use crate::neo4j::mock::MockGraphStore;
+
+        let graph = MockGraphStore::new();
+        let note_a = Uuid::new_v4();
+        let note_b = Uuid::new_v4();
+        let note_c = Uuid::new_v4();
+
+        // Create cosine synapses (backfill path)
+        graph
+            .create_synapses(note_a, &[(note_b, 0.8)])
+            .await
+            .unwrap();
+
+        // Verify source tagged as cosine
+        {
+            let sources = graph.synapse_sources.read().await;
+            let key = if note_a < note_b {
+                (note_a, note_b)
+            } else {
+                (note_b, note_a)
+            };
+            assert_eq!(sources.get(&key).unwrap(), "cosine");
+        }
+
+        // Reinforce via co-activation (behavioral path) — upgrades to coactivation
+        graph
+            .reinforce_synapses(&[note_a, note_b], 0.05)
+            .await
+            .unwrap();
+
+        {
+            let sources = graph.synapse_sources.read().await;
+            let key = if note_a < note_b {
+                (note_a, note_b)
+            } else {
+                (note_b, note_a)
+            };
+            assert_eq!(
+                sources.get(&key).unwrap(),
+                "coactivation",
+                "reinforce_synapses should upgrade source from cosine to coactivation"
+            );
+        }
+
+        // Create a pure cosine synapse (A-C) for comparison
+        graph
+            .create_synapses(note_a, &[(note_c, 0.7)])
+            .await
+            .unwrap();
+
+        // Decay: coactivation (A-B) should decay at base rate,
+        //        cosine (A-C) should decay at 2x base rate
+        let (decayed, _pruned) = graph.decay_synapses(0.05, 0.0).await.unwrap();
+        assert!(decayed > 0);
+
+        let synapses = graph.note_synapses.read().await;
+        // A→B was 0.8+0.05(boost)=0.85, coactivation decays 0.05 → 0.80
+        let ab_weight = synapses
+            .get(&note_a)
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == note_b)
+            .unwrap()
+            .1;
+        // A→C was 0.7, cosine decays 0.10 (2x) → 0.60
+        let ac_weight = synapses
+            .get(&note_a)
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == note_c)
+            .unwrap()
+            .1;
+
+        assert!(
+            ab_weight > ac_weight,
+            "Coactivation synapse ({ab_weight:.2}) should decay slower than cosine ({ac_weight:.2})"
+        );
+        // Verify exact values (within float tolerance)
+        assert!((ab_weight - 0.80).abs() < 0.01, "A-B: {ab_weight}");
+        assert!((ac_weight - 0.60).abs() < 0.01, "A-C: {ac_weight}");
+    }
+
+    #[tokio::test]
+    async fn test_track_reactivation_increments_count() {
+        use crate::neo4j::mock::MockGraphStore;
+        use crate::notes::{Note, NoteType};
+        use std::sync::Arc;
+
+        let mock = Arc::new(MockGraphStore::new());
+
+        // Create two notes
+        let mut note_a = Note::new(
+            None,
+            NoteType::Gotcha,
+            "Reactivation test A".into(),
+            "test".into(),
+        );
+        note_a.energy = 0.5;
+        let mut note_b = Note::new(
+            None,
+            NoteType::Tip,
+            "Reactivation test B".into(),
+            "test".into(),
+        );
+        note_b.energy = 0.3;
+
+        let id_a = note_a.id;
+        let id_b = note_b.id;
+
+        mock.create_note(&note_a).await.unwrap();
+        mock.create_note(&note_b).await.unwrap();
+
+        // Verify initial state
+        let a = mock.get_note(id_a).await.unwrap().unwrap();
+        assert_eq!(a.reactivation_count, 0);
+        assert!(a.last_reactivated.is_none());
+
+        // Track reactivation
+        let updated = mock.track_reactivation(&[id_a, id_b]).await.unwrap();
+        assert_eq!(updated, 2);
+
+        // Verify reactivation_count incremented
+        let a = mock.get_note(id_a).await.unwrap().unwrap();
+        assert_eq!(a.reactivation_count, 1);
+        assert!(a.last_reactivated.is_some());
+
+        // Track again
+        mock.track_reactivation(&[id_a]).await.unwrap();
+        let a = mock.get_note(id_a).await.unwrap().unwrap();
+        assert_eq!(a.reactivation_count, 2);
+
+        // B should still be at 1
+        let b = mock.get_note(id_b).await.unwrap().unwrap();
+        assert_eq!(b.reactivation_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_reinforce_hook_tracks_reactivation() {
+        use crate::neo4j::mock::MockGraphStore;
+        use crate::notes::{Note, NoteType};
+        use std::sync::Arc;
+
+        let mock = Arc::new(MockGraphStore::new());
+
+        let mut note_a = Note::new(
+            None,
+            NoteType::Gotcha,
+            "Hook reactivation A".into(),
+            "test".into(),
+        );
+        note_a.energy = 0.5;
+        let mut note_b = Note::new(
+            None,
+            NoteType::Tip,
+            "Hook reactivation B".into(),
+            "test".into(),
+        );
+        note_b.energy = 0.5;
+
+        let id_a = note_a.id;
+        let id_b = note_b.id;
+
+        mock.create_note(&note_a).await.unwrap();
+        mock.create_note(&note_b).await.unwrap();
+
+        let config = AutoReinforcementConfig::default();
+        reinforce_hook_activation(mock.as_ref(), &[id_a, id_b], &config)
+            .await
+            .unwrap();
+
+        // Both should have reactivation_count = 1
+        let a = mock.get_note(id_a).await.unwrap().unwrap();
+        let b = mock.get_note(id_b).await.unwrap().unwrap();
+        assert_eq!(a.reactivation_count, 1);
+        assert_eq!(b.reactivation_count, 1);
     }
 
     // --- Truncation ---

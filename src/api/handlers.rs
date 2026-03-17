@@ -2136,6 +2136,28 @@ pub async fn create_commit(
         }
     }
 
+    // Side-effect: Freshness ping — fire-and-forget update of freshness_pinged_at
+    // on all notes LINKED_TO touched files (regardless of project_id).
+    if !files_changed.is_empty() {
+        let paths_for_freshness: Vec<String> =
+            files_changed.iter().map(|f| f.path.clone()).collect();
+        let neo4j_freshness = state.orchestrator.neo4j_arc();
+        tokio::spawn(async move {
+            match neo4j_freshness
+                .ping_freshness_for_files(&paths_for_freshness)
+                .await
+            {
+                Ok(n) if n > 0 => {
+                    tracing::debug!(pinged = n, "Freshness ping: updated notes");
+                }
+                Err(e) => {
+                    tracing::warn!("Freshness ping failed: {}", e);
+                }
+                _ => {}
+            }
+        });
+    }
+
     if sync_triggered {
         let pid = project_id.unwrap();
         let orchestrator = state.orchestrator.clone();

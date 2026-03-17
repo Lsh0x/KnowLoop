@@ -745,17 +745,22 @@ impl NoteLifecycleManager {
     pub fn evaluate_promotion(&self, note: &Note, activation_count: u64) -> PromotionResult {
         let note_id = note.id;
         let current = note.memory_horizon.clone();
+        let reactivation_count = note.reactivation_count as u64;
 
         match &note.memory_horizon {
             MemoryHorizon::Ephemeral => {
-                if activation_count >= 3 || note.energy >= 0.5 {
+                // Reactivation is a stronger signal than raw activation count
+                if activation_count >= 3 || reactivation_count >= 2 || note.computed_energy() >= 0.5
+                {
                     PromotionResult {
                         note_id,
                         current_horizon: current,
                         new_horizon: Some(MemoryHorizon::Operational),
                         reason: format!(
-                            "Ephemeral→Operational: activations={}, energy={:.2}",
-                            activation_count, note.energy
+                            "Ephemeral→Operational: activations={}, reactivations={}, energy={:.2}",
+                            activation_count,
+                            reactivation_count,
+                            note.computed_energy()
                         ),
                     }
                 } else {
@@ -774,8 +779,10 @@ impl NoteLifecycleManager {
                     .filter(|c| matches!(c.change_type, ChangeType::Confirmed))
                     .count();
 
+                // Reactivation count ≥ 5 is a strong consolidation signal
                 if activation_count >= 10
-                    || note.energy >= 0.8
+                    || reactivation_count >= 5
+                    || note.computed_energy() >= 0.8
                     || confirm_count >= 2
                     || note.importance == NoteImportance::Critical
                 {
@@ -784,8 +791,8 @@ impl NoteLifecycleManager {
                         current_horizon: current,
                         new_horizon: Some(MemoryHorizon::Consolidated),
                         reason: format!(
-                            "Operational→Consolidated: activations={}, energy={:.2}, confirms={}, critical={}",
-                            activation_count, note.energy, confirm_count,
+                            "Operational→Consolidated: activations={}, reactivations={}, energy={:.2}, confirms={}, critical={}",
+                            activation_count, reactivation_count, note.computed_energy(), confirm_count,
                             note.importance == NoteImportance::Critical
                         ),
                     }
@@ -815,9 +822,60 @@ impl NoteLifecycleManager {
         if note.status != NoteStatus::Active {
             return false;
         }
+        // Reactivated notes get a longer grace period (72h instead of 48h)
+        let grace_hours = if note.reactivation_count > 0 { 72 } else { 48 };
         let last_active = note.last_activated.unwrap_or(note.created_at);
         let hours_idle = now.signed_duration_since(last_active).num_hours();
-        hours_idle >= 48
+        hours_idle >= grace_hours
+    }
+
+    /// Check if a note should be auto-archived based on usage thresholds.
+    ///
+    /// Rules (pure arithmetic, 0 LLM calls):
+    /// - `activation_count == 0 AND age > 90 days` -> archive (dead note)
+    /// - `energy < 0.05 AND age > 60 days` -> archive (low-energy note)
+    pub fn should_auto_archive(
+        &self,
+        note: &Note,
+        activation_count: i64,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if note.status != NoteStatus::Active {
+            return false;
+        }
+        let age_days = now.signed_duration_since(note.created_at).num_days();
+
+        // Dead note: never activated and older than 90 days
+        if activation_count == 0 && age_days > 90 {
+            return true;
+        }
+
+        // Low-energy note: energy depleted and older than 60 days
+        if note.energy < 0.05 && age_days > 60 {
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if an ephemeral note should be promoted directly to consolidated.
+    ///
+    /// Rules (pure arithmetic, 0 LLM calls):
+    /// - `activation_count > 5 AND age > 14 days AND energy > 0.3`
+    pub fn should_promote_to_consolidated(
+        &self,
+        note: &Note,
+        activation_count: i64,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if note.memory_horizon != MemoryHorizon::Ephemeral {
+            return false;
+        }
+        if note.status != NoteStatus::Active {
+            return false;
+        }
+        let age_days = now.signed_duration_since(note.created_at).num_days();
+        activation_count > 5 && age_days > 14 && note.energy > 0.3
     }
 }
 
@@ -1008,5 +1066,266 @@ mod tests {
         // Already stale notes shouldn't trigger again
         note.status = NoteStatus::Stale;
         assert!(!manager.should_become_stale(&note, 0.9));
+    }
+
+    // ========================================================================
+    // Auto-archive threshold tests (T7)
+    // ========================================================================
+
+    #[test]
+    fn test_should_auto_archive_dead_note_no_activations_90d() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            Some(Uuid::new_v4()),
+            NoteType::Observation,
+            "Old unused note".to_string(),
+            "test".to_string(),
+        );
+        note.created_at = Utc::now() - chrono::Duration::days(100);
+        note.activation_count = 0;
+        note.status = NoteStatus::Active;
+
+        assert!(manager.should_auto_archive(&note, 0, Utc::now()));
+    }
+
+    #[test]
+    fn test_should_not_auto_archive_recent_dead_note() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            Some(Uuid::new_v4()),
+            NoteType::Observation,
+            "Recent unused note".to_string(),
+            "test".to_string(),
+        );
+        note.created_at = Utc::now() - chrono::Duration::days(30);
+        note.activation_count = 0;
+        note.status = NoteStatus::Active;
+
+        assert!(!manager.should_auto_archive(&note, 0, Utc::now()));
+    }
+
+    #[test]
+    fn test_should_auto_archive_low_energy_60d() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            Some(Uuid::new_v4()),
+            NoteType::Guideline,
+            "Low energy note".to_string(),
+            "test".to_string(),
+        );
+        note.created_at = Utc::now() - chrono::Duration::days(70);
+        note.energy = 0.02;
+        note.activation_count = 3;
+        note.status = NoteStatus::Active;
+
+        assert!(manager.should_auto_archive(&note, 3, Utc::now()));
+    }
+
+    #[test]
+    fn test_should_not_auto_archive_active_note_with_activations() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            Some(Uuid::new_v4()),
+            NoteType::Guideline,
+            "Active note".to_string(),
+            "test".to_string(),
+        );
+        note.created_at = Utc::now() - chrono::Duration::days(100);
+        note.activation_count = 5;
+        note.energy = 0.4;
+        note.status = NoteStatus::Active;
+
+        assert!(!manager.should_auto_archive(&note, 5, Utc::now()));
+    }
+
+    #[test]
+    fn test_should_not_auto_archive_already_archived() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            Some(Uuid::new_v4()),
+            NoteType::Observation,
+            "Already archived".to_string(),
+            "test".to_string(),
+        );
+        note.created_at = Utc::now() - chrono::Duration::days(100);
+        note.activation_count = 0;
+        note.status = NoteStatus::Archived;
+
+        assert!(!manager.should_auto_archive(&note, 0, Utc::now()));
+    }
+
+    // ========================================================================
+    // Ephemeral -> Consolidated promotion threshold tests (T7)
+    // ========================================================================
+
+    #[test]
+    fn test_should_promote_ephemeral_to_consolidated() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            None,
+            NoteType::Pattern,
+            "Frequently used pattern".to_string(),
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Ephemeral;
+        note.created_at = Utc::now() - chrono::Duration::days(20);
+        note.activation_count = 8;
+        note.energy = 0.5;
+        note.status = NoteStatus::Active;
+
+        assert!(manager.should_promote_to_consolidated(&note, 8, Utc::now()));
+    }
+
+    #[test]
+    fn test_should_not_promote_low_activation_count() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            None,
+            NoteType::Pattern,
+            "Low activation".to_string(),
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Ephemeral;
+        note.created_at = Utc::now() - chrono::Duration::days(20);
+        note.activation_count = 2;
+        note.energy = 0.5;
+        note.status = NoteStatus::Active;
+
+        assert!(!manager.should_promote_to_consolidated(&note, 2, Utc::now()));
+    }
+
+    #[test]
+    fn test_should_not_promote_too_young() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            None,
+            NoteType::Pattern,
+            "Young note".to_string(),
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Ephemeral;
+        note.created_at = Utc::now() - chrono::Duration::days(5);
+        note.activation_count = 10;
+        note.energy = 0.5;
+        note.status = NoteStatus::Active;
+
+        assert!(!manager.should_promote_to_consolidated(&note, 10, Utc::now()));
+    }
+
+    #[test]
+    fn test_should_not_promote_low_energy() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            None,
+            NoteType::Pattern,
+            "Low energy note".to_string(),
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Ephemeral;
+        note.created_at = Utc::now() - chrono::Duration::days(20);
+        note.activation_count = 8;
+        note.energy = 0.2;
+        note.status = NoteStatus::Active;
+
+        assert!(!manager.should_promote_to_consolidated(&note, 8, Utc::now()));
+    }
+
+    #[test]
+    fn test_should_not_promote_non_ephemeral() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new(
+            Some(Uuid::new_v4()),
+            NoteType::Pattern,
+            "Operational note".to_string(),
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Operational;
+        note.created_at = Utc::now() - chrono::Duration::days(20);
+        note.activation_count = 8;
+        note.energy = 0.5;
+        note.status = NoteStatus::Active;
+
+        assert!(!manager.should_promote_to_consolidated(&note, 8, Utc::now()));
+    }
+
+    // --- Reactivation-aware promotion tests ---
+
+    #[test]
+    fn test_ephemeral_promotion_via_reactivation() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new_full(
+            None,
+            NoteType::Gotcha,
+            NoteImportance::Medium,
+            NoteScope::Project,
+            "Reactivation promotes ephemeral".to_string(),
+            vec![],
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Ephemeral;
+        note.energy = 0.2; // Low energy, below 0.5 threshold
+        note.reactivation_count = 2; // Meets reactivation threshold (>= 2)
+
+        let result = manager.evaluate_promotion(&note, 1); // activation_count=1, below 3 threshold
+        assert!(
+            result.new_horizon.is_some(),
+            "Reactivation count >= 2 should promote ephemeral to operational"
+        );
+        assert_eq!(result.new_horizon.unwrap(), MemoryHorizon::Operational);
+    }
+
+    #[test]
+    fn test_operational_consolidation_via_reactivation() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new_full(
+            None,
+            NoteType::Pattern,
+            NoteImportance::Medium,
+            NoteScope::Project,
+            "Reactivation consolidates operational".to_string(),
+            vec![],
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Operational;
+        note.energy = 0.4; // Below 0.8 threshold
+        note.reactivation_count = 5; // Meets consolidation threshold (>= 5)
+
+        let result = manager.evaluate_promotion(&note, 5); // activation_count=5, below 10 threshold
+        assert!(
+            result.new_horizon.is_some(),
+            "Reactivation count >= 5 should promote operational to consolidated"
+        );
+        assert_eq!(result.new_horizon.unwrap(), MemoryHorizon::Consolidated);
+    }
+
+    #[test]
+    fn test_reactivated_ephemeral_gets_longer_grace_period() {
+        let manager = NoteLifecycleManager::new();
+        let mut note = Note::new_full(
+            None,
+            NoteType::Tip,
+            NoteImportance::Low,
+            NoteScope::Project,
+            "Reactivated ephemeral should get 72h grace".to_string(),
+            vec![],
+            "test".to_string(),
+        );
+        note.memory_horizon = MemoryHorizon::Ephemeral;
+        note.reactivation_count = 1;
+        // 50 hours ago: past 48h but within 72h
+        note.last_activated = Some(Utc::now() - chrono::Duration::hours(50));
+
+        assert!(
+            !manager.should_archive_ephemeral(&note, Utc::now()),
+            "Reactivated note at 50h idle should NOT be archived (72h grace)"
+        );
+
+        // Non-reactivated version SHOULD be archived at 50h
+        let mut note_no_react = note.clone();
+        note_no_react.reactivation_count = 0;
+        assert!(
+            manager.should_archive_ephemeral(&note_no_react, Utc::now()),
+            "Non-reactivated note at 50h idle SHOULD be archived (48h grace)"
+        );
     }
 }

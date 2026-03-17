@@ -1090,6 +1090,10 @@ pub trait GraphStore: Send + Sync {
         limit: Option<i64>,
     ) -> Result<Vec<FileHistoryEntry>>;
 
+    /// Ping freshness on all Notes LINKED_TO the given file paths.
+    /// Returns the number of distinct notes pinged.
+    async fn ping_freshness_for_files(&self, file_paths: &[String]) -> Result<usize>;
+
     // ========================================================================
     // CO_CHANGED operations (File ↔ File)
     // ========================================================================
@@ -1610,6 +1614,10 @@ pub trait GraphStore: Send + Sync {
     /// `last_activated` to now. Used when a note is retrieved, confirmed, or
     /// reinforced through spreading activation.
     async fn boost_energy(&self, note_id: Uuid, amount: f64) -> Result<()>;
+
+    /// Track re-activation of notes: increment `reactivation_count` and set `last_reactivated`.
+    /// Used to measure route quality — notes that are frequently re-activated are more valuable.
+    async fn track_reactivation(&self, note_ids: &[Uuid]) -> Result<usize>;
 
     /// Reinforce synapses between co-activated notes (Hebbian learning).
     ///

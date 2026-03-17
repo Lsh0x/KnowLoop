@@ -1372,6 +1372,10 @@ impl GraphStore for Neo4jClient {
         self.get_file_history(file_path, limit).await
     }
 
+    async fn ping_freshness_for_files(&self, file_paths: &[String]) -> anyhow::Result<usize> {
+        self.ping_freshness_for_files(file_paths).await
+    }
+
     // ========================================================================
     // CO_CHANGED operations (File ↔ File)
     // ========================================================================
@@ -1981,6 +1985,10 @@ impl GraphStore for Neo4jClient {
 
     async fn boost_energy(&self, note_id: Uuid, amount: f64) -> anyhow::Result<()> {
         self.boost_energy(note_id, amount).await
+    }
+
+    async fn track_reactivation(&self, note_ids: &[Uuid]) -> anyhow::Result<usize> {
+        self.track_reactivation(note_ids).await
     }
 
     async fn reinforce_synapses(&self, note_ids: &[Uuid], boost: f64) -> anyhow::Result<usize> {
