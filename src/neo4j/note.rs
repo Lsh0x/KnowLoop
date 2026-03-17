@@ -1663,10 +1663,15 @@ impl Neo4jClient {
         Ok(notes)
     }
 
-    /// Update staleness scores for all active notes
+    /// Update staleness scores for all active notes.
+    ///
+    /// The formula incorporates `freshness_pinged_at`: if a linked file was
+    /// recently touched by a commit, the note receives a freshness discount
+    /// that decays over 30 days (half-life). This means actively-maintained
+    /// code keeps its linked notes fresher.
     pub async fn update_staleness_scores(&self) -> Result<usize> {
-        // This updates staleness based on time since last confirmation
-        // The actual calculation is done in Cypher for efficiency
+        // This updates staleness based on time since last confirmation,
+        // with a freshness discount from recent commit touches.
         let q = query(
             r#"
             MATCH (n:Note)
@@ -1690,16 +1695,28 @@ impl Neo4jClient {
                      WHEN 'high' THEN 0.7
                      WHEN 'medium' THEN 1.0
                      ELSE 1.3
-                 END AS decay_factor
+                 END AS decay_factor,
+                 CASE
+                     WHEN n.freshness_pinged_at IS NOT NULL
+                     THEN duration.between(datetime(n.freshness_pinged_at), datetime()).days
+                     ELSE -1
+                 END AS days_since_ping
+            WITH n, days_since_confirmed, base_decay_days, decay_factor,
+                 CASE
+                     WHEN days_since_ping >= 0
+                     THEN exp(-1.0 * days_since_ping / 30.0) * 0.5
+                     ELSE 0.0
+                 END AS freshness_discount
             WITH n,
                  CASE
                      WHEN base_decay_days = 0 THEN 0
                      ELSE (1.0 - exp(-1.0 * days_since_confirmed / base_decay_days)) * decay_factor
-                 END AS new_staleness
+                 END AS raw_staleness,
+                 freshness_discount
             WITH n,
-                 CASE WHEN new_staleness > 1.0 THEN 1.0
-                      WHEN new_staleness < 0.0 THEN 0.0
-                      ELSE new_staleness END AS clamped_staleness
+                 CASE WHEN (raw_staleness - freshness_discount) > 1.0 THEN 1.0
+                      WHEN (raw_staleness - freshness_discount) < 0.0 THEN 0.0
+                      ELSE (raw_staleness - freshness_discount) END AS clamped_staleness
             WHERE abs(n.staleness_score - clamped_staleness) > 0.01
             SET n.staleness_score = clamped_staleness,
                 n.status = CASE WHEN clamped_staleness > 0.8 THEN 'stale' ELSE n.status END
@@ -2534,6 +2551,31 @@ impl Neo4jClient {
         Ok(())
     }
 
+    /// Track re-activation: increment reactivation_count and set last_reactivated.
+    pub async fn track_reactivation(&self, note_ids: &[Uuid]) -> Result<usize> {
+        if note_ids.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<String> = note_ids.iter().map(|id| id.to_string()).collect();
+        let q = query(
+            r#"
+            UNWIND $ids AS nid
+            MATCH (n:Note {id: nid})
+            SET n.reactivation_count = coalesce(n.reactivation_count, 0) + 1,
+                n.last_reactivated = datetime()
+            RETURN count(n) AS updated
+            "#,
+        )
+        .param("ids", ids);
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            Ok(row.get::<i64>("updated").unwrap_or(0) as usize)
+        } else {
+            Ok(0)
+        }
+    }
+
     /// Reinforce synapses between co-activated notes (Hebbian learning).
     ///
     /// For every pair (i, j) in note_ids, MERGE a bidirectional SYNAPSE.
@@ -3175,7 +3217,6 @@ impl Neo4jClient {
                 .get::<String>("freshness_pinged_at")
                 .ok()
                 .and_then(|s| s.parse().ok()),
-            activation_count: node.get("activation_count").unwrap_or(0),
             sharing_consent: node
                 .get::<String>("sharing_consent")
                 .ok()

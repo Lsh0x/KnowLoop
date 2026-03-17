@@ -861,6 +861,15 @@ async fn reinforce_hook_activation(
         );
     }
 
+    // 3. Track re-activation for route quality measurement
+    if !note_ids.is_empty() {
+        let reactivated = graph_store.track_reactivation(note_ids).await?;
+        tracing::debug!(
+            reactivated,
+            "Re-activation tracking completed"
+        );
+    }
+
     Ok(())
 }
 
@@ -2330,6 +2339,81 @@ mod tests {
         // Verify exact values (within float tolerance)
         assert!((ab_weight - 0.80).abs() < 0.01, "A-B: {ab_weight}");
         assert!((ac_weight - 0.60).abs() < 0.01, "A-C: {ac_weight}");
+    }
+
+    #[tokio::test]
+    async fn test_track_reactivation_increments_count() {
+        use crate::neo4j::mock::MockGraphStore;
+        use crate::notes::Note;
+        use std::sync::Arc;
+
+        let mock = Arc::new(MockGraphStore::new());
+
+        // Create two notes
+        let mut note_a = Note::new(None, "gotcha", "Reactivation test A");
+        note_a.energy = 0.5;
+        let mut note_b = Note::new(None, "tip", "Reactivation test B");
+        note_b.energy = 0.3;
+
+        let id_a = note_a.id;
+        let id_b = note_b.id;
+
+        mock.create_note(&note_a).await.unwrap();
+        mock.create_note(&note_b).await.unwrap();
+
+        // Verify initial state
+        let a = mock.get_note(id_a).await.unwrap().unwrap();
+        assert_eq!(a.reactivation_count, 0);
+        assert!(a.last_reactivated.is_none());
+
+        // Track reactivation
+        let updated = mock.track_reactivation(&[id_a, id_b]).await.unwrap();
+        assert_eq!(updated, 2);
+
+        // Verify reactivation_count incremented
+        let a = mock.get_note(id_a).await.unwrap().unwrap();
+        assert_eq!(a.reactivation_count, 1);
+        assert!(a.last_reactivated.is_some());
+
+        // Track again
+        mock.track_reactivation(&[id_a]).await.unwrap();
+        let a = mock.get_note(id_a).await.unwrap().unwrap();
+        assert_eq!(a.reactivation_count, 2);
+
+        // B should still be at 1
+        let b = mock.get_note(id_b).await.unwrap().unwrap();
+        assert_eq!(b.reactivation_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_reinforce_hook_tracks_reactivation() {
+        use crate::neo4j::mock::MockGraphStore;
+        use crate::notes::Note;
+        use std::sync::Arc;
+
+        let mock = Arc::new(MockGraphStore::new());
+
+        let mut note_a = Note::new(None, "gotcha", "Hook reactivation A");
+        note_a.energy = 0.5;
+        let mut note_b = Note::new(None, "tip", "Hook reactivation B");
+        note_b.energy = 0.5;
+
+        let id_a = note_a.id;
+        let id_b = note_b.id;
+
+        mock.create_note(&note_a).await.unwrap();
+        mock.create_note(&note_b).await.unwrap();
+
+        let config = AutoReinforcementConfig::default();
+        reinforce_hook_activation(mock.as_ref(), &[id_a, id_b], &config)
+            .await
+            .unwrap();
+
+        // Both should have reactivation_count = 1
+        let a = mock.get_note(id_a).await.unwrap().unwrap();
+        let b = mock.get_note(id_b).await.unwrap().unwrap();
+        assert_eq!(a.reactivation_count, 1);
+        assert_eq!(b.reactivation_count, 1);
     }
 
     // --- Truncation ---

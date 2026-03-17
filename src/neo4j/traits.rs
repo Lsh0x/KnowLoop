@@ -1615,6 +1615,10 @@ pub trait GraphStore: Send + Sync {
     /// reinforced through spreading activation.
     async fn boost_energy(&self, note_id: Uuid, amount: f64) -> Result<()>;
 
+    /// Track re-activation of notes: increment `reactivation_count` and set `last_reactivated`.
+    /// Used to measure route quality — notes that are frequently re-activated are more valuable.
+    async fn track_reactivation(&self, note_ids: &[Uuid]) -> Result<usize>;
+
     /// Reinforce synapses between co-activated notes (Hebbian learning).
     ///
     /// For every pair (i, j) in `note_ids`, MERGE a bidirectional SYNAPSE:

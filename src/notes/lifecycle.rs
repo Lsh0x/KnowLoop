@@ -745,17 +745,22 @@ impl NoteLifecycleManager {
     pub fn evaluate_promotion(&self, note: &Note, activation_count: u64) -> PromotionResult {
         let note_id = note.id;
         let current = note.memory_horizon.clone();
+        let reactivation_count = note.reactivation_count as u64;
 
         match &note.memory_horizon {
             MemoryHorizon::Ephemeral => {
-                if activation_count >= 3 || note.computed_energy() >= 0.5 {
+                // Reactivation is a stronger signal than raw activation count
+                if activation_count >= 3
+                    || reactivation_count >= 2
+                    || note.computed_energy() >= 0.5
+                {
                     PromotionResult {
                         note_id,
                         current_horizon: current,
                         new_horizon: Some(MemoryHorizon::Operational),
                         reason: format!(
-                            "Ephemeral→Operational: activations={}, energy={:.2}",
-                            activation_count, note.computed_energy()
+                            "Ephemeral→Operational: activations={}, reactivations={}, energy={:.2}",
+                            activation_count, reactivation_count, note.computed_energy()
                         ),
                     }
                 } else {
@@ -774,7 +779,9 @@ impl NoteLifecycleManager {
                     .filter(|c| matches!(c.change_type, ChangeType::Confirmed))
                     .count();
 
+                // Reactivation count ≥ 5 is a strong consolidation signal
                 if activation_count >= 10
+                    || reactivation_count >= 5
                     || note.computed_energy() >= 0.8
                     || confirm_count >= 2
                     || note.importance == NoteImportance::Critical
@@ -784,8 +791,8 @@ impl NoteLifecycleManager {
                         current_horizon: current,
                         new_horizon: Some(MemoryHorizon::Consolidated),
                         reason: format!(
-                            "Operational→Consolidated: activations={}, energy={:.2}, confirms={}, critical={}",
-                            activation_count, note.computed_energy(), confirm_count,
+                            "Operational→Consolidated: activations={}, reactivations={}, energy={:.2}, confirms={}, critical={}",
+                            activation_count, reactivation_count, note.computed_energy(), confirm_count,
                             note.importance == NoteImportance::Critical
                         ),
                     }
@@ -815,9 +822,11 @@ impl NoteLifecycleManager {
         if note.status != NoteStatus::Active {
             return false;
         }
+        // Reactivated notes get a longer grace period (72h instead of 48h)
+        let grace_hours = if note.reactivation_count > 0 { 72 } else { 48 };
         let last_active = note.last_activated.unwrap_or(note.created_at);
         let hours_idle = now.signed_duration_since(last_active).num_hours();
-        hours_idle >= 48
+        hours_idle >= grace_hours
     }
 
     /// Check if a note should be auto-archived based on usage thresholds.

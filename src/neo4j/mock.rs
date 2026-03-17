@@ -5639,14 +5639,24 @@ impl GraphStore for MockGraphStore {
     async fn update_staleness_scores(&self) -> Result<usize> {
         let mut notes = self.notes.write().await;
         let mut count = 0;
+        let now = Utc::now();
         for n in notes.values_mut() {
             if n.status == NoteStatus::Active {
-                // Simple staleness: time since last confirmed
                 if let Some(confirmed_at) = n.last_confirmed_at {
-                    let days = (Utc::now() - confirmed_at).num_days() as f64;
+                    let days = (now - confirmed_at).num_days() as f64;
                     let base_days = n.base_decay_days();
                     let decay = n.importance.decay_factor();
-                    n.staleness_score = (days * decay / base_days).clamp(0.0, 1.0);
+                    let raw_staleness = (days * decay / base_days).clamp(0.0, 1.0);
+
+                    // Freshness discount: recent commit touches reduce staleness
+                    let freshness_discount = if let Some(pinged_at) = n.freshness_pinged_at {
+                        let days_since_ping = (now - pinged_at).num_days() as f64;
+                        (-days_since_ping / 30.0_f64).exp() * 0.5
+                    } else {
+                        0.0
+                    };
+
+                    n.staleness_score = (raw_staleness - freshness_discount).clamp(0.0, 1.0);
                     count += 1;
                 }
             }
@@ -5994,6 +6004,20 @@ impl GraphStore for MockGraphStore {
             note.last_activated = Some(chrono::Utc::now());
         }
         Ok(())
+    }
+
+    async fn track_reactivation(&self, note_ids: &[Uuid]) -> Result<usize> {
+        let mut notes = self.notes.write().await;
+        let now = chrono::Utc::now();
+        let mut count = 0usize;
+        for &id in note_ids {
+            if let Some(note) = notes.get_mut(&id) {
+                note.reactivation_count += 1;
+                note.last_reactivated = Some(now);
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     async fn reinforce_synapses(&self, note_ids: &[Uuid], boost: f64) -> Result<usize> {
