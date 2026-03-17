@@ -424,18 +424,30 @@ impl Neo4jClient {
         entity_id: &str,
         status_filter: Option<&str>,
     ) -> Result<Vec<DecisionNode>> {
-        let match_field = if entity_type == "File" { "path" } else { "id" };
         let status = status_filter.unwrap_or("accepted");
 
-        let cypher = format!(
-            r#"
-            MATCH (d:Decision)-[:AFFECTS]->(e:{} {{{}: $entity_id}})
-            WHERE ($status IS NULL OR d.status = $status)
-            RETURN d
-            ORDER BY d.decided_at DESC
-            "#,
-            entity_type, match_field
-        );
+        let cypher = if entity_type == "File" && !entity_id.starts_with('/') {
+            format!(
+                r#"
+                MATCH (d:Decision)-[:AFFECTS]->(e:{}) WHERE e.path ENDS WITH $entity_id
+                AND ($status IS NULL OR d.status = $status)
+                RETURN d
+                ORDER BY d.decided_at DESC
+                "#,
+                entity_type
+            )
+        } else {
+            let match_field = if entity_type == "File" { "path" } else { "id" };
+            format!(
+                r#"
+                MATCH (d:Decision)-[:AFFECTS]->(e:{} {{{}: $entity_id}})
+                WHERE ($status IS NULL OR d.status = $status)
+                RETURN d
+                ORDER BY d.decided_at DESC
+                "#,
+                entity_type, match_field
+            )
+        };
 
         let q = query(&cypher)
             .param("entity_id", entity_id.to_string())
@@ -467,17 +479,31 @@ impl Neo4jClient {
         entity_id: &str,
         impact_description: Option<&str>,
     ) -> Result<()> {
-        let match_field = if entity_type == "File" { "path" } else { "id" };
-        let cypher = format!(
-            r#"
-            MATCH (d:Decision {{id: $did}})
-            MATCH (e:{} {{{}: $eid}})
-            MERGE (d)-[r:AFFECTS]->(e)
-            SET r.impact_description = $desc,
-                r.created_at = datetime()
-            "#,
-            entity_type, match_field
-        );
+        let cypher = if entity_type == "File" && !entity_id.starts_with('/') {
+            // Relative path: use ENDS WITH to match against full absolute paths
+            format!(
+                r#"
+                MATCH (d:Decision {{id: $did}})
+                MATCH (e:{} ) WHERE e.path ENDS WITH $eid
+                MERGE (d)-[r:AFFECTS]->(e)
+                SET r.impact_description = $desc,
+                    r.created_at = datetime()
+                "#,
+                entity_type
+            )
+        } else {
+            let match_field = if entity_type == "File" { "path" } else { "id" };
+            format!(
+                r#"
+                MATCH (d:Decision {{id: $did}})
+                MATCH (e:{} {{{}: $eid}})
+                MERGE (d)-[r:AFFECTS]->(e)
+                SET r.impact_description = $desc,
+                    r.created_at = datetime()
+                "#,
+                entity_type, match_field
+            )
+        };
 
         let q = query(&cypher)
             .param("did", decision_id.to_string())
@@ -495,14 +521,24 @@ impl Neo4jClient {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<()> {
-        let match_field = if entity_type == "File" { "path" } else { "id" };
-        let cypher = format!(
-            r#"
-            MATCH (d:Decision {{id: $did}})-[r:AFFECTS]->(e:{} {{{}: $eid}})
-            DELETE r
-            "#,
-            entity_type, match_field
-        );
+        let cypher = if entity_type == "File" && !entity_id.starts_with('/') {
+            format!(
+                r#"
+                MATCH (d:Decision {{id: $did}})-[r:AFFECTS]->(e:{}) WHERE e.path ENDS WITH $eid
+                DELETE r
+                "#,
+                entity_type
+            )
+        } else {
+            let match_field = if entity_type == "File" { "path" } else { "id" };
+            format!(
+                r#"
+                MATCH (d:Decision {{id: $did}})-[r:AFFECTS]->(e:{} {{{}: $eid}})
+                DELETE r
+                "#,
+                entity_type, match_field
+            )
+        };
 
         let q = query(&cypher)
             .param("did", decision_id.to_string())

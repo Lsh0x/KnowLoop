@@ -2477,11 +2477,13 @@ impl Neo4jClient {
             WHERE n.status = 'active'
             WITH file_count, count(DISTINCT n) AS note_count
 
-            // 2. Decision coverage: decisions with AFFECTS / total files modified
-            // Decisions don't have project_id — traverse Task→Plan→Project chain
-            OPTIONAL MATCH (p2:Project {id: $pid})-[:HAS_PLAN]->(:Plan)-[:HAS_TASK]->(:Task)-[:INFORMED_BY]->(d:Decision)-[:AFFECTS]->(target)
+            // 2. Decision coverage: files with AFFECTS decisions / total files
+            // Count project files that have at least one Decision→AFFECTS link
+            // (regardless of whether the decision is reachable via task chain)
+            OPTIONAL MATCH (p2:Project {id: $pid})-[:CONTAINS]->(af:File)
+            WHERE EXISTS { MATCH (:Decision)-[:AFFECTS]->(af) }
             WITH file_count, note_count,
-                 count(DISTINCT target) AS files_with_decisions
+                 count(DISTINCT af) AS files_with_decisions
             OPTIONAL MATCH (p3:Project {id: $pid})-[:HAS_PLAN]->(:Plan)-[:HAS_TASK]->(:Task)-[:INFORMED_BY]->(d2:Decision)
             WITH file_count, note_count, files_with_decisions,
                  count(DISTINCT d2) AS total_decisions
