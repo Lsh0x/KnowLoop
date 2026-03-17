@@ -1,10 +1,12 @@
 //! HomeostasisCheck — auto-corrective thermostat for the knowledge graph.
 //!
-//! Runs every 24 hours. For each project:
+//! Runs every 2 hours. For each project:
 //! 1. Computes homeostasis report via `compute_homeostasis`
 //! 2. Fetches neural metrics via `get_neural_metrics`
-//! 3. Feeds them to `HomeostasisController::evaluate`
-//! 4. Executes corrective actions via `execute_actions`
+//! 3. **Dormancy guard**: if `pain_score < 0.1`, the system is stable — skip
+//!    corrections to avoid eroding a dormant graph with no new input.
+//! 4. Feeds metrics to `HomeostasisController::evaluate`
+//! 5. Executes corrective actions via `execute_actions`
 //!
 //! Creates alerts when corrective actions are taken.
 
@@ -18,7 +20,15 @@ use tracing::{debug, info, warn};
 use crate::heartbeat::{HeartbeatCheck, HeartbeatContext};
 use crate::homeostasis::{execute_actions, HomeostasisController, HomeostasisMetrics};
 
-/// Run homeostasis evaluation and correction on all projects (every 24 hours).
+/// Pain score below which we consider the system dormant/stable.
+/// No corrective actions are taken — only observation.
+const DORMANCY_THRESHOLD: f64 = 0.1;
+
+/// Run homeostasis evaluation and correction on all projects (every 2 hours).
+///
+/// Includes a dormancy guard: if `pain_score < 0.1`, the project is considered
+/// stable and no corrective actions are executed. This prevents erosion of a
+/// quiet graph (e.g., synapse decay with no new input to compensate).
 pub struct HomeostasisCheck;
 
 #[async_trait]
@@ -28,7 +38,7 @@ impl HeartbeatCheck for HomeostasisCheck {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_secs(24 * 60 * 60) // 24 hours
+        Duration::from_secs(2 * 60 * 60) // 2 hours
     }
 
     async fn run(&self, ctx: &HeartbeatContext) -> Result<()> {
@@ -49,7 +59,20 @@ impl HeartbeatCheck for HomeostasisCheck {
                 }
             };
 
-            // 2. Fetch neural metrics for dead_notes info
+            // 2. Dormancy guard — stable systems are left alone.
+            //    A dormant graph with pain < 0.1 should not receive corrective
+            //    actions (decay, archive) that would erode it without new input.
+            if report.pain_score < DORMANCY_THRESHOLD {
+                debug!(
+                    pain_score = report.pain_score,
+                    threshold = DORMANCY_THRESHOLD,
+                    "HomeostasisCheck: project '{}' is stable (pain < threshold), skipping corrections",
+                    project.name
+                );
+                continue;
+            }
+
+            // 3. Fetch neural metrics for dead_notes info
             let neural = match ctx.graph.get_neural_metrics(project.id).await {
                 Ok(n) => n,
                 Err(e) => {
@@ -61,7 +84,7 @@ impl HeartbeatCheck for HomeostasisCheck {
                 }
             };
 
-            // 3. Map report ratios + neural metrics to HomeostasisMetrics
+            // 4. Map report ratios + neural metrics to HomeostasisMetrics
             //    Ratio names from compute_homeostasis: "synapse_health", "note_density",
             //    "decision_coverage", "churn_balance", "scar_load"
             let metrics = HomeostasisMetrics {
@@ -89,20 +112,21 @@ impl HeartbeatCheck for HomeostasisCheck {
                 pain_score: report.pain_score,
             };
 
-            // 4. Evaluate corrective actions
+            // 5. Evaluate corrective actions
             let actions = HomeostasisController::evaluate(&metrics);
 
             if actions.is_empty() {
                 debug!(
-                    "HomeostasisCheck: project '{}' is healthy, no actions needed",
+                    "HomeostasisCheck: project '{}' has pain but no actionable corrections",
                     project.name
                 );
                 continue;
             }
 
             info!(
-                "HomeostasisCheck: project '{}' needs {} corrective action(s): {}",
+                "HomeostasisCheck: project '{}' (pain={:.3}) needs {} corrective action(s): {}",
                 project.name,
+                report.pain_score,
                 actions.len(),
                 actions
                     .iter()
@@ -111,7 +135,7 @@ impl HeartbeatCheck for HomeostasisCheck {
                     .join(", ")
             );
 
-            // 5. Execute corrective actions
+            // 6. Execute corrective actions
             let graph_arc: Arc<dyn crate::neo4j::traits::GraphStore> = Arc::clone(&ctx.graph);
             match execute_actions(&graph_arc, &actions).await {
                 Ok(executed) => {
@@ -131,6 +155,7 @@ impl HeartbeatCheck for HomeostasisCheck {
                                 serde_json::json!({
                                     "alert_type": "homeostasis_correction",
                                     "project": project.name,
+                                    "pain_score": report.pain_score,
                                     "actions_executed": executed,
                                     "actions": actions.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
                                 }),
@@ -163,8 +188,18 @@ mod tests {
     }
 
     #[test]
-    fn test_homeostasis_check_interval() {
+    fn test_homeostasis_check_interval_2h() {
         let check = HomeostasisCheck;
-        assert_eq!(check.interval(), Duration::from_secs(24 * 3600));
+        assert_eq!(check.interval(), Duration::from_secs(2 * 3600));
+    }
+
+    #[test]
+    fn test_dormancy_threshold_is_reasonable() {
+        // Threshold should be low enough that only truly stable systems are skipped.
+        // Use const block to satisfy clippy::assertions_on_constants.
+        const {
+            assert!(DORMANCY_THRESHOLD > 0.0);
+            assert!(DORMANCY_THRESHOLD <= 0.15);
+        }
     }
 }

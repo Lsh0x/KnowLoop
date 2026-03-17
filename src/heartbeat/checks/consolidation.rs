@@ -1,6 +1,6 @@
 //! ConsolidationCheck — promotes ephemeral notes to consolidated periodically.
 //!
-//! Runs `consolidate_memory` on GraphStore every 24 hours for all projects.
+//! Runs `consolidate_memory` on GraphStore every 2 hours for all projects.
 //! This promotes eligible ephemeral notes (old enough + high activation)
 //! to consolidated status and archives dead notes.
 
@@ -12,7 +12,10 @@ use tracing::{debug, info, warn};
 
 use crate::heartbeat::{HeartbeatCheck, HeartbeatContext};
 
-/// Consolidate ephemeral notes into long-term memory (every 24 hours).
+/// Consolidate ephemeral notes into long-term memory (every 2 hours).
+///
+/// This is idempotent: if no notes are eligible for promotion or archival,
+/// the operation is a no-op. Safe to run frequently.
 pub struct ConsolidationCheck;
 
 #[async_trait]
@@ -22,7 +25,7 @@ impl HeartbeatCheck for ConsolidationCheck {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_secs(24 * 60 * 60) // 24 hours
+        Duration::from_secs(2 * 60 * 60) // 2 hours
     }
 
     async fn run(&self, ctx: &HeartbeatContext) -> Result<()> {
@@ -64,6 +67,6 @@ mod tests {
     #[test]
     fn test_consolidation_check_interval() {
         let check = ConsolidationCheck;
-        assert_eq!(check.interval(), Duration::from_secs(24 * 3600));
+        assert_eq!(check.interval(), Duration::from_secs(2 * 3600));
     }
 }
