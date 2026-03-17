@@ -1307,6 +1307,8 @@ pub struct HomeostasisReport {
     pub pain_score: f64,
     /// Overall recommendations
     pub recommendations: Vec<String>,
+    /// Total number of active notes in the project (used by adaptive backfill).
+    pub total_notes_count: i64,
 }
 
 // ============================================================================

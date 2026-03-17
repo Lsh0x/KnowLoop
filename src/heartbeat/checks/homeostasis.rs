@@ -175,28 +175,16 @@ impl HeartbeatCheck for HomeostasisCheck {
                 }
             }
 
-            // 5b. Compute adaptive backfill parameters from neural metrics
-            let backfill_params = match ctx.graph.get_neural_metrics(project.id).await {
-                Ok(neural) => {
-                    let total_notes = neural.total_notes_count as usize;
-                    let params = compute_backfill_params(total_notes, metrics.synapse_health);
-                    debug!(
-                        total_notes,
-                        batch_size = params.batch_size,
-                        max_neighbors = params.max_neighbors,
-                        "HomeostasisCheck: computed adaptive backfill params for '{}'",
-                        project.name
-                    );
-                    Some(params)
-                }
-                Err(e) => {
-                    warn!(
-                        "HomeostasisCheck: get_neural_metrics failed for '{}': {}, using defaults",
-                        project.name, e
-                    );
-                    None
-                }
-            };
+            // 5b. Compute adaptive backfill parameters from report's total_notes_count
+            let total_notes = report.total_notes_count as usize;
+            let backfill_params = compute_backfill_params(total_notes, metrics.synapse_health);
+            debug!(
+                total_notes,
+                batch_size = backfill_params.batch_size,
+                max_neighbors = backfill_params.max_neighbors,
+                "HomeostasisCheck: computed adaptive backfill params for '{}'",
+                project.name
+            );
 
             let graph_arc: Arc<dyn crate::neo4j::traits::GraphStore> = Arc::clone(&ctx.graph);
             match execute_actions(
@@ -206,7 +194,7 @@ impl HeartbeatCheck for HomeostasisCheck {
                 ExecuteContext {
                     cursor: Some(&current_cursor),
                     project_id: Some(project.id),
-                    backfill_params: backfill_params.as_ref(),
+                    backfill_params: Some(&backfill_params),
                 },
             )
             .await

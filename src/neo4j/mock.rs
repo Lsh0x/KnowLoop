@@ -6286,6 +6286,7 @@ impl GraphStore for MockGraphStore {
             ratios,
             pain_score,
             recommendations: vec![],
+            total_notes_count: project_notes.len() as i64,
         })
     }
 

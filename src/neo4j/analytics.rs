@@ -2631,6 +2631,7 @@ impl Neo4jClient {
             ratios,
             pain_score,
             recommendations,
+            total_notes_count: note_count,
         })
     }
 
