@@ -4789,6 +4789,13 @@ impl GraphStore for MockGraphStore {
     async fn create_milestone(&self, milestone: &MilestoneNode) -> Result<()> {
         let mid = milestone.id;
         let pid = milestone.project_id;
+        // Verify project exists (mirrors Neo4j MATCH behavior)
+        if !self.projects.read().await.contains_key(&pid) {
+            anyhow::bail!(
+                "Failed to create milestone: Project {} not found",
+                pid
+            );
+        }
         self.project_milestones
             .write()
             .await
