@@ -10,6 +10,7 @@ use super::episode_handlers;
 use super::feedback_handlers;
 use super::handlers::{self, OrchestratorState};
 use super::hook_handlers;
+use super::neural_routing_handlers;
 use super::note_handlers;
 use super::persona_handlers;
 use super::profile_handlers;
@@ -20,6 +21,7 @@ use super::registry_handlers;
 use super::rfc_handlers;
 use super::sharing_handlers;
 use super::skill_handlers;
+use super::trajectory_handlers;
 use super::workspace_handlers;
 use super::ws_chat_handler;
 use super::ws_handlers;
@@ -304,6 +306,48 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/projects/{slug}/sharing/last-report",
             get(sharing_handlers::get_last_privacy_report),
+        )
+        // ================================================================
+        // Neural Routing
+        // ================================================================
+        .route(
+            "/api/neural-routing/status",
+            get(neural_routing_handlers::get_status),
+        )
+        .route(
+            "/api/neural-routing/config",
+            get(neural_routing_handlers::get_config).put(neural_routing_handlers::update_config),
+        )
+        .route(
+            "/api/neural-routing/enable",
+            post(neural_routing_handlers::enable),
+        )
+        .route(
+            "/api/neural-routing/disable",
+            post(neural_routing_handlers::disable),
+        )
+        .route(
+            "/api/neural-routing/mode",
+            axum::routing::put(neural_routing_handlers::set_mode),
+        )
+        // ================================================================
+        // Trajectories
+        // ================================================================
+        .route(
+            "/api/trajectories",
+            get(trajectory_handlers::list_trajectories),
+        )
+        .route(
+            "/api/trajectories/stats",
+            get(trajectory_handlers::get_stats),
+        )
+        .route(
+            "/api/trajectories/similar",
+            post(trajectory_handlers::search_similar),
+        )
+        .route(
+            "/api/trajectories/{id}",
+            get(trajectory_handlers::get_trajectory),
         )
         // Releases (by project_id)
         .route(
@@ -1581,6 +1625,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         });
         create_router(state)
@@ -1608,6 +1655,9 @@ mod tests {
             ws_ticket_store: Arc::new(crate::api::ws_auth::WsTicketStore::new()),
             registry_remote_url: None,
             oidc_client: None,
+            neural_router: crate::test_helpers::mock_neural_router(),
+            trajectory_collector: None,
+            trajectory_store: None,
             identity: None,
         });
         create_router(state)

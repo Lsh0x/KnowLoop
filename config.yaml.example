@@ -105,6 +105,38 @@ chat:
   prompt_builder_model: "claude-opus-4-6"  # PROMPT_BUILDER_MODEL env override
 
 # -----------------------------------------------------------------------------
+# Neural Routing — Trajectory-based route learning (optional)
+# -----------------------------------------------------------------------------
+# Always compiled (build full). Control entirely at runtime via these settings.
+# Env var overrides: NEURAL_ROUTING_ENABLED, NEURAL_ROUTING_MODE,
+#                    NEURAL_ROUTING_TRAINING_MODE, NEURAL_ROUTING_MAX_THREADS
+#
+# neural_routing:
+#   enabled: true                    # Master switch (default: true)
+#   mode: "nn"                       # "nn" (Nearest Neighbor only) | "full" (Policy Net + NN fallback)
+#   training:
+#     mode: "manual"                 # "automatic" (cron + threshold) | "manual" (MCP tool / CLI)
+#     auto_trigger_threshold: 1000   # Trajectories before auto-training (automatic mode)
+#     max_threads: 2                 # Thread pool cap for training
+#     schedule: "0 2 * * *"          # Cron for automatic training (2am daily)
+#   inference:
+#     timeout_ms: 15                 # Max inference budget in ms
+#     nn_fallback: true              # Fallback to NN Router if timeout/OOD
+#   collection:
+#     enabled: false                 # Trajectory collection (opt-in). Env: NEURAL_ROUTING_COLLECT
+#     buffer_size: 50                # Flush batch size
+#   nn:
+#     top_k: 5                       # Number of nearest neighbors
+#     min_similarity: 0.7            # Minimum cosine similarity threshold
+#     cache_capacity: 500            # moka cache entries
+#     cache_ttl_secs: 3600           # Cache TTL (1h)
+#     max_route_age_days: 30         # Ignore trajectories older than this
+#   cpu_guard:
+#     pause_threshold: 80.0          # Pause at CPU > 80%
+#     resume_threshold: 50.0         # Resume at CPU < 50%
+#     poll_interval_secs: 2          # CPU poll frequency
+
+# -----------------------------------------------------------------------------
 # Authentication — Flexible multi-provider auth
 # -----------------------------------------------------------------------------
 # Remove or comment out this entire section for NO-AUTH mode (open access).

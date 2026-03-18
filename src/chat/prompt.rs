@@ -1576,10 +1576,20 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
             "deep maintenance", "consolidate", "stagnation", "anchor", "reconstruct",
             "fission", "fusion", "heal", "scar", "isomorphic",
         ],
-        tools: &[ToolRef {
-            name: "admin",
-            description: "Admin ops (sync_directory/start_watch/stop_watch/watch_status/meilisearch_stats/delete_meilisearch_orphans/cleanup_cross_project_calls/cleanup_builtin_calls/migrate_calls_confidence/cleanup_sync_data/update_staleness_scores/update_energy_scores/search_neurons/reinforce_neurons/decay_synapses/backfill_synapses/reindex_decisions/backfill_decision_embeddings/backfill_touches/backfill_discussed/update_fabric_scores/bootstrap_knowledge_fabric/reinforce_isomorphic/detect_skills/detect_skill_fission/detect_skill_fusion/maintain_skills/auto_anchor_notes/reconstruct_knowledge/heal_scars/consolidate_memory/detect_stagnation/deep_maintenance/audit_gaps/persist_health_report/install_hooks)",
-        }],
+        tools: &[
+            ToolRef {
+                name: "admin",
+                description: "Admin ops (sync_directory/start_watch/stop_watch/watch_status/meilisearch_stats/delete_meilisearch_orphans/cleanup_cross_project_calls/cleanup_builtin_calls/migrate_calls_confidence/cleanup_sync_data/update_staleness_scores/update_energy_scores/search_neurons/reinforce_neurons/decay_synapses/backfill_synapses/reindex_decisions/backfill_decision_embeddings/backfill_touches/backfill_discussed/update_fabric_scores/bootstrap_knowledge_fabric/reinforce_isomorphic/detect_skills/detect_skill_fission/detect_skill_fusion/maintain_skills/auto_anchor_notes/reconstruct_knowledge/heal_scars/consolidate_memory/detect_stagnation/deep_maintenance/audit_gaps/persist_health_report/install_hooks)",
+            },
+            ToolRef {
+                name: "neural_routing",
+                description: "Neural route learning (status/get_config/enable/disable/set_mode/update_config) — runtime control for NN routing, CPU guard, and trajectory collection",
+            },
+            ToolRef {
+                name: "trajectory",
+                description: "Query decision trajectories (list/get/search_similar/stats) — explore stored reasoning paths and find similar past decisions",
+            },
+        ],
     },
 ];
 
@@ -3288,8 +3298,8 @@ mod tests {
     fn test_tool_groups_cover_all_23_mega_tools() {
         let count = tool_catalog_tool_count();
         assert_eq!(
-            count, 25,
-            "TOOL_GROUPS must cover exactly 25 unique mega-tools (got {}). \
+            count, 27,
+            "TOOL_GROUPS must cover exactly 27 unique mega-tools (got {}). \
              Update the catalog when adding/removing MCP tools.",
             count
         );

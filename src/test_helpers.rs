@@ -13,6 +13,78 @@ use crate::{AppState, AuthConfig};
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// A no-op trajectory store for tests.
+pub struct NoopStore;
+#[async_trait::async_trait]
+impl neural_routing_runtime::TrajectoryStore for NoopStore {
+    async fn store_trajectory(
+        &self,
+        _t: &neural_routing_runtime::Trajectory,
+    ) -> neural_routing_runtime::routing_error::Result<()> {
+        Ok(())
+    }
+    async fn get_trajectory(
+        &self,
+        _id: &uuid::Uuid,
+    ) -> neural_routing_runtime::routing_error::Result<Option<neural_routing_runtime::Trajectory>>
+    {
+        Ok(None)
+    }
+    async fn list_trajectories(
+        &self,
+        _filter: &neural_routing_runtime::TrajectoryFilter,
+    ) -> neural_routing_runtime::routing_error::Result<Vec<neural_routing_runtime::Trajectory>>
+    {
+        Ok(vec![])
+    }
+    async fn search_similar(
+        &self,
+        _embedding: &[f32],
+        _top_k: usize,
+        _min_sim: f32,
+    ) -> neural_routing_runtime::routing_error::Result<Vec<(neural_routing_runtime::Trajectory, f64)>>
+    {
+        Ok(vec![])
+    }
+    async fn get_stats(
+        &self,
+    ) -> neural_routing_runtime::routing_error::Result<neural_routing_runtime::TrajectoryStats>
+    {
+        Ok(neural_routing_runtime::TrajectoryStats {
+            total_count: 0,
+            avg_reward: 0.0,
+            avg_step_count: 0.0,
+            avg_duration_ms: 0.0,
+            reward_distribution: Default::default(),
+        })
+    }
+    async fn count(&self) -> neural_routing_runtime::routing_error::Result<usize> {
+        Ok(0)
+    }
+    async fn delete_trajectory(
+        &self,
+        _id: &uuid::Uuid,
+    ) -> neural_routing_runtime::routing_error::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// Create a mock trajectory store for tests.
+pub fn mock_trajectory_store() -> Arc<dyn neural_routing_runtime::TrajectoryStore> {
+    Arc::new(NoopStore)
+}
+
+/// Create a mock neural router for tests (disabled by default, no real store).
+pub fn mock_neural_router() -> Arc<tokio::sync::RwLock<neural_routing_runtime::DualTrackRouter>> {
+    let store: Arc<dyn neural_routing_runtime::TrajectoryStore> = Arc::new(NoopStore);
+    let config = neural_routing_runtime::NeuralRoutingConfig {
+        enabled: false, // disabled in tests by default
+        ..Default::default()
+    };
+    let router = neural_routing_runtime::DualTrackRouter::new(store, config);
+    Arc::new(tokio::sync::RwLock::new(router))
+}
+
 // ============================================================================
 // Mock state builders
 // ============================================================================
@@ -54,9 +126,12 @@ pub fn mock_app_state() -> AppState {
             embedding_api_key: None,
             embedding_dimensions: None,
             registry_remote_url: None,
-
+            neural_routing: Default::default(),
             config_yaml_path: None,
         }),
+        neural_router: mock_neural_router(),
+        trajectory_collector: None,
+        trajectory_store: mock_trajectory_store(),
     }
 }
 
@@ -97,9 +172,12 @@ pub fn mock_app_state_with(graph: MockGraphStore, search: MockSearchStore) -> Ap
             embedding_api_key: None,
             embedding_dimensions: None,
             registry_remote_url: None,
-
+            neural_routing: Default::default(),
             config_yaml_path: None,
         }),
+        neural_router: mock_neural_router(),
+        trajectory_collector: None,
+        trajectory_store: mock_trajectory_store(),
     }
 }
 
@@ -140,9 +218,12 @@ pub fn mock_app_state_with_graph(graph: Arc<MockGraphStore>) -> AppState {
             embedding_api_key: None,
             embedding_dimensions: None,
             registry_remote_url: None,
-
+            neural_routing: Default::default(),
             config_yaml_path: None,
         }),
+        neural_router: mock_neural_router(),
+        trajectory_collector: None,
+        trajectory_store: mock_trajectory_store(),
     }
 }
 
@@ -188,9 +269,12 @@ pub fn mock_app_state_with_stores() -> (AppState, Arc<MockGraphStore>, Arc<MockS
             embedding_api_key: None,
             embedding_dimensions: None,
             registry_remote_url: None,
-
+            neural_routing: Default::default(),
             config_yaml_path: None,
         }),
+        neural_router: mock_neural_router(),
+        trajectory_collector: None,
+        trajectory_store: mock_trajectory_store(),
     };
     (state, graph, meili)
 }
