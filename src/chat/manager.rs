@@ -162,11 +162,21 @@ pub struct ChatManager {
     pub(crate) enrichment_pipeline: Arc<super::enrichment::EnrichmentPipeline>,
     /// Trajectory collector for neural routing feedback loop.
     /// When Some, `close_session()` calls `end_session()` to finalize trajectories.
+    /// Behind a RwLock to allow hot-swap when collection is enabled at runtime via API.
     pub(crate) trajectory_collector:
-        Option<std::sync::Arc<neural_routing_runtime::TrajectoryCollector>>,
+        Arc<std::sync::RwLock<Option<std::sync::Arc<neural_routing_runtime::TrajectoryCollector>>>>,
     /// Optional reasoning tree engine for StatusInjectionStage.
     /// When Some, the status stage can build reasoning trees from the knowledge graph.
     pub(crate) reasoning_engine: Option<Arc<crate::reasoning::ReasoningTreeEngine>>,
+    /// Whether neural routing is enabled (hot-swappable at runtime).
+    pub(crate) neural_routing_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Dual-track router that runs both heuristic and neural routing in parallel.
+    /// When Some and neural_routing_enabled is true, replaces the default HeuristicRouter.
+    pub(crate) dual_track_router: Arc<std::sync::RwLock<Option<super::routing::DualTrackRouter>>>,
+    /// Runtime DualTrackRouter (NN router) for trajectory-based action suggestions.
+    /// When Some, `build_system_prompt()` queries this router after compose() to populate
+    /// dashboard metrics and log NN route matches.
+    pub(crate) nn_router: Option<Arc<tokio::sync::RwLock<neural_routing_runtime::DualTrackRouter>>>,
 }
 
 // ============================================================================
@@ -373,8 +383,11 @@ impl ChatManager {
             config_yaml_path: None,
             env_config,
             enrichment_pipeline,
-            trajectory_collector: None,
+            trajectory_collector: Arc::new(std::sync::RwLock::new(None)),
             reasoning_engine: None,
+            neural_routing_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            dual_track_router: Arc::new(std::sync::RwLock::new(None)),
+            nn_router: None,
         }
     }
 
@@ -423,8 +436,11 @@ impl ChatManager {
             config_yaml_path: None,
             env_config,
             enrichment_pipeline,
-            trajectory_collector: None,
+            trajectory_collector: Arc::new(std::sync::RwLock::new(None)),
             reasoning_engine: None,
+            neural_routing_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            dual_track_router: Arc::new(std::sync::RwLock::new(None)),
+            nn_router: None,
         }
     }
 
@@ -459,12 +475,14 @@ impl ChatManager {
         engine: Arc<crate::reasoning::ReasoningTreeEngine>,
     ) -> Self {
         self.reasoning_engine = Some(engine.clone());
+        let tc_guard = self.trajectory_collector.read().unwrap();
         self.enrichment_pipeline = Self::build_enrichment_pipeline(
             &self.graph,
             &self.search,
             Some(&engine),
-            self.trajectory_collector.as_ref(),
+            tc_guard.as_ref(),
         );
+        drop(tc_guard);
         self
     }
 
@@ -473,18 +491,61 @@ impl ChatManager {
     /// Rebuilds the pipeline so that `SkillActivationStage` and
     /// `KnowledgeInjectionStage` fire decision records to the collector.
     pub fn with_trajectory_collector(
-        mut self,
+        self,
         collector: std::sync::Arc<neural_routing_runtime::TrajectoryCollector>,
     ) -> Self {
-        self.enrichment_pipeline = Self::build_enrichment_pipeline(
-            &self.graph,
-            &self.search,
-            self.reasoning_engine.as_ref(),
-            Some(&collector),
-        );
-        // Store collector for end_session() in close_session()
-        self.trajectory_collector = Some(collector);
+        self.set_trajectory_collector(collector);
         self
+    }
+
+    /// Hot-swap the trajectory collector at runtime.
+    ///
+    /// Called when collection is enabled via the API after the ChatManager
+    /// is already constructed. Rebuilds the enrichment pipeline and stores
+    /// the collector for `close_session()` finalization.
+    pub fn set_trajectory_collector(
+        &self,
+        collector: std::sync::Arc<neural_routing_runtime::TrajectoryCollector>,
+    ) {
+        *self.trajectory_collector.write().unwrap() = Some(collector);
+    }
+
+    /// Attach a dual-track router and optionally enable neural routing.
+    ///
+    /// The dual-track router runs both heuristic and neural routing in parallel,
+    /// using the neural result when `enabled` is true and the model is confident.
+    pub fn with_dual_track_router(
+        self,
+        router: super::routing::DualTrackRouter,
+        enabled: bool,
+    ) -> Self {
+        *self.dual_track_router.write().unwrap() = Some(router);
+        self.neural_routing_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// Attach the runtime NN router (DualTrackRouter from neural-routing-runtime).
+    ///
+    /// When set, `build_system_prompt()` queries this router after compose()
+    /// to log trajectory-based action suggestions and populate dashboard metrics.
+    pub fn with_nn_router(
+        mut self,
+        router: Arc<tokio::sync::RwLock<neural_routing_runtime::DualTrackRouter>>,
+    ) -> Self {
+        self.nn_router = Some(router);
+        self
+    }
+
+    /// Hot-swap the dual-track router at runtime.
+    pub fn set_dual_track_router(&self, router: super::routing::DualTrackRouter) {
+        *self.dual_track_router.write().unwrap() = Some(router);
+    }
+
+    /// Enable or disable neural routing at runtime.
+    pub fn set_neural_routing_enabled(&self, enabled: bool) {
+        self.neural_routing_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set a custom reward computer for session reward computation.
@@ -1499,6 +1560,26 @@ impl ChatManager {
         let task_count = ctx.active_plans.len() * 3; // rough estimate
         let is_multi_project = !ctx.sibling_projects.is_empty();
 
+        // ── Pre-compute message embedding for neural routing ─────────────
+        let message_embedding = if self
+            .neural_routing_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let builder = neural_routing_runtime::DecisionVectorBuilder::new();
+            let ctx = neural_routing_runtime::DecisionContext {
+                query_embedding: vec![],
+                touched_node_features: vec![],
+                previous_embeddings: vec![],
+                tool_name: "chat".to_string(),
+                action_name: user_message.to_string(),
+                params_hash: 0,
+                session_meta: neural_routing_runtime::SessionMeta::default(),
+            };
+            Some(builder.build(&ctx))
+        } else {
+            None
+        };
+
         // ── Compose via FsmPromptComposer ───────────────────────────────
         let input = ComposerInput {
             scaffolding_level,
@@ -1512,43 +1593,93 @@ impl ChatManager {
             has_active_plan,
             task_count,
             model: model.unwrap_or(""),
-            message_embedding: None, // Future: pre-compute via EmbeddingProvider
+            message_embedding: message_embedding.as_ref(),
         };
 
-        // Use compose_with_record to get the routing decision for trajectory tracking
-        let (prompt, routing_record) =
-            FsmPromptComposer::compose_with_record(&input, &HeuristicRouter);
+        // Use compose_with_record to get the routing decision for trajectory tracking.
+        // When neural routing is enabled and a DualTrackRouter is configured, use it
+        // instead of the default HeuristicRouter for config-driven router selection.
+        let use_neural = self
+            .neural_routing_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let (prompt, routing_record) = {
+            let dtr_guard = self.dual_track_router.read().unwrap();
+            if use_neural {
+                if let Some(ref dtr) = *dtr_guard {
+                    FsmPromptComposer::compose_with_record(&input, dtr)
+                } else {
+                    FsmPromptComposer::compose_with_record(&input, &HeuristicRouter)
+                }
+            } else {
+                FsmPromptComposer::compose_with_record(&input, &HeuristicRouter)
+            }
+        };
 
         // Emit routing decision to trajectory collector (fire-and-forget)
-        if let (Some(ref collector), Some(sid)) = (&self.trajectory_collector, session_id) {
-            // Emit routing decision directly to trajectory collector
-            let params = serde_json::to_value(&routing_record).unwrap_or_default();
-            collector.record_decision(neural_routing_runtime::DecisionRecord {
-                session_id: sid.to_string(),
-                context_embedding: vec![],
-                action_type: "routing.select_sections".to_string(),
-                action_params: params,
-                alternatives_count: routing_record.selected_sections.len(),
-                chosen_index: 0,
-                confidence: if routing_record.section_weights.is_empty() {
-                    0.5
-                } else {
-                    let sum: f32 = routing_record.section_weights.iter().map(|(_, w)| w).sum();
-                    (sum / routing_record.section_weights.len() as f32) as f64
-                },
-                tool_usages: vec![],
-                touched_entities: vec![],
-                timestamp_ms: 0,
-                query_embedding: vec![],
-                node_features: vec![],
-                protocol_run_id: None,
-                protocol_state: None,
-            });
-            debug!(
-                "[routing] Emitted routing decision to trajectory: {} sections, {} tool groups",
-                routing_record.selected_sections.len(),
-                routing_record.selected_tool_groups.len()
-            );
+        {
+            let tc_guard = self.trajectory_collector.read().unwrap();
+            if let (Some(ref collector), Some(sid)) = (&*tc_guard, session_id) {
+                // Emit routing decision directly to trajectory collector
+                let params = serde_json::to_value(&routing_record).unwrap_or_default();
+                collector.record_decision(neural_routing_runtime::DecisionRecord {
+                    session_id: sid.to_string(),
+                    context_embedding: vec![],
+                    action_type: "routing.select_sections".to_string(),
+                    action_params: params,
+                    alternatives_count: routing_record.selected_sections.len(),
+                    chosen_index: 0,
+                    confidence: if routing_record.section_weights.is_empty() {
+                        0.5
+                    } else {
+                        let sum: f32 = routing_record.section_weights.iter().map(|(_, w)| w).sum();
+                        (sum / routing_record.section_weights.len() as f32) as f64
+                    },
+                    tool_usages: vec![],
+                    touched_entities: vec![],
+                    timestamp_ms: 0,
+                    query_embedding: vec![],
+                    node_features: vec![],
+                    protocol_run_id: None,
+                    protocol_state: None,
+                });
+                debug!(
+                    "[routing] Emitted routing decision to trajectory: {} sections, {} tool groups",
+                    routing_record.selected_sections.len(),
+                    routing_record.selected_tool_groups.len()
+                );
+            }
+        }
+
+        // Query NNRouter for trajectory-based action suggestions (populates dashboard metrics)
+        if let (Some(nn_router), Some(emb)) = (&self.nn_router, &message_embedding) {
+            let emb: &Vec<f32> = emb;
+            if !emb.is_empty() {
+                let router_guard = nn_router.read().await;
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(15),
+                    neural_routing_runtime::Router::route(&*router_guard, emb),
+                )
+                .await
+                {
+                    Ok(Ok(Some(route))) => {
+                        tracing::info!(
+                            similarity = %format!("{:.3}", route.similarity),
+                            source_trajectory = %route.source_trajectory_id,
+                            actions = route.actions.len(),
+                            "NN route matched"
+                        );
+                    }
+                    Ok(Ok(None)) => {
+                        tracing::debug!("NN route: no match found");
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!(error = %e, "NN route query failed");
+                    }
+                    Err(_) => {
+                        tracing::debug!("NN route query timed out (>15ms)");
+                    }
+                }
+            }
         }
 
         (prompt, included_note_ids)
@@ -5083,7 +5214,7 @@ impl ChatManager {
         //    Uses end_session_auto() so the collector computes the reward from
         //    actual buffered DecisionRecords (tool success rate, confidence, duration).
         //    SessionHints provides optional task metadata not available inside the loop.
-        if let Some(ref collector) = self.trajectory_collector {
+        if let Some(ref collector) = *self.trajectory_collector.read().unwrap() {
             let hints = neural_routing_runtime::SessionHints {
                 protocol_run_id,
                 protocol_state,
