@@ -4944,6 +4944,9 @@ pub struct RunPlanRequest {
     /// Defaults to "manual" if not specified.
     #[serde(default)]
     pub triggered_by: Option<String>,
+    /// Optional budget limit in USD. Overrides the default ($10).
+    /// When omitted, falls back to RunnerConfig::default().max_cost_usd.
+    pub max_cost_usd: Option<f64>,
 }
 
 /// Response for a successfully started plan run.
@@ -4971,7 +4974,11 @@ pub async fn run_plan(
 
     let graph = state.orchestrator.neo4j_arc();
     let context_builder = state.orchestrator.context_builder().clone();
-    let config = state.orchestrator.runner_config();
+    let mut config = state.orchestrator.runner_config();
+    // Override budget if the caller specified one
+    if let Some(budget) = req.max_cost_usd {
+        config.max_cost_usd = budget;
+    }
 
     // Create a broadcast channel for RunnerEvents
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
@@ -5048,6 +5055,44 @@ pub async fn cancel_run(
     Ok(Json(serde_json::json!({
         "cancelled": true,
         "run_id": run_id,
+    })))
+}
+
+/// PATCH /api/plans/{plan_id}/run/budget — Update the budget of a running execution.
+pub async fn update_run_budget(
+    State(_state): State<OrchestratorState>,
+    Path(_plan_id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let max_cost_usd = body
+        .get("max_cost_usd")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "Missing or invalid 'max_cost_usd' (must be a positive number)".to_string(),
+            )
+        })?;
+
+    if max_cost_usd <= 0.0 {
+        return Err(AppError::BadRequest(
+            "max_cost_usd must be positive".to_string(),
+        ));
+    }
+
+    // Get the current run_id
+    let status = crate::runner::PlanRunner::status().await;
+    let run_id = status
+        .run_id
+        .ok_or_else(|| AppError::NotFound("No active run".to_string()))?;
+
+    crate::runner::PlanRunner::update_budget(run_id, max_cost_usd)
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(serde_json::json!({
+        "updated": true,
+        "run_id": run_id,
+        "max_cost_usd": max_cost_usd,
     })))
 }
 

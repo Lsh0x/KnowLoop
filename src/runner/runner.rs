@@ -1,7 +1,7 @@
 //! PlanRunner — Main execution loop for autonomous plan execution.
 //!
 //! Orchestrates: get_next_task → spawn agent → monitor → verify → update_status → next.
-//! The Runner owns all task/step status transitions — the spawned agent must NOT update them.
+//! The Runner owns task status transitions — agents update step statuses in real-time via MCP.
 
 use crate::chat::manager::ChatManager;
 use crate::chat::types::{ChatEvent, ChatRequest};
@@ -46,6 +46,12 @@ pub static RUNNER_STATE: LazyLock<Arc<RwLock<Option<RunnerState>>>> =
 /// Checked between each task in the execution loop.
 pub static RUNNER_CANCEL: LazyLock<Arc<AtomicBool>> =
     LazyLock::new(|| Arc::new(AtomicBool::new(false)));
+
+/// Budget override — allows updating max_cost_usd during a running execution.
+/// Stores f64 bits in an AtomicU64 (0 = no override, use config default).
+/// Set via PATCH /api/plans/{plan_id}/run/budget.
+pub static RUNNER_BUDGET: LazyLock<Arc<std::sync::atomic::AtomicU64>> =
+    LazyLock::new(|| Arc::new(std::sync::atomic::AtomicU64::new(0)));
 
 /// Vector collector — accumulates drift/knowledge metrics during execution.
 /// Reset at the start of each run, finalized at the end.
@@ -219,9 +225,54 @@ pub struct RunStatus {
     pub tasks_total: usize,
     pub elapsed_secs: f64,
     pub cost_usd: f64,
+    /// Current effective budget limit (from override or config).
+    pub max_cost_usd: f64,
 }
 
 impl PlanRunner {
+    /// Get the effective max_cost_usd, checking for a runtime override.
+    pub fn effective_budget(&self) -> f64 {
+        let bits = RUNNER_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+        if bits == 0 {
+            self.config.max_cost_usd
+        } else {
+            f64::from_bits(bits)
+        }
+    }
+
+    /// Update the budget override for the currently running execution.
+    /// The new value takes effect on the next budget check in the execution loop.
+    pub async fn update_budget(run_id: Uuid, new_budget: f64) -> Result<()> {
+        if new_budget <= 0.0 {
+            return Err(anyhow!("Budget must be positive"));
+        }
+        let global = RUNNER_STATE.read().await;
+        match &*global {
+            Some(state) if state.run_id == run_id && state.status == PlanRunStatus::Running => {
+                let bits = new_budget.to_bits();
+                RUNNER_BUDGET.store(bits, std::sync::atomic::Ordering::Relaxed);
+                info!("Budget updated to ${:.2} for run {}", new_budget, run_id);
+                Ok(())
+            }
+            Some(state) => Err(anyhow!(
+                "Run {} is not running (status: {})",
+                run_id,
+                state.status
+            )),
+            None => Err(anyhow!("No active run")),
+        }
+    }
+
+    /// Get the current effective budget (static, no &self needed).
+    pub fn current_budget() -> f64 {
+        let bits = RUNNER_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+        if bits == 0 {
+            0.0
+        } else {
+            f64::from_bits(bits)
+        }
+    }
+
     /// Create a new PlanRunner.
     pub fn new(
         chat_manager: Arc<ChatManager>,
@@ -470,8 +521,12 @@ impl PlanRunner {
             *global = Some(state.clone());
         }
 
-        // Reset cancel flag and vector collector
+        // Reset cancel flag, budget override, and vector collector
         RUNNER_CANCEL.store(false, Ordering::SeqCst);
+        RUNNER_BUDGET.store(
+            self.config.max_cost_usd.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         {
             let mut collector = VECTOR_COLLECTOR.write().await;
             *collector = VectorCollector::new();
@@ -597,6 +652,7 @@ impl PlanRunner {
                     tasks_total: state.total_tasks,
                     elapsed_secs: state.elapsed_secs(),
                     cost_usd: state.cost_usd,
+                    max_cost_usd: Self::current_budget(),
                 }
             }
             None => RunStatus {
@@ -613,6 +669,7 @@ impl PlanRunner {
                 tasks_total: 0,
                 elapsed_secs: 0.0,
                 cost_usd: 0.0,
+                max_cost_usd: 0.0,
             },
         }
     }
@@ -723,7 +780,7 @@ impl PlanRunner {
                         let global = RUNNER_STATE.read().await;
                         global
                             .as_ref()
-                            .map(|s| (s.cost_usd, self.config.max_cost_usd))
+                            .map(|s| (s.cost_usd, self.effective_budget()))
                             .unwrap_or((0.0, 0.0))
                     };
                     self.emit_event(RunnerEvent::BudgetExceeded {
@@ -1349,7 +1406,7 @@ impl PlanRunner {
             {
                 let global = RUNNER_STATE.read().await;
                 if let Some(ref s) = *global {
-                    if s.is_budget_exceeded(self.config.max_cost_usd) {
+                    if s.is_budget_exceeded(self.effective_budget()) {
                         wave_result.aborted = true;
                         drop(global);
                         join_set.abort_all();
@@ -1419,7 +1476,7 @@ impl PlanRunner {
                 {
                     let global = RUNNER_STATE.read().await;
                     if let Some(ref s) = *global {
-                        if s.is_budget_exceeded(self.config.max_cost_usd) {
+                        if s.is_budget_exceeded(self.effective_budget()) {
                             info!("Budget exceeded, skipping remaining retries");
                             break;
                         }
@@ -1809,6 +1866,62 @@ impl PlanRunner {
             prompt.push_str(&format!("\n## Persona Context\n{}\n", pc));
         }
 
+        // --- Step 2d: Inject knowledge context (notes + decisions) for affected files ---
+        {
+            use crate::notes::EntityType as NoteEntityType;
+            let mut knowledge_parts: Vec<String> = Vec::new();
+            // Cap at 5 files to avoid prompt bloat
+            for file_path in runner_context.affected_files.iter().take(5) {
+                let mut file_notes = Vec::new();
+                // Fetch notes linked to this file
+                if let Ok(notes) = self
+                    .graph
+                    .get_notes_for_entity(&NoteEntityType::File, file_path)
+                    .await
+                {
+                    for note in notes.iter().take(3) {
+                        // Truncate content to ~200 chars
+                        let excerpt = if note.content.len() > 200 {
+                            format!("{}…", &note.content[..200])
+                        } else {
+                            note.content.clone()
+                        };
+                        file_notes.push(format!(
+                            "  - **[{:?}]** ({:?}): {}",
+                            note.note_type, note.importance, excerpt
+                        ));
+                    }
+                }
+                // Fetch decisions affecting this file
+                if let Ok(decisions) = self
+                    .graph
+                    .get_decisions_affecting("File", file_path, Some("accepted"))
+                    .await
+                {
+                    for dec in decisions.iter().take(2) {
+                        let rationale_excerpt = if dec.rationale.len() > 150 {
+                            format!("{}…", &dec.rationale[..150])
+                        } else {
+                            dec.rationale.clone()
+                        };
+                        file_notes.push(format!(
+                            "  - **[Decision]** {}: {}",
+                            dec.description, rationale_excerpt
+                        ));
+                    }
+                }
+                if !file_notes.is_empty() {
+                    knowledge_parts.push(format!("### `{}`\n{}", file_path, file_notes.join("\n")));
+                }
+            }
+            if !knowledge_parts.is_empty() {
+                prompt.push_str("\n## Knowledge Context\n");
+                prompt.push_str("The following notes and decisions are relevant to the files you will modify:\n\n");
+                prompt.push_str(&knowledge_parts.join("\n\n"));
+                prompt.push('\n');
+            }
+        }
+
         // --- Step 3: Inject complexity directive ---
         prompt.push_str(&format!(
             "\n## Cognitive Profile: {}\n{}\n",
@@ -1821,7 +1934,8 @@ impl PlanRunner {
         // To ensure the agent receives the autonomous execution instructions, we prepend them
         // directly into the user message. This is the ONLY reliable way to reach the agent.
         {
-            let prompt_ctx = runner_context.to_prompt_context();
+            let mut prompt_ctx = runner_context.to_prompt_context();
+            prompt_ctx.scaffolding_level = 0; // Force FULL runner prompt — higher levels produce minimal instructions that agents dismiss
             let runner_instructions =
                 crate::runner::prompt::build_runner_system_prompt(&prompt_ctx);
             let mut full_prompt =
@@ -1844,7 +1958,7 @@ impl PlanRunner {
             })
             .unwrap_or_default();
         let request = ChatRequest {
-            message: String::new(), // message sent separately via send_message
+            message: prompt, // Send the full prompt directly in create_session — avoids the ghost empty message at seq 1
             session_id: None,
             cwd: cwd.to_string(),
             project_slug: project_slug.map(|s| s.to_string()),
@@ -1925,13 +2039,11 @@ impl PlanRunner {
             }
         };
 
-        // Subscribe to events BEFORE sending message (to not miss any)
+        // Subscribe to events BEFORE the background task starts streaming
+        // (create_session spawns a tokio task that sends the message — subscribe must happen first)
         let rx = self.chat_manager.subscribe(&session_id).await?;
         // Clone a second receiver for the guard
         let guard_rx = self.chat_manager.subscribe(&session_id).await?;
-
-        // Send the prompt
-        self.chat_manager.send_message(&session_id, &prompt).await?;
 
         let start = std::time::Instant::now();
 
@@ -2014,10 +2126,10 @@ impl PlanRunner {
             let mut global = RUNNER_STATE.write().await;
             if let Some(ref mut s) = *global {
                 s.add_cost(cost_usd);
-                if s.is_budget_exceeded(self.config.max_cost_usd) {
+                if s.is_budget_exceeded(self.effective_budget()) {
                     return Ok(wrap(TaskResult::BudgetExceeded {
                         cumulated_cost_usd: s.cost_usd,
-                        limit_usd: self.config.max_cost_usd,
+                        limit_usd: self.effective_budget(),
                     }));
                 }
             }
@@ -2044,12 +2156,11 @@ impl PlanRunner {
             }
         }
 
-        // Auto-complete pending steps ONLY if the agent produced commits.
-        // The agent is instructed NOT to update step statuses via MCP
-        // (the Runner manages all status transitions). But we must verify that
-        // actual code work was done before blindly marking steps as completed —
-        // otherwise agents that produce no code get "ghost completions".
-        let agent_has_activity = {
+        // Fallback: auto-complete any steps the agent didn't update during execution.
+        // The agent is now instructed to update step statuses in real-time via MCP,
+        // but some steps may be missed (agent error, simple tasks, etc.).
+        // We only complete remaining pending/in_progress steps as a safety net.
+        {
             // Check for uncommitted changes — agent might have written code but forgot to commit
             let output = tokio::process::Command::new("git")
                 .args(["status", "--porcelain"])
@@ -2069,18 +2180,21 @@ impl PlanRunner {
                 );
             }
 
-            // For auto-complete, we're lenient: always auto-complete steps.
-            // The wave-level verify_has_commits will catch ghost completions
-            // and fail the task if no commits were produced for the entire wave.
-            true
-        };
-
-        if agent_has_activity {
             if let Ok(steps) = self.graph.get_task_steps(task_id).await {
-                for step in &steps {
-                    if step.status == crate::neo4j::models::StepStatus::Pending
-                        || step.status == crate::neo4j::models::StepStatus::InProgress
-                    {
+                let remaining: Vec<_> = steps
+                    .iter()
+                    .filter(|s| {
+                        s.status == crate::neo4j::models::StepStatus::Pending
+                            || s.status == crate::neo4j::models::StepStatus::InProgress
+                    })
+                    .collect();
+                if !remaining.is_empty() {
+                    info!(
+                        "Task {} — auto-completing {} remaining steps (agent didn't update them)",
+                        task_id,
+                        remaining.len()
+                    );
+                    for step in remaining {
                         if let Err(e) = self
                             .graph
                             .update_step_status(
@@ -2094,11 +2208,6 @@ impl PlanRunner {
                     }
                 }
             }
-        } else {
-            warn!(
-                "Task {} — skipping step auto-complete: agent produced no git activity",
-                task_id
-            );
         }
 
         // Post-execution: persist persona used on the task node (Step 5 — T9)
@@ -2486,6 +2595,9 @@ impl PlanRunner {
             }
         }
 
+        // Clear budget override
+        RUNNER_BUDGET.store(0, std::sync::atomic::Ordering::Relaxed);
+
         let mut global = RUNNER_STATE.write().await;
         if let Some(ref mut s) = *global {
             s.finalize(status);
@@ -2521,6 +2633,29 @@ impl PlanRunner {
                         )
                     })
                     .unwrap_or((Uuid::nil(), 0.0, 0.0, 0, 0));
+
+                // Post-run enricher sweep: catch commits missed by per-task enrichment
+                // (e.g., mega-commit at end instead of atomic per-task commits)
+                if let Some(cwd) = cwd {
+                    if let Some(ref state) = *global {
+                        let enricher = TaskEnricher::new(self.graph.clone());
+                        let sweep_linked = enricher
+                            .post_run_sweep(
+                                state.plan_id,
+                                &state.completed_tasks,
+                                state.started_at,
+                                state.project_id,
+                                cwd,
+                            )
+                            .await;
+                        if sweep_linked > 0 {
+                            info!(
+                                "Post-run sweep linked {} commit→task relations",
+                                sweep_linked
+                            );
+                        }
+                    }
+                }
 
                 // Auto-PR: generate and create PR if auto_pr is enabled
                 let pr_url = if self.config.auto_pr {
@@ -3013,6 +3148,7 @@ mod tests {
             tasks_total: 0,
             elapsed_secs: 0.0,
             cost_usd: 0.0,
+            max_cost_usd: 0.0,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"running\":false"));
