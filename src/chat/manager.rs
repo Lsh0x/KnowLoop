@@ -183,11 +183,26 @@ pub struct ChatManager {
 // CompactionNotifier — HookCallback that emits ChatEvent::CompactionStarted
 // ============================================================================
 
+/// Context source for CompactionNotifier — determines which builder method to call.
+#[derive(Debug, Clone)]
+pub(crate) enum CompactionContextSource {
+    /// Runner mode: task_id known, plan_id resolved at hook time via GraphStore.
+    Task(Uuid),
+    /// Interactive mode: project slug known.
+    Session(String),
+    /// No context available (backward-compatible fallback).
+    None,
+}
+
 /// Hook callback that emits a `ChatEvent::CompactionStarted` when the CLI
 /// triggers a `PreCompact` event (context window compaction is about to start).
 ///
 /// This gives the frontend a real-time notification so it can display a spinner
 /// instead of leaving the user staring at silence during compaction.
+///
+/// Additionally, builds contextual `custom_instructions` via `CompactionContextBuilder`
+/// to guide Claude's compaction — preserving key concepts (function names, decisions,
+/// constraints) in the compacted summary.
 ///
 /// The callback always returns `continue_: true` — it observes, never blocks.
 pub(crate) struct CompactionNotifier {
@@ -197,6 +212,10 @@ pub(crate) struct CompactionNotifier {
     nats: Option<Arc<crate::events::NatsEmitter>>,
     /// Session ID for NATS subject routing
     session_id: String,
+    /// Graph store for building compaction context (None = no custom_instructions)
+    graph: Option<Arc<dyn GraphStore>>,
+    /// Context source: task (runner) or session (interactive)
+    context_source: CompactionContextSource,
 }
 
 impl CompactionNotifier {
@@ -209,6 +228,59 @@ impl CompactionNotifier {
             events_tx,
             nats,
             session_id,
+            graph: None,
+            context_source: CompactionContextSource::None,
+        }
+    }
+
+    /// Attach a graph store and context source for building custom_instructions.
+    pub fn with_context(
+        mut self,
+        graph: Arc<dyn GraphStore>,
+        source: CompactionContextSource,
+    ) -> Self {
+        self.graph = Some(graph);
+        self.context_source = source;
+        self
+    }
+
+    /// Build custom instructions string from the context source.
+    /// Returns None if no graph/context is available or on any error.
+    async fn build_custom_instructions(&self) -> Option<String> {
+        let graph = self.graph.as_ref()?;
+        let builder = super::compaction_context::CompactionContextBuilder::new(graph.clone());
+
+        let ctx = match &self.context_source {
+            CompactionContextSource::Task(task_id) => {
+                // Resolve plan_id from task_id
+                let plan_id = match graph.get_plan_id_for_task(*task_id).await {
+                    Ok(Some(pid)) => pid,
+                    _ => {
+                        warn!(task_id = %task_id, "Could not resolve plan_id for task — skipping custom_instructions");
+                        return None;
+                    }
+                };
+                builder.build_for_task(plan_id, *task_id).await
+            }
+            CompactionContextSource::Session(slug) => {
+                builder.build_for_session(Some(slug.as_str())).await
+            }
+            CompactionContextSource::None => return None,
+        };
+
+        match ctx {
+            Ok(context) => {
+                let instructions = context.to_custom_instructions();
+                if instructions.is_empty() {
+                    None
+                } else {
+                    Some(instructions)
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to build compaction context — skipping custom_instructions");
+                None
+            }
         }
     }
 }
@@ -221,6 +293,10 @@ impl nexus_claude::HookCallback for CompactionNotifier {
         _tool_use_id: Option<&str>,
         _context: &nexus_claude::HookContext,
     ) -> std::result::Result<nexus_claude::HookJSONOutput, nexus_claude::SdkError> {
+        // Build custom instructions (async, best-effort)
+        // This runs BEFORE emitting the event so the instructions are ready for the output.
+        let custom_instructions = self.build_custom_instructions().await;
+
         if let nexus_claude::HookInput::PreCompact(pre_compact) = input {
             let event = ChatEvent::CompactionStarted {
                 trigger: pre_compact.trigger.clone(),
@@ -234,13 +310,19 @@ impl nexus_claude::HookCallback for CompactionNotifier {
             info!(
                 trigger = %pre_compact.trigger,
                 session_id = %self.session_id,
+                has_custom_instructions = custom_instructions.is_some(),
                 "PreCompact hook fired — emitted CompactionStarted event"
             );
         }
-        // Always allow compaction to proceed
+        // Always allow compaction to proceed.
+        // custom_instructions is passed via `reason` field — the CLI uses this as
+        // feedback context for the compaction summary. The SDK's SyncHookJSONOutput
+        // does not have a dedicated `custom_instructions` output field (it's input-only
+        // on PreCompactHookInput), so `reason` is the semantic equivalent for output.
         Ok(nexus_claude::HookJSONOutput::Sync(
             nexus_claude::SyncHookJSONOutput {
                 continue_: Some(true),
+                reason: custom_instructions,
                 ..Default::default()
             },
         ))
@@ -2232,11 +2314,22 @@ impl ChatManager {
             let mut hooks = std::collections::HashMap::new();
 
             // PreCompact → CompactionNotifier broadcasts ChatEvent::CompactionStarted
+            // + builds custom_instructions from task/session context
+            let context_source = match &spawned_ctx {
+                Some(ctx) if ctx.task_id.is_some() => {
+                    CompactionContextSource::Task(ctx.task_id.unwrap())
+                }
+                _ => match request.project_slug.as_deref() {
+                    Some(slug) => CompactionContextSource::Session(slug.to_string()),
+                    None => CompactionContextSource::None,
+                },
+            };
             let notifier = CompactionNotifier::new(
                 events_tx.clone(),
                 self.nats.clone(),
                 session_id.to_string(),
-            );
+            )
+            .with_context(self.graph.clone(), context_source);
             hooks.insert(
                 "PreCompact".to_string(),
                 vec![nexus_claude::HookMatcher {
@@ -2631,6 +2724,10 @@ impl ChatManager {
 
         // Track whether this stream ended with error_max_turns (for auto-continue)
         let mut hit_error_max_turns = false;
+
+        // Track whether a CompactBoundary was received during this stream turn.
+        // When true, we'll rebuild and re-inject project context after the stream ends.
+        let mut needs_post_compaction_injection = false;
 
         // Record user message in memory manager
         if let Some(ref mm) = memory_manager {
@@ -3320,6 +3417,15 @@ impl ChatManager {
                                         }
                                     }
 
+                                    // Detect CompactBoundary for post-compaction context re-injection
+                                    if matches!(event, ChatEvent::CompactBoundary { .. }) {
+                                        info!(
+                                            "CompactBoundary detected in session {}, will inject context after stream",
+                                            session_id
+                                        );
+                                        needs_post_compaction_injection = true;
+                                    }
+
                                     emit_chat(event, &events_tx, &nats, &session_id);
                                 }
                             }
@@ -3422,6 +3528,80 @@ impl ChatManager {
         // being silently lost after the first message in a session).
         if sdk_control_rx.is_some() {
             *shared_sdk_control_rx.lock().await = sdk_control_rx;
+        }
+
+        // Post-compaction context re-injection for interactive sessions.
+        // If a CompactBoundary was detected during this stream turn, rebuild project
+        // context via CompactionContextBuilder and queue it as a system-reminder hint
+        // so the LLM regains project awareness after compaction.
+        if needs_post_compaction_injection && !interrupt_flag.load(Ordering::SeqCst) {
+            info!(
+                "Post-compaction injection triggered for session {}",
+                session_id
+            );
+
+            // Resolve project_slug from the session's Neo4j node
+            let project_slug = if let Some(uuid) = session_uuid {
+                match graph.get_chat_session(uuid).await {
+                    Ok(Some(node)) => node.project_slug,
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Build context using CompactionContextBuilder (timed for metrics)
+            let build_start = std::time::Instant::now();
+            let builder = super::compaction_context::CompactionContextBuilder::new(graph.clone());
+            let build_result = builder.build_for_session(project_slug.as_deref()).await;
+            let build_latency_ms = build_start.elapsed().as_millis() as u64;
+
+            let (hint_len, recovery_success) = match build_result {
+                Ok(ctx) => {
+                    let hint = ctx.to_markdown();
+                    let len = hint.len();
+                    if !hint.is_empty() {
+                        info!(
+                            "Injecting post-compaction context for session {} ({} chars)",
+                            session_id, len
+                        );
+                        pending_messages.lock().await.push_back(hint);
+                    }
+                    (len, true)
+                }
+                Err(e) => {
+                    // Fallback: if build fails, inject a minimal reminder
+                    warn!(
+                        "Failed to build post-compaction context for session {}: {}. Injecting minimal reminder.",
+                        session_id, e
+                    );
+                    let minimal = if project_slug.is_some() {
+                        format!(
+                            "<system-reminder>\n# Post-Compaction Context\nYou are working on project \"{}\". Context rebuild failed — continue based on conversation history.\n</system-reminder>",
+                            project_slug.as_deref().unwrap_or("unknown")
+                        )
+                    } else {
+                        "<system-reminder>\n# Post-Compaction Context\nYou are in an interactive session. No project context available.\n</system-reminder>".to_string()
+                    };
+                    let len = minimal.len();
+                    pending_messages.lock().await.push_back(minimal);
+                    (len, false)
+                }
+            };
+
+            // Emit CompactionRecovery metrics
+            let hint_tokens = (hint_len as u32) / 3; // rough chars→tokens estimate
+            let recovery_event = ChatEvent::CompactionRecovery {
+                hint_tokens,
+                build_latency_ms,
+                recovery_success,
+            };
+            emit_chat(recovery_event, &events_tx, &nats, &session_id);
+        } else if needs_post_compaction_injection {
+            debug!(
+                "Skipping post-compaction injection for session {} (interrupted)",
+                session_id
+            );
         }
 
         // Lock-free interrupt: send the CLI interrupt signal IMMEDIATELY via stdin_tx
@@ -4456,11 +4636,17 @@ impl ChatManager {
             let mut hooks = std::collections::HashMap::new();
 
             // PreCompact → CompactionNotifier broadcasts ChatEvent::CompactionStarted
+            // + builds custom_instructions from session context
+            let context_source = match session_node.project_slug.as_deref() {
+                Some(slug) => CompactionContextSource::Session(slug.to_string()),
+                None => CompactionContextSource::None,
+            };
             let notifier = CompactionNotifier::new(
                 events_tx.clone(),
                 self.nats.clone(),
                 session_id.to_string(),
-            );
+            )
+            .with_context(self.graph.clone(), context_source);
             hooks.insert(
                 "PreCompact".to_string(),
                 vec![nexus_claude::HookMatcher {
@@ -5034,6 +5220,15 @@ impl ChatManager {
             .get(session_id)
             .ok_or_else(|| anyhow!("Session {} not found or inactive", session_id))?;
         Ok(session.events_tx.subscribe())
+    }
+
+    /// Get the broadcast sender for a session (used by AgentGuard to emit events).
+    pub async fn get_events_tx(&self, session_id: &str) -> Result<broadcast::Sender<ChatEvent>> {
+        let sessions = self.active_sessions.read().await;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow!("Session {} not found or inactive", session_id))?;
+        Ok(session.events_tx.clone())
     }
 
     /// Get persisted events since a given sequence number (for WebSocket replay)
@@ -8913,6 +9108,103 @@ mod tests {
 
         // No event should be broadcast for non-PreCompact hooks
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_compaction_notifier_returns_custom_instructions() {
+        use crate::neo4j::mock::MockGraphStore;
+        use crate::test_helpers::{test_plan, test_step, test_task};
+        use nexus_claude::{HookCallback, HookContext, HookInput, PreCompactHookInput};
+
+        // 1. Setup: create a plan + task + steps in MockGraphStore
+        let mock = Arc::new(MockGraphStore::new());
+        let plan = test_plan();
+        let plan_id = plan.id;
+        mock.create_plan(&plan).await.unwrap();
+
+        let mut task = test_task();
+        task.affected_files = vec![
+            "src/chat/manager.rs".to_string(),
+            "src/chat/compaction_context.rs".to_string(),
+        ];
+        task.title = Some("Implement compaction context".to_string());
+        let task_id = task.id;
+        mock.create_task(plan_id, &task).await.unwrap();
+
+        let step1 = test_step(1, "Create builder struct");
+        let step2 = test_step(2, "Add custom_instructions output");
+        mock.create_step(task_id, &step1).await.unwrap();
+        mock.create_step(task_id, &step2).await.unwrap();
+
+        // 2. Create CompactionNotifier with task context
+        let (tx, _rx) = broadcast::channel::<ChatEvent>(16);
+        let notifier = CompactionNotifier::new(tx, None, "test-ctx-session".to_string())
+            .with_context(
+                mock.clone() as Arc<dyn GraphStore>,
+                CompactionContextSource::Task(task_id),
+            );
+
+        // 3. Execute with a PreCompact input
+        let input = HookInput::PreCompact(PreCompactHookInput {
+            session_id: "test-ctx-session".into(),
+            transcript_path: "/tmp/t".into(),
+            cwd: "/test".into(),
+            permission_mode: None,
+            trigger: "auto".into(),
+            custom_instructions: None,
+        });
+
+        let context = HookContext { signal: None };
+        let result = notifier.execute(&input, None, &context).await.unwrap();
+
+        // 4. Verify: output should have custom_instructions (via reason field)
+        if let nexus_claude::HookJSONOutput::Sync(sync) = result {
+            assert_eq!(sync.continue_, Some(true), "Must always continue");
+            let reason = sync
+                .reason
+                .expect("reason (custom_instructions) should be set");
+            assert!(
+                reason.contains("src/chat/manager.rs"),
+                "Should mention affected files, got: {reason}"
+            );
+            assert!(
+                reason.contains("Implement compaction context"),
+                "Should mention task title, got: {reason}"
+            );
+        } else {
+            panic!("Expected Sync output");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compaction_notifier_no_context_returns_no_instructions() {
+        use nexus_claude::{HookCallback, HookContext, HookInput, PreCompactHookInput};
+
+        // CompactionNotifier without context (backward-compatible)
+        let (tx, _rx) = broadcast::channel::<ChatEvent>(16);
+        let notifier = CompactionNotifier::new(tx, None, "no-ctx".to_string());
+
+        let input = HookInput::PreCompact(PreCompactHookInput {
+            session_id: "no-ctx".into(),
+            transcript_path: "/tmp/t".into(),
+            cwd: "/".into(),
+            permission_mode: None,
+            trigger: "auto".into(),
+            custom_instructions: None,
+        });
+
+        let context = HookContext { signal: None };
+        let result = notifier.execute(&input, None, &context).await.unwrap();
+
+        if let nexus_claude::HookJSONOutput::Sync(sync) = result {
+            assert_eq!(sync.continue_, Some(true));
+            assert!(
+                sync.reason.is_none(),
+                "No context source → no custom instructions"
+            );
+        } else {
+            panic!("Expected Sync output");
+        }
     }
 
     // ====================================================================

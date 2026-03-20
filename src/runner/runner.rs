@@ -631,6 +631,37 @@ impl PlanRunner {
         }
     }
 
+    /// Force-cancel: immediately clears the global runner state and persists
+    /// the run as cancelled in Neo4j. Use when graceful cancel is stuck
+    /// (e.g. agents blocked in spawning state that never respond to the
+    /// cancel flag).
+    pub async fn force_cancel(run_id: Uuid, graph: Arc<dyn GraphStore>) -> Result<()> {
+        // Set cancel flag so any in-flight code that checks it will stop
+        RUNNER_CANCEL.store(true, Ordering::SeqCst);
+        // Clear budget override
+        RUNNER_BUDGET.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let mut global = RUNNER_STATE.write().await;
+        match &mut *global {
+            Some(state) if state.run_id == run_id => {
+                state.finalize(PlanRunStatus::Cancelled);
+                if let Err(e) = graph.update_plan_run(state).await {
+                    error!("Failed to persist force-cancelled run to Neo4j: {}", e);
+                }
+                info!("Runner force-cancelled run {}", run_id);
+                // Clear the global state so a new run can start
+                *global = None;
+                Ok(())
+            }
+            Some(state) => Err(anyhow!(
+                "Run {} does not match active run {}",
+                run_id,
+                state.run_id
+            )),
+            None => Err(anyhow!("No active run to force-cancel")),
+        }
+    }
+
     /// Get the current run status snapshot.
     pub async fn status() -> RunStatus {
         let global = RUNNER_STATE.read().await;
@@ -728,6 +759,28 @@ impl PlanRunner {
 
         for (wave_idx, wave) in waves.iter().enumerate() {
             let wave_number = wave_idx + 1;
+
+            // Skip waves where all tasks are already completed (resume optimization)
+            let has_pending_tasks = wave.tasks.iter().any(|t| t.status != "completed");
+            if !has_pending_tasks {
+                info!(
+                    "Skipping wave {} — all {} tasks already completed",
+                    wave_number, wave.task_count
+                );
+                // Still track completed tasks in runner state
+                {
+                    let mut global = RUNNER_STATE.write().await;
+                    if let Some(ref mut s) = *global {
+                        for t in &wave.tasks {
+                            if !s.completed_tasks.contains(&t.id) {
+                                s.completed_tasks.push(t.id);
+                            }
+                        }
+                        s.current_wave = wave_number;
+                    }
+                }
+                continue;
+            }
 
             // Check cancel flag
             if RUNNER_CANCEL.load(Ordering::SeqCst) {
@@ -2064,7 +2117,14 @@ impl PlanRunner {
             guard_config,
             guard_rx,
             Some(hint_sender),
+            Some(self.graph.clone()),
+            Some(plan_id),
         );
+        // Attach events_tx so the guard can emit CompactionRecovery metrics
+        let guard = match self.chat_manager.get_events_tx(&session_id).await {
+            Ok(tx) => guard.with_events_tx(tx),
+            Err(_) => guard, // best-effort: if session not found, skip
+        };
 
         let guard_handle = tokio::spawn(async move { guard.monitor().await });
 
