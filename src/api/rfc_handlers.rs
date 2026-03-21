@@ -859,6 +859,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode as AxumStatus},
     };
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     // ----------------------------------------------------------------
@@ -894,6 +895,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters: std::sync::OnceLock::new(),
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         })
     }
 
@@ -931,6 +933,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters: std::sync::OnceLock::new(),
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         });
         (state, project_id)
     }

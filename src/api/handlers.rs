@@ -76,6 +76,11 @@ pub struct ServerState {
     /// EventReactor counters for the /api/reactor/status endpoint.
     /// Initialized once after reactor is built via `OnceLock`.
     pub reactor_counters: std::sync::OnceLock<Arc<crate::events::ReactorCounters>>,
+    /// System-level prediction confidence tracker (rolling window).
+    ///
+    /// # References
+    /// - ELL (2025) — "Experience-driven Lifelong Learning" — 4th pillar: self-evaluation
+    pub confidence_tracker: Arc<crate::graph::confidence::ConfidenceTracker>,
 }
 
 /// Shared orchestrator state
@@ -2917,6 +2922,18 @@ pub async fn update_fabric_scores(
     let risk_count = risk.len();
     let _ = neo.batch_update_risk_scores(&risk).await;
 
+    // Compute transitive co-change relations (Rolfsnes et al. 2018)
+    // BFS on the CO_CHANGED graph to detect hidden transitive couplings
+    let transitive_config = crate::neo4j::models::TransitiveCoChangeConfig::default();
+    let transitive_count = neo
+        .compute_co_changed_transitive(
+            project_id,
+            transitive_config.max_transitive_depth,
+            transitive_config.min_transitive_score,
+        )
+        .await
+        .unwrap_or(0);
+
     Ok(Json(serde_json::json!({
         "nodes_updated": analytics.metrics.len(),
         "computation_ms": start.elapsed().as_millis() as u64,
@@ -2926,6 +2943,7 @@ pub async fn update_fabric_scores(
         "churn_scores_computed": churn_count,
         "knowledge_density_computed": density_count,
         "risk_scores_computed": risk_count,
+        "transitive_co_change_computed": transitive_count,
     })))
 }
 
@@ -6181,6 +6199,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters: std::sync::OnceLock::new(),
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         });
         (create_router(state), milestone.id, task1.id, task2.id)
     }
@@ -6392,6 +6411,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters: std::sync::OnceLock::new(),
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         }
     }
 
@@ -6550,6 +6570,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters: std::sync::OnceLock::new(),
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         });
         create_router(state)
     }
@@ -7325,6 +7346,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters: std::sync::OnceLock::new(),
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         });
         (create_router(state), plan.id, task1.id, task2.id)
     }
@@ -7432,6 +7454,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters: std::sync::OnceLock::new(),
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         });
         let app = create_router(state);
 
@@ -7606,6 +7629,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters,
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         });
         let app = create_router(state);
 
@@ -7654,6 +7678,7 @@ mod tests {
             trajectory_store: None,
             identity: None,
             reactor_counters,
+            confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         });
         let app = create_router(state);
 
