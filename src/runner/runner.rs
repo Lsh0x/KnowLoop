@@ -14,8 +14,8 @@ use crate::runner::git;
 use crate::runner::guard::{AgentGuard, ChatManagerHintSender, GuardConfig, GuardVerdict};
 use crate::runner::lifecycle;
 use crate::runner::models::{
-    ActiveAgent, ActiveAgentSnapshot, PlanRunStatus, RunnerConfig, RunnerEvent,
-    TaskExecutionReport, TaskResult, TaskRunStatus, TriggerSource,
+    ActiveAgent, ActiveAgentSnapshot, CwdValidation, PlanRunStatus, RunnerConfig, RunnerEvent,
+    StepBreakdown, TaskExecutionReport, TaskResult, TaskRunStatus, TriggerSource,
 };
 use crate::runner::persona::{
     activate_skills_for_task, complexity_directive, profile_task, record_skill_feedback,
@@ -33,6 +33,92 @@ use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+// ============================================================================
+// Pure helper functions (testable without PlanRunner)
+// ============================================================================
+
+/// Result of CWD validation — either the resolved cwd or an error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CwdResolution {
+    /// CWD was empty/dot, replaced by root_path
+    FallbackToRoot { resolved_cwd: String },
+    /// CWD matches root_path (or no root_path to compare)
+    Match { resolved_cwd: String },
+    /// CWD differs from root_path — warn mode allows it
+    Mismatch {
+        resolved_cwd: String,
+        root_path: String,
+    },
+    /// CWD differs from root_path — strict mode rejects it
+    StrictMismatch { cwd: String, root_path: String },
+    /// No root_path configured — use cwd as-is
+    NoRootPath { resolved_cwd: String },
+}
+
+/// Validate and resolve the working directory against the project root_path.
+///
+/// Pure function — no side effects, fully testable.
+/// The caller is responsible for emitting events/logs based on the result.
+pub fn validate_cwd(
+    cwd: &str,
+    root_path: Option<&str>,
+    validation: &CwdValidation,
+) -> CwdResolution {
+    let root_path = match root_path {
+        Some(rp) if !rp.is_empty() => rp,
+        _ => {
+            return CwdResolution::NoRootPath {
+                resolved_cwd: cwd.to_string(),
+            }
+        }
+    };
+
+    // Expand ~ in root_path
+    let root_path_expanded = if root_path.starts_with('~') {
+        root_path.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1)
+    } else {
+        root_path.to_string()
+    };
+
+    // Fallback: empty/dot cwd → use root_path
+    if cwd == "." || cwd.is_empty() {
+        return CwdResolution::FallbackToRoot {
+            resolved_cwd: root_path_expanded,
+        };
+    }
+
+    // Compare canonicalized paths
+    let cwd_canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| std::path::PathBuf::from(cwd));
+    let root_canon = std::fs::canonicalize(&root_path_expanded)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&root_path_expanded));
+
+    if cwd_canon == root_canon {
+        return CwdResolution::Match {
+            resolved_cwd: cwd.to_string(),
+        };
+    }
+
+    // Mismatch detected
+    match validation {
+        CwdValidation::Strict => CwdResolution::StrictMismatch {
+            cwd: cwd.to_string(),
+            root_path: root_path_expanded,
+        },
+        CwdValidation::Warn => CwdResolution::Mismatch {
+            resolved_cwd: cwd.to_string(),
+            root_path: root_path_expanded,
+        },
+    }
+}
+
+/// Check whether the step completion guard should trigger.
+///
+/// Returns `true` if the task has steps but none were completed (all skipped/pending),
+/// meaning the agent likely didn't do real work.
+pub fn should_step_guard_trigger(breakdown: &StepBreakdown) -> bool {
+    breakdown.total > 0 && breakdown.completed == 0
+}
 
 // ============================================================================
 // Global state — LazyLock pattern (no fields on OrchestratorState)
@@ -360,6 +446,15 @@ impl PlanRunner {
                     (run_id.to_string(), CrudAction::Updated)
                 }
                 RunnerEvent::WorktreeRecovery { run_id, .. } => {
+                    (run_id.to_string(), CrudAction::Updated)
+                }
+                RunnerEvent::TaskCompletedWithoutSteps { run_id, .. } => {
+                    (run_id.to_string(), CrudAction::Updated)
+                }
+                RunnerEvent::CwdMismatch { run_id, .. } => {
+                    (run_id.to_string(), CrudAction::Updated)
+                }
+                RunnerEvent::TaskSpawningTimeout { run_id, .. } => {
                     (run_id.to_string(), CrudAction::Updated)
                 }
                 RunnerEvent::LifecycleTransition { run_id, .. } => {
@@ -865,24 +960,74 @@ impl PlanRunner {
             waves.len()
         );
 
-        // Resolve project_id from slug (for enricher)
-        let project_id = if let Some(ref slug) = project_slug {
+        // Resolve project_id and root_path from slug (for enricher + cwd validation)
+        let (project_id, project_root_path) = if let Some(ref slug) = project_slug {
             match self.graph.get_project_by_slug(slug).await {
-                Ok(Some(project)) => Some(project.id),
+                Ok(Some(project)) => {
+                    let rp = if project.root_path.is_empty() {
+                        None
+                    } else {
+                        Some(project.root_path.clone())
+                    };
+                    (Some(project.id), rp)
+                }
                 Ok(None) => {
                     warn!(
                         "Project slug '{}' not found, enricher will run without project_id",
                         slug
                     );
-                    None
+                    (None, None)
                 }
                 Err(e) => {
                     warn!("Failed to resolve project slug '{}': {}, enricher will run without project_id", slug, e);
-                    None
+                    (None, None)
                 }
             }
         } else {
-            None
+            (None, None)
+        };
+
+        // CWD validation: fallback to root_path if cwd is ".", validate mismatch
+        let cwd = {
+            let resolution = validate_cwd(
+                &cwd,
+                project_root_path.as_deref(),
+                &self.config.cwd_validation,
+            );
+            match resolution {
+                CwdResolution::FallbackToRoot { resolved_cwd } => {
+                    info!(
+                        "CWD not specified — using project root_path: {}",
+                        resolved_cwd
+                    );
+                    resolved_cwd
+                }
+                CwdResolution::Match { resolved_cwd }
+                | CwdResolution::NoRootPath { resolved_cwd } => resolved_cwd,
+                CwdResolution::Mismatch {
+                    resolved_cwd,
+                    root_path,
+                } => {
+                    warn!(
+                        "CWD mismatch: cwd='{}' != root_path='{}'. Continuing with provided cwd.",
+                        resolved_cwd, root_path
+                    );
+                    self.emit_event(RunnerEvent::CwdMismatch {
+                        run_id,
+                        cwd: resolved_cwd.clone(),
+                        root_path,
+                    });
+                    resolved_cwd
+                }
+                CwdResolution::StrictMismatch { cwd, root_path } => {
+                    return Err(anyhow!(
+                        "CWD mismatch (strict mode): cwd='{}' != root_path='{}'. \
+                         Aborting to prevent execution in wrong directory.",
+                        cwd,
+                        root_path
+                    ));
+                }
+            }
         };
 
         // Create a dedicated git branch for this run
@@ -2220,7 +2365,57 @@ impl PlanRunner {
             runner_context: Some(runner_context),
         };
 
-        let session = self.chat_manager.create_session(&request).await?;
+        let spawning_timeout = Duration::from_secs(self.config.spawning_timeout_secs);
+        let session = match tokio::time::timeout(
+            spawning_timeout,
+            self.chat_manager.create_session(&request),
+        )
+        .await
+        {
+            Ok(Ok(session)) => session,
+            Ok(Err(e)) => {
+                // create_session returned an error (not a timeout)
+                return Err(e);
+            }
+            Err(_elapsed) => {
+                // Spawning timed out — create_session() hung
+                warn!(
+                    "Task {} — create_session() timed out after {}s",
+                    task_id, self.config.spawning_timeout_secs
+                );
+                self.emit_event(RunnerEvent::TaskSpawningTimeout {
+                    run_id,
+                    task_id,
+                    task_title: task_title.to_string(),
+                    timeout_secs: self.config.spawning_timeout_secs,
+                });
+                // Transition agent status: Spawning → Timeout
+                {
+                    let mut global = RUNNER_STATE.write().await;
+                    if let Some(ref mut s) = *global {
+                        s.update_agent_status(&task_id, TaskRunStatus::Timeout);
+                    }
+                }
+                let result = TaskResult::Failed {
+                    reason: format!(
+                        "Agent spawning timed out after {}s — create_session() did not respond",
+                        self.config.spawning_timeout_secs
+                    ),
+                    attempts: 0,
+                    cost_usd: 0.0,
+                };
+                self.finalize_steps(task_id, &result, cwd).await;
+                return Ok(TaskExecutionResult {
+                    result,
+                    session_id: None,
+                    activated_skill_ids: activated_skill_ids.clone(),
+                    persona_ids: persona_ids_for_feedback.clone(),
+                    agent_execution_id: Uuid::new_v4(),
+                    persona_profile: String::new(),
+                    report: None,
+                });
+            }
+        };
         let session_id = session.session_id.clone();
         let session_uuid = session_id.parse::<Uuid>().ok();
 
@@ -2298,6 +2493,7 @@ impl PlanRunner {
         let guard_config = GuardConfig {
             idle_timeout: Duration::from_secs(self.config.idle_timeout_secs),
             task_timeout: Duration::from_secs(task_profile.timeout_secs),
+            spawning_timeout: Duration::from_secs(self.config.spawning_timeout_secs),
             loop_threshold: 3,
             ..Default::default()
         };
@@ -2514,7 +2710,33 @@ impl PlanRunner {
                 cost_usd,
                 duration_secs: start.elapsed().as_secs_f64(),
             };
-            self.finalize_steps(task_id, &success_result, cwd).await;
+            let breakdown = self.finalize_steps(task_id, &success_result, cwd).await;
+
+            // Step completion guard: if the task has steps but NONE were completed,
+            // the agent likely skipped all work — override to Failed.
+            if should_step_guard_trigger(&breakdown) {
+                warn!(
+                    "Task {} — step completion guard triggered: 0/{} steps completed ({} skipped) — overriding to Failed",
+                    task_id, breakdown.total, breakdown.skipped
+                );
+                self.emit_event(RunnerEvent::TaskCompletedWithoutSteps {
+                    run_id,
+                    task_id,
+                    task_title: task_title.to_string(),
+                    steps_skipped: breakdown.skipped,
+                    steps_total: breakdown.total,
+                });
+                // Override: return Failed instead of Success
+                let failed_result = TaskResult::Failed {
+                    reason: format!(
+                        "Step completion guard: 0/{} steps completed ({} skipped, {} pending)",
+                        breakdown.total, breakdown.skipped, breakdown.pending
+                    ),
+                    attempts: 0,
+                    cost_usd,
+                };
+                return Ok(wrap(failed_result));
+            }
         }
 
         // Post-execution: persist persona used on the task node (Step 5 — T9)
@@ -2886,7 +3108,12 @@ impl PlanRunner {
     /// - `Timeout` with commits: in_progress → completed, pending → skipped
     /// - `Timeout` without commits: all → skipped
     /// - `Error`/`Cancelled`/`BudgetExceeded`: all → skipped
-    async fn finalize_steps(&self, task_id: Uuid, outcome: &TaskResult, cwd: &str) {
+    async fn finalize_steps(
+        &self,
+        task_id: Uuid,
+        outcome: &TaskResult,
+        cwd: &str,
+    ) -> StepBreakdown {
         // Check if agent made any commits (proof of work)
         let has_commits = match outcome {
             TaskResult::Timeout { .. } => {
@@ -2911,8 +3138,28 @@ impl PlanRunner {
                     "finalize_steps: failed to get steps for task {}: {}",
                     task_id, e
                 );
-                return;
+                return StepBreakdown::default();
             }
+        };
+
+        // Count step statuses BEFORE finalization (reflects what the agent actually did)
+        let mut breakdown = StepBreakdown {
+            completed: steps
+                .iter()
+                .filter(|s| s.status == crate::neo4j::models::StepStatus::Completed)
+                .count(),
+            skipped: steps
+                .iter()
+                .filter(|s| s.status == crate::neo4j::models::StepStatus::Skipped)
+                .count(),
+            pending: steps
+                .iter()
+                .filter(|s| {
+                    s.status == crate::neo4j::models::StepStatus::Pending
+                        || s.status == crate::neo4j::models::StepStatus::InProgress
+                })
+                .count(),
+            total: steps.len(),
         };
 
         let remaining: Vec<_> = steps
@@ -2924,7 +3171,7 @@ impl PlanRunner {
             .collect();
 
         if remaining.is_empty() {
-            return;
+            return breakdown;
         }
 
         // Warn if agent didn't update ANY step (all still pending = agent ignored MCP step updates)
@@ -2952,13 +3199,26 @@ impl PlanRunner {
                 _ => crate::neo4j::models::StepStatus::Skipped,
             };
 
+            // Update breakdown to reflect finalized statuses
+            match new_status {
+                crate::neo4j::models::StepStatus::Completed => {
+                    breakdown.completed += 1;
+                    breakdown.pending -= 1;
+                }
+                crate::neo4j::models::StepStatus::Skipped => {
+                    breakdown.skipped += 1;
+                    breakdown.pending -= 1;
+                }
+                _ => {}
+            }
+
             if let Err(e) = self.graph.update_step_status(step.id, new_status).await {
                 warn!("finalize_steps: failed to update step {}: {}", step.id, e);
             }
         }
 
         info!(
-            "Task {} — finalized {} remaining steps (outcome: {})",
+            "Task {} — finalized {} remaining steps (outcome: {}, breakdown: {}/{}/{} completed/skipped/pending)",
             task_id,
             remaining.len(),
             match outcome {
@@ -2972,8 +3232,13 @@ impl PlanRunner {
                 TaskResult::Failed { .. } => "failed",
                 TaskResult::BudgetExceeded { .. } => "budget_exceeded",
                 TaskResult::Blocked { .. } => "blocked",
-            }
+            },
+            breakdown.completed,
+            breakdown.skipped,
+            breakdown.pending,
         );
+
+        breakdown
     }
 
     /// Finalize the run — update state, persist, emit event, cleanup worktrees.
@@ -4456,7 +4721,13 @@ mod tests {
             cost_usd: 0.1,
             duration_secs: 30.0,
         };
-        runner.finalize_steps(task_id, &result, "/tmp").await;
+        let breakdown = runner.finalize_steps(task_id, &result, "/tmp").await;
+
+        // Verify breakdown
+        assert_eq!(breakdown.total, 3);
+        assert_eq!(breakdown.completed, 3); // 1 already + 2 finalized
+        assert_eq!(breakdown.skipped, 0);
+        assert_eq!(breakdown.pending, 0);
 
         // Verify: pending and in_progress → completed, already completed stays
         let steps = graph.get_task_steps(task_id).await.unwrap();
@@ -4568,9 +4839,390 @@ mod tests {
             cost_usd: 0.1,
             duration_secs: 10.0,
         };
-        runner.finalize_steps(task_id, &result, "/tmp").await;
+        let breakdown = runner.finalize_steps(task_id, &result, "/tmp").await;
+
+        assert_eq!(breakdown.total, 1);
+        assert_eq!(breakdown.completed, 1);
+        assert_eq!(breakdown.skipped, 0);
+        assert_eq!(breakdown.pending, 0);
 
         let steps = graph.get_task_steps(task_id).await.unwrap();
         assert_eq!(steps[0].status, StepStatus::Completed);
+    }
+
+    // === Step Completion Guard Tests ===
+
+    #[tokio::test]
+    async fn test_step_guard_some_completed_returns_ok() {
+        use crate::neo4j::models::{StepStatus, TaskStatus};
+        use crate::test_helpers::{test_plan, test_step, test_task};
+
+        let (runner, graph) = test_plan_runner_with_graph();
+
+        let plan = test_plan();
+        let plan_id = plan.id;
+        graph.create_plan(&plan).await.unwrap();
+
+        let mut task = test_task();
+        task.status = TaskStatus::InProgress;
+        let task_id = task.id;
+        graph.create_task(plan_id, &task).await.unwrap();
+
+        // 1 completed + 1 skipped + 1 pending
+        let mut step1 = test_step(1, "Completed step");
+        step1.status = StepStatus::Completed;
+        graph.create_step(task_id, &step1).await.unwrap();
+
+        let mut step2 = test_step(2, "Skipped step");
+        step2.status = StepStatus::Skipped;
+        graph.create_step(task_id, &step2).await.unwrap();
+
+        let step3 = test_step(3, "Pending step");
+        graph.create_step(task_id, &step3).await.unwrap();
+
+        let result = TaskResult::Success {
+            cost_usd: 0.1,
+            duration_secs: 30.0,
+        };
+        let breakdown = runner.finalize_steps(task_id, &result, "/tmp").await;
+
+        // Guard should NOT trigger: 1 completed before + 1 finalized = 2 completed
+        assert_eq!(breakdown.total, 3);
+        assert!(
+            breakdown.completed >= 1,
+            "At least 1 step should be completed"
+        );
+        // This means the guard (total > 0 && completed == 0) would be false → task stays Success
+    }
+
+    #[tokio::test]
+    async fn test_step_guard_all_skipped_triggers() {
+        use crate::neo4j::models::{StepStatus, TaskStatus};
+        use crate::test_helpers::{test_plan, test_step, test_task};
+
+        let (runner, graph) = test_plan_runner_with_graph();
+
+        let plan = test_plan();
+        let plan_id = plan.id;
+        graph.create_plan(&plan).await.unwrap();
+
+        let mut task = test_task();
+        task.status = TaskStatus::InProgress;
+        let task_id = task.id;
+        graph.create_task(plan_id, &task).await.unwrap();
+
+        // All steps already skipped (agent skipped them all)
+        let mut step1 = test_step(1, "Skipped step 1");
+        step1.status = StepStatus::Skipped;
+        graph.create_step(task_id, &step1).await.unwrap();
+
+        let mut step2 = test_step(2, "Skipped step 2");
+        step2.status = StepStatus::Skipped;
+        graph.create_step(task_id, &step2).await.unwrap();
+
+        let result = TaskResult::Success {
+            cost_usd: 0.1,
+            duration_secs: 30.0,
+        };
+        let breakdown = runner.finalize_steps(task_id, &result, "/tmp").await;
+
+        // Guard SHOULD trigger: total=2, completed=0, skipped=2
+        assert_eq!(breakdown.total, 2);
+        assert_eq!(breakdown.completed, 0);
+        assert_eq!(breakdown.skipped, 2);
+        // In execute_task, this would override Success → Failed
+    }
+
+    #[tokio::test]
+    async fn test_step_guard_no_steps_returns_ok() {
+        use crate::neo4j::models::TaskStatus;
+        use crate::test_helpers::{test_plan, test_task};
+
+        let (runner, graph) = test_plan_runner_with_graph();
+
+        let plan = test_plan();
+        let plan_id = plan.id;
+        graph.create_plan(&plan).await.unwrap();
+
+        let mut task = test_task();
+        task.status = TaskStatus::InProgress;
+        let task_id = task.id;
+        graph.create_task(plan_id, &task).await.unwrap();
+
+        // No steps at all
+        let result = TaskResult::Success {
+            cost_usd: 0.1,
+            duration_secs: 30.0,
+        };
+        let breakdown = runner.finalize_steps(task_id, &result, "/tmp").await;
+
+        // Guard should NOT trigger: total=0, so condition (total > 0 && completed == 0) is false
+        assert_eq!(breakdown.total, 0);
+        assert_eq!(breakdown.completed, 0);
+        // No steps = task with no defined steps → Success is valid
+    }
+
+    // === Pure function tests: validate_cwd ===
+
+    #[test]
+    fn test_validate_cwd_no_root_path() {
+        let result = validate_cwd("/some/path", None, &CwdValidation::Warn);
+        assert_eq!(
+            result,
+            CwdResolution::NoRootPath {
+                resolved_cwd: "/some/path".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_validate_cwd_empty_root_path() {
+        let result = validate_cwd("/some/path", Some(""), &CwdValidation::Warn);
+        assert_eq!(
+            result,
+            CwdResolution::NoRootPath {
+                resolved_cwd: "/some/path".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_validate_cwd_dot_fallback_to_root() {
+        let result = validate_cwd(".", Some("/tmp"), &CwdValidation::Warn);
+        assert!(matches!(result, CwdResolution::FallbackToRoot { .. }));
+        if let CwdResolution::FallbackToRoot { resolved_cwd } = result {
+            assert_eq!(resolved_cwd, "/tmp");
+        }
+    }
+
+    #[test]
+    fn test_validate_cwd_empty_fallback_to_root() {
+        let result = validate_cwd("", Some("/tmp"), &CwdValidation::Warn);
+        assert!(matches!(result, CwdResolution::FallbackToRoot { .. }));
+    }
+
+    #[test]
+    fn test_validate_cwd_matching_paths() {
+        // Use /tmp which exists and canonicalizes to itself
+        let result = validate_cwd("/tmp", Some("/tmp"), &CwdValidation::Warn);
+        assert!(
+            matches!(result, CwdResolution::Match { .. }),
+            "Expected Match, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_cwd_mismatch_warn_mode() {
+        let result = validate_cwd("/tmp", Some("/var"), &CwdValidation::Warn);
+        assert!(
+            matches!(result, CwdResolution::Mismatch { .. }),
+            "Expected Mismatch, got {:?}",
+            result
+        );
+        if let CwdResolution::Mismatch {
+            resolved_cwd,
+            root_path,
+        } = result
+        {
+            assert_eq!(resolved_cwd, "/tmp");
+            // root_path is the expanded/original value
+            assert!(!root_path.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_validate_cwd_mismatch_strict_mode() {
+        let result = validate_cwd("/tmp", Some("/var"), &CwdValidation::Strict);
+        assert!(
+            matches!(result, CwdResolution::StrictMismatch { .. }),
+            "Expected StrictMismatch, got {:?}",
+            result
+        );
+        if let CwdResolution::StrictMismatch { cwd, root_path } = result {
+            assert_eq!(cwd, "/tmp");
+            assert!(!root_path.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_validate_cwd_tilde_expansion() {
+        // The ~ should be expanded using $HOME
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() {
+            let result = validate_cwd(".", Some("~/nonexistent"), &CwdValidation::Warn);
+            if let CwdResolution::FallbackToRoot { resolved_cwd } = result {
+                assert!(
+                    resolved_cwd.starts_with(&home),
+                    "Expected path to start with HOME={}, got {}",
+                    home,
+                    resolved_cwd
+                );
+                assert!(!resolved_cwd.contains('~'));
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_cwd_nonexistent_paths_still_compare() {
+        // Even if paths don't exist, canonicalize falls back to raw comparison
+        let result = validate_cwd(
+            "/nonexistent/path/a",
+            Some("/nonexistent/path/b"),
+            &CwdValidation::Warn,
+        );
+        assert!(
+            matches!(result, CwdResolution::Mismatch { .. }),
+            "Expected Mismatch for non-existent different paths, got {:?}",
+            result
+        );
+    }
+
+    // === Pure function tests: should_step_guard_trigger ===
+
+    #[test]
+    fn test_step_guard_trigger_all_skipped() {
+        let breakdown = StepBreakdown {
+            completed: 0,
+            skipped: 3,
+            pending: 0,
+            total: 3,
+        };
+        assert!(should_step_guard_trigger(&breakdown));
+    }
+
+    #[test]
+    fn test_step_guard_trigger_some_completed() {
+        let breakdown = StepBreakdown {
+            completed: 1,
+            skipped: 2,
+            pending: 0,
+            total: 3,
+        };
+        assert!(!should_step_guard_trigger(&breakdown));
+    }
+
+    #[test]
+    fn test_step_guard_trigger_no_steps() {
+        let breakdown = StepBreakdown {
+            completed: 0,
+            skipped: 0,
+            pending: 0,
+            total: 0,
+        };
+        assert!(!should_step_guard_trigger(&breakdown));
+    }
+
+    #[test]
+    fn test_step_guard_trigger_all_pending() {
+        let breakdown = StepBreakdown {
+            completed: 0,
+            skipped: 0,
+            pending: 5,
+            total: 5,
+        };
+        assert!(should_step_guard_trigger(&breakdown));
+    }
+
+    #[test]
+    fn test_step_guard_trigger_default_breakdown() {
+        let breakdown = StepBreakdown::default();
+        assert!(!should_step_guard_trigger(&breakdown));
+    }
+
+    // === emit_event tests for new variants ===
+
+    #[test]
+    fn test_emit_event_new_variants_broadcast() {
+        let (event_tx, mut rx) = broadcast::channel(16);
+        // We just test that new event variants can be sent through the channel
+        let run_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+
+        let events = vec![
+            RunnerEvent::TaskSpawningTimeout {
+                run_id,
+                task_id,
+                task_title: "test task".to_string(),
+                timeout_secs: 120,
+            },
+            RunnerEvent::CwdMismatch {
+                run_id,
+                cwd: "/wrong/path".to_string(),
+                root_path: "/correct/path".to_string(),
+            },
+            RunnerEvent::TaskCompletedWithoutSteps {
+                run_id,
+                task_id,
+                task_title: "test task".to_string(),
+                steps_skipped: 3,
+                steps_total: 3,
+            },
+        ];
+
+        for event in &events {
+            event_tx.send(event.clone()).unwrap();
+        }
+
+        // Verify all 3 events received
+        for _ in 0..3 {
+            let received = rx.try_recv();
+            assert!(received.is_ok(), "Expected event, got {:?}", received);
+        }
+    }
+
+    #[test]
+    fn test_event_serialization_new_variants() {
+        // RunnerEvent uses #[serde(tag = "event", rename_all = "snake_case")]
+        let run_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+
+        // TaskSpawningTimeout → "event": "task_spawning_timeout"
+        let event = RunnerEvent::TaskSpawningTimeout {
+            run_id,
+            task_id,
+            task_title: "my task".to_string(),
+            timeout_secs: 120,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            json.contains("task_spawning_timeout"),
+            "Expected 'task_spawning_timeout' in: {}",
+            json
+        );
+        assert!(json.contains("120"));
+        // Roundtrip
+        let _: RunnerEvent = serde_json::from_str(&json).unwrap();
+
+        // CwdMismatch → "event": "cwd_mismatch"
+        let event = RunnerEvent::CwdMismatch {
+            run_id,
+            cwd: "/a".to_string(),
+            root_path: "/b".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            json.contains("cwd_mismatch"),
+            "Expected 'cwd_mismatch' in: {}",
+            json
+        );
+        let _: RunnerEvent = serde_json::from_str(&json).unwrap();
+
+        // TaskCompletedWithoutSteps → "event": "task_completed_without_steps"
+        let event = RunnerEvent::TaskCompletedWithoutSteps {
+            run_id,
+            task_id,
+            task_title: "task".to_string(),
+            steps_skipped: 5,
+            steps_total: 5,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            json.contains("task_completed_without_steps"),
+            "Expected 'task_completed_without_steps' in: {}",
+            json
+        );
+        assert!(json.contains("steps_skipped"));
+        let _: RunnerEvent = serde_json::from_str(&json).unwrap();
     }
 }

@@ -35,6 +35,24 @@ pub struct RunnerConfig {
     pub test_runner: bool,
     /// Maximum total cost (USD) for the entire plan run. Abort if exceeded. Default: 10.0.
     pub max_cost_usd: f64,
+    /// Spawning timeout (seconds) — max time to wait for create_session() before aborting.
+    /// Prevents indefinite hangs when ChatManager/Neo4j is unresponsive. Default: 120 (2 min).
+    pub spawning_timeout_secs: u64,
+    /// CWD validation mode — controls behavior when cwd doesn't match project.root_path.
+    /// - "warn" (default): log a warning and emit CwdMismatch event, but continue
+    /// - "strict": return an error if cwd doesn't match root_path
+    pub cwd_validation: CwdValidation,
+}
+
+/// CWD validation mode for the runner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CwdValidation {
+    /// Log a warning on mismatch but continue execution
+    #[default]
+    Warn,
+    /// Return an error on mismatch — blocks execution
+    Strict,
 }
 
 impl Default for RunnerConfig {
@@ -47,6 +65,8 @@ impl Default for RunnerConfig {
             build_check: true,
             test_runner: false,
             max_cost_usd: 10.0,
+            spawning_timeout_secs: 120,
+            cwd_validation: CwdValidation::default(),
         }
     }
 }
@@ -118,6 +138,7 @@ impl TaskStateMachine {
                 | (Verifying, Completed)
                 // Failure paths
                 | (Spawning, Failed)
+                | (Spawning, Timeout)
                 | (Running, Failed)
                 | (Running, Timeout)
                 | (Verifying, Failed)
@@ -186,6 +207,19 @@ pub enum TaskResult {
 // ============================================================================
 // TaskExecutionReport — structured post-execution feedback
 // ============================================================================
+
+/// Breakdown of step statuses for a task — used by the step completion guard.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StepBreakdown {
+    /// Number of steps completed successfully
+    pub completed: usize,
+    /// Number of steps skipped
+    pub skipped: usize,
+    /// Number of steps still pending
+    pub pending: usize,
+    /// Total number of steps defined for this task
+    pub total: usize,
+}
 
 /// Structured report generated after a sub-agent completes a task.
 ///
@@ -361,6 +395,27 @@ pub enum RunnerEvent {
         tasks_failed: usize,
         /// PR URL if auto-PR was created
         pr_url: Option<String>,
+    },
+    /// Task marked completed but no steps were actually completed (all skipped)
+    TaskCompletedWithoutSteps {
+        run_id: Uuid,
+        task_id: Uuid,
+        task_title: String,
+        steps_skipped: usize,
+        steps_total: usize,
+    },
+    /// CWD doesn't match the project's root_path
+    CwdMismatch {
+        run_id: Uuid,
+        cwd: String,
+        root_path: String,
+    },
+    /// Agent spawning timed out — create_session() took too long
+    TaskSpawningTimeout {
+        run_id: Uuid,
+        task_id: Uuid,
+        task_title: String,
+        timeout_secs: u64,
     },
     /// A runner error occurred (non-fatal)
     RunnerError { run_id: Uuid, message: String },
@@ -626,6 +681,7 @@ mod tests {
         assert!(config.build_check);
         assert!(!config.test_runner);
         assert!((config.max_cost_usd - 10.0).abs() < f64::EPSILON);
+        assert_eq!(config.spawning_timeout_secs, 120);
     }
 
     #[test]
@@ -654,6 +710,7 @@ mod tests {
 
         // Failure paths
         assert!(TaskStateMachine::transition(Spawning, Failed).is_ok());
+        assert!(TaskStateMachine::transition(Spawning, Timeout).is_ok());
         assert!(TaskStateMachine::transition(Running, Failed).is_ok());
         assert!(TaskStateMachine::transition(Running, Timeout).is_ok());
         assert!(TaskStateMachine::transition(Verifying, Failed).is_ok());
@@ -947,5 +1004,85 @@ mod tests {
         assert!(json.contains("\"type\":\"conversation\""));
         let back: SpawnedBy = serde_json::from_str(&json).unwrap();
         assert_eq!(back, spawned);
+    }
+
+    // ========================================================================
+    // Spawning timeout tests
+    // ========================================================================
+
+    #[test]
+    fn test_spawning_timeout_event_serialization() {
+        let event = RunnerEvent::TaskSpawningTimeout {
+            run_id: Uuid::nil(),
+            task_id: Uuid::nil(),
+            task_title: "Test task".into(),
+            timeout_secs: 120,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"task_spawning_timeout\""));
+        assert!(json.contains("\"timeout_secs\":120"));
+    }
+
+    #[test]
+    fn test_spawning_timeout_secs_in_config() {
+        // Default
+        let config = RunnerConfig::default();
+        assert_eq!(config.spawning_timeout_secs, 120);
+
+        // Custom via YAML
+        let yaml = r#"
+            spawning_timeout_secs: 30
+        "#;
+        let config: RunnerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.spawning_timeout_secs, 30);
+        // Other defaults still applied
+        assert_eq!(config.task_timeout_secs, 10800);
+    }
+
+    #[test]
+    fn test_guard_config_spawning_timeout_default() {
+        let config = crate::runner::guard::GuardConfig::default();
+        assert_eq!(config.spawning_timeout, std::time::Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_spawning_to_timeout_transition() {
+        use TaskRunStatus::*;
+        assert!(
+            TaskStateMachine::transition(Spawning, Timeout).is_ok(),
+            "Spawning → Timeout should be a valid transition for spawning timeout"
+        );
+    }
+
+    // ========================================================================
+    // CWD validation tests
+    // ========================================================================
+
+    #[test]
+    fn test_cwd_validation_default_is_warn() {
+        let config = RunnerConfig::default();
+        assert_eq!(config.cwd_validation, CwdValidation::Warn);
+    }
+
+    #[test]
+    fn test_cwd_validation_strict_deserialize() {
+        let yaml = r#"
+            cwd_validation: strict
+        "#;
+        let config: RunnerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.cwd_validation, CwdValidation::Strict);
+    }
+
+    #[test]
+    fn test_cwd_mismatch_event_serialization() {
+        let event = RunnerEvent::CwdMismatch {
+            run_id: Uuid::nil(),
+            cwd: "/wrong/path".into(),
+            root_path: "/correct/path".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"cwd_mismatch\""));
+        assert!(json.contains("/wrong/path"));
+        assert!(json.contains("/correct/path"));
     }
 }
