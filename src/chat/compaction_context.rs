@@ -18,6 +18,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
+use crate::chat::types::SessionWorkLogSnapshot;
 use crate::neo4j::models::*;
 use crate::neo4j::traits::GraphStore;
 use crate::notes::{NoteFilters, NoteImportance, NoteStatus, NoteType};
@@ -36,7 +37,7 @@ const MAX_NOTES: usize = 5;
 const MAX_NOTE_SNIPPET: usize = 200;
 
 /// Maximum length for custom instructions output.
-const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 500;
+const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 2000;
 
 /// Maximum number of pending/in-progress tasks to include in session context.
 const MAX_PENDING_TASKS: usize = 8;
@@ -77,6 +78,9 @@ pub struct CompactionContext {
 
     // Pending/in-progress tasks across active plans
     pub pending_tasks: Vec<TaskSummary>,
+
+    // Work already done this session (from SessionWorkLog snapshot)
+    pub work_log: Option<SessionWorkLogSnapshot>,
 }
 
 /// Summary of an active plan for post-compaction context.
@@ -550,6 +554,36 @@ impl CompactionContext {
             out.push('\n');
         }
 
+        // § Work Already Done (from SessionWorkLog — prevents re-doing completed work)
+        if let Some(wl) = &self.work_log {
+            let has_content = !wl.files_modified.is_empty()
+                || !wl.steps_completed.is_empty()
+                || wl.tool_use_count > 0;
+            if has_content && out.len() < MAX_MARKDOWN_CHARS - 600 {
+                out.push_str("## Work Already Done\n");
+                if !wl.files_modified.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "**Files modified ({}):** {}",
+                        wl.files_modified.len(),
+                        wl.files_modified
+                            .iter()
+                            .take(10)
+                            .map(|f| format!("`{f}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                if !wl.steps_completed.is_empty() {
+                    let _ = writeln!(out, "**Steps completed:** {}", wl.steps_completed.len());
+                }
+                if wl.tool_use_count > 0 {
+                    let _ = writeln!(out, "**Tool uses this session:** {}", wl.tool_use_count);
+                }
+                out.push('\n');
+            }
+        }
+
         // § Active Constraints
         if !self.constraints.is_empty() && out.len() < MAX_MARKDOWN_CHARS - 600 {
             out.push_str("## Active Constraints\n");
@@ -601,10 +635,11 @@ impl CompactionContext {
         out
     }
 
-    /// Produce a short custom instructions string (~500 chars) to guide compaction.
+    /// Produce enriched custom instructions (~2000 chars) to guide compaction.
     ///
-    /// Tells the model what context to preserve during summarization.
-    pub fn to_custom_instructions(&self) -> String {
+    /// Tells the model what context to preserve during summarization:
+    /// step progress, affected files, decisions, and work log (if available).
+    pub fn to_custom_instructions(&self, work_log: Option<&SessionWorkLogSnapshot>) -> String {
         let mut out = String::with_capacity(MAX_CUSTOM_INSTRUCTIONS_CHARS);
 
         // What the agent is working on
@@ -614,15 +649,41 @@ impl CompactionContext {
             let _ = write!(out, "The agent is working on project: \"{name}\". ");
         }
 
-        // Key file paths to preserve
-        if !self.affected_files.is_empty() {
-            out.push_str("Preserve context about files: ");
-            let files: Vec<&str> = self
-                .affected_files
-                .iter()
-                .take(5)
-                .map(|f| f.as_str())
-                .collect();
+        // Detailed step progress (completed/in_progress/pending)
+        if !self.steps.is_empty() {
+            out.push_str("Steps: ");
+            for step in &self.steps {
+                let icon = match step.status.as_str() {
+                    "completed" => "✅",
+                    "in_progress" | "inprogress" => "🔄",
+                    "skipped" => "⏭️",
+                    _ => "⬜",
+                };
+                let _ = write!(
+                    out,
+                    "{icon} {}. {} [{}]; ",
+                    step.order,
+                    truncate(&step.description, 80),
+                    step.status
+                );
+                if out.len() > MAX_CUSTOM_INSTRUCTIONS_CHARS - 600 {
+                    break;
+                }
+            }
+        }
+
+        // Key file paths to preserve (from task + work_log)
+        let mut all_files: Vec<&str> = self.affected_files.iter().map(|f| f.as_str()).collect();
+        if let Some(wl) = work_log {
+            for f in &wl.files_modified {
+                if !all_files.contains(&f.as_str()) {
+                    all_files.push(f.as_str());
+                }
+            }
+        }
+        if !all_files.is_empty() {
+            out.push_str("Affected files: ");
+            let files: Vec<&str> = all_files.into_iter().take(8).collect();
             out.push_str(&files.join(", "));
             out.push_str(". ");
         }
@@ -633,22 +694,33 @@ impl CompactionContext {
             let descs: Vec<&str> = self
                 .decisions
                 .iter()
-                .take(2)
+                .take(3)
                 .map(|d| d.description.as_str())
                 .collect();
             out.push_str(&descs.join("; "));
             out.push_str(". ");
         }
 
-        // Step progress summary
-        if !self.steps.is_empty() {
-            let done = self
-                .steps
-                .iter()
-                .filter(|s| s.status == "completed")
-                .count();
-            let total = self.steps.len();
-            let _ = write!(out, "Step progress: {done}/{total} completed. ");
+        // Work log decisions (from session tracking)
+        if let Some(wl) = work_log {
+            if !wl.decisions_summary.is_empty() {
+                out.push_str("Session decisions: ");
+                let descs: Vec<&str> = wl
+                    .decisions_summary
+                    .iter()
+                    .take(3)
+                    .map(|d| d.as_str())
+                    .collect();
+                out.push_str(&descs.join("; "));
+                out.push_str(". ");
+            }
+            if !wl.files_modified.is_empty() {
+                let _ = write!(
+                    out,
+                    "Files already modified this session: {}. ",
+                    wl.files_modified.join(", ")
+                );
+            }
         }
 
         // Pending objectives summary (interactive session)
@@ -671,6 +743,11 @@ impl CompactionContext {
                 .map(|p| p.title.as_str())
                 .collect();
             let _ = write!(out, "Active plans: {}. ", plan_names.join("; "));
+        }
+
+        // CRITICAL preservation instruction
+        if self.task_title.is_some() || !self.steps.is_empty() || !self.pending_tasks.is_empty() {
+            out.push_str("CRITICAL: In your summary, preserve: (1) which steps are completed vs pending, (2) files already modified, (3) architectural decisions taken. ");
         }
 
         // Truncate to budget
@@ -828,6 +905,7 @@ mod tests {
             project_description: None,
             active_plans: vec![],
             pending_tasks: vec![],
+            work_log: None,
         }
     }
 
@@ -938,7 +1016,7 @@ mod tests {
     #[test]
     fn test_to_custom_instructions_contains_files() {
         let ctx = sample_context();
-        let ci = ctx.to_custom_instructions();
+        let ci = ctx.to_custom_instructions(None);
 
         assert!(
             ci.contains("src/chat/compaction_context.rs"),
@@ -953,7 +1031,7 @@ mod tests {
     #[test]
     fn test_to_custom_instructions_contains_task() {
         let ctx = sample_context();
-        let ci = ctx.to_custom_instructions();
+        let ci = ctx.to_custom_instructions(None);
 
         assert!(
             ci.contains("Implement compaction context builder"),
@@ -964,7 +1042,7 @@ mod tests {
     #[test]
     fn test_to_custom_instructions_under_budget() {
         let ctx = sample_context();
-        let ci = ctx.to_custom_instructions();
+        let ci = ctx.to_custom_instructions(None);
 
         assert!(
             ci.len() <= MAX_CUSTOM_INSTRUCTIONS_CHARS,
@@ -977,7 +1055,7 @@ mod tests {
     #[test]
     fn test_to_custom_instructions_contains_decisions() {
         let ctx = sample_context();
-        let ci = ctx.to_custom_instructions();
+        let ci = ctx.to_custom_instructions(None);
 
         assert!(
             ci.contains("GraphStore"),
@@ -988,11 +1066,22 @@ mod tests {
     #[test]
     fn test_to_custom_instructions_step_progress() {
         let ctx = sample_context();
-        let ci = ctx.to_custom_instructions();
+        let ci = ctx.to_custom_instructions(None);
 
+        // Enriched: shows individual step statuses
         assert!(
-            ci.contains("1/5 completed"),
-            "Missing step progress: {}",
+            ci.contains("[completed]"),
+            "Missing completed step status: {}",
+            ci
+        );
+        assert!(
+            ci.contains("[in_progress]"),
+            "Missing in_progress step status: {}",
+            ci
+        );
+        assert!(
+            ci.contains("[pending]"),
+            "Missing pending step status: {}",
             ci
         );
     }
@@ -1010,7 +1099,7 @@ mod tests {
     #[test]
     fn test_empty_context_produces_empty_instructions() {
         let ctx = CompactionContext::default();
-        let ci = ctx.to_custom_instructions();
+        let ci = ctx.to_custom_instructions(None);
 
         assert!(ci.is_empty() || ci.len() < 10);
     }
@@ -1166,7 +1255,7 @@ mod tests {
     #[test]
     fn test_custom_instructions_includes_pending_tasks() {
         let ctx = sample_session_context();
-        let ci = ctx.to_custom_instructions();
+        let ci = ctx.to_custom_instructions(None);
 
         assert!(
             ci.contains("Pending objectives:"),
@@ -1218,5 +1307,342 @@ mod tests {
             MAX_MARKDOWN_CHARS
         );
         assert!(md.ends_with("</system-reminder>"));
+    }
+
+    #[test]
+    fn test_custom_instructions_enriched_with_steps_and_work_log() {
+        let ctx = sample_context();
+        let work_log = SessionWorkLogSnapshot {
+            files_modified: vec![
+                "src/chat/compaction_context.rs".to_string(),
+                "src/chat/manager.rs".to_string(),
+            ],
+            files_read: vec!["src/chat/types.rs".to_string()],
+            steps_completed: vec![Uuid::new_v4()],
+            step_in_progress: Some(Uuid::new_v4()),
+            decisions_summary: vec!["Use enriched custom_instructions for compaction".to_string()],
+            last_tool_name: Some("Edit".to_string()),
+            tool_use_count: 12,
+        };
+
+        let ci = ctx.to_custom_instructions(Some(&work_log));
+
+        // Must be >500 chars (enriched beyond old limit)
+        assert!(
+            ci.len() > 500,
+            "Enriched custom instructions should be >500 chars, got {}: {}",
+            ci.len(),
+            ci
+        );
+
+        // Must contain "preserve" (CRITICAL instruction)
+        assert!(
+            ci.contains("preserve"),
+            "Missing CRITICAL preserve instruction: {}",
+            ci
+        );
+
+        // Must contain file names from work_log
+        assert!(
+            ci.contains("src/chat/manager.rs"),
+            "Missing work_log modified file: {}",
+            ci
+        );
+
+        // Must contain session decisions
+        assert!(
+            ci.contains("enriched custom_instructions"),
+            "Missing session decision: {}",
+            ci
+        );
+
+        // Must contain step statuses
+        assert!(
+            ci.contains("[completed]"),
+            "Missing completed step status: {}",
+            ci
+        );
+        assert!(
+            ci.contains("[in_progress]"),
+            "Missing in_progress step status: {}",
+            ci
+        );
+    }
+
+    #[test]
+    fn test_custom_instructions_enriched_under_budget() {
+        let ctx = sample_context();
+        let work_log = SessionWorkLogSnapshot {
+            files_modified: (0..20)
+                .map(|i| format!("src/module_{i}/handler.rs"))
+                .collect(),
+            files_read: vec![],
+            steps_completed: vec![],
+            step_in_progress: None,
+            decisions_summary: (0..10)
+                .map(|i| format!("Decision {i}: Use pattern X for feature Y"))
+                .collect(),
+            last_tool_name: None,
+            tool_use_count: 100,
+        };
+
+        let ci = ctx.to_custom_instructions(Some(&work_log));
+
+        assert!(
+            ci.len() <= MAX_CUSTOM_INSTRUCTIONS_CHARS,
+            "Enriched custom instructions {} chars exceeds budget {}",
+            ci.len(),
+            MAX_CUSTOM_INSTRUCTIONS_CHARS
+        );
+    }
+
+    #[test]
+    fn test_post_compaction_work_log_in_markdown() {
+        let mut ctx = sample_context();
+        let step1 = Uuid::new_v4();
+        ctx.work_log = Some(SessionWorkLogSnapshot {
+            files_modified: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
+            files_read: vec!["src/utils.rs".to_string()],
+            steps_completed: vec![step1],
+            step_in_progress: None,
+            decisions_summary: vec![],
+            last_tool_name: None,
+            tool_use_count: 15,
+        });
+
+        let md = ctx.to_markdown();
+        assert!(
+            md.contains("## Work Already Done"),
+            "Missing Work Already Done section in: {}",
+            md
+        );
+        assert!(
+            md.contains("`src/main.rs`"),
+            "Missing files_modified in: {}",
+            md
+        );
+        assert!(
+            md.contains("`src/lib.rs`"),
+            "Missing second file in: {}",
+            md
+        );
+        assert!(
+            md.contains("Files modified (2)"),
+            "Missing file count in: {}",
+            md
+        );
+        assert!(
+            md.contains("**Steps completed:** 1"),
+            "Missing steps completed count in: {}",
+            md
+        );
+        assert!(
+            md.contains("**Tool uses this session:** 15"),
+            "Missing tool_use_count in: {}",
+            md
+        );
+    }
+
+    #[test]
+    fn test_post_compaction_work_log_none_no_section() {
+        let ctx = sample_context();
+        // Default has work_log = None
+        let md = ctx.to_markdown();
+        assert!(
+            !md.contains("## Work Already Done"),
+            "Should not have Work Already Done when work_log is None"
+        );
+    }
+
+    #[test]
+    fn test_custom_instructions_without_work_log_still_has_preserve() {
+        let ctx = sample_context();
+        let ci = ctx.to_custom_instructions(None);
+
+        // Even without work_log, should have CRITICAL instruction when there are steps
+        assert!(
+            ci.contains("CRITICAL"),
+            "Missing CRITICAL instruction even without work_log: {}",
+            ci
+        );
+    }
+
+    #[test]
+    fn test_custom_instructions_work_log_files_already_modified() {
+        let ctx = sample_context();
+        let wl = SessionWorkLogSnapshot {
+            files_modified: vec!["src/new_file.rs".to_string(), "src/other.rs".to_string()],
+            files_read: vec![],
+            steps_completed: vec![],
+            step_in_progress: None,
+            decisions_summary: vec![],
+            last_tool_name: None,
+            tool_use_count: 0,
+        };
+        let ci = ctx.to_custom_instructions(Some(&wl));
+
+        assert!(
+            ci.contains("Files already modified this session"),
+            "Missing files already modified line: {}",
+            ci
+        );
+        assert!(
+            ci.contains("src/new_file.rs"),
+            "Missing work_log file: {}",
+            ci
+        );
+    }
+
+    #[test]
+    fn test_custom_instructions_work_log_session_decisions() {
+        let ctx = sample_context();
+        let wl = SessionWorkLogSnapshot {
+            files_modified: vec![],
+            files_read: vec![],
+            steps_completed: vec![],
+            step_in_progress: None,
+            decisions_summary: vec![
+                "bash: cargo test".to_string(),
+                "bash: cargo check".to_string(),
+            ],
+            last_tool_name: None,
+            tool_use_count: 0,
+        };
+        let ci = ctx.to_custom_instructions(Some(&wl));
+
+        assert!(
+            ci.contains("Session decisions"),
+            "Missing session decisions: {}",
+            ci
+        );
+        assert!(
+            ci.contains("cargo test"),
+            "Missing decision content: {}",
+            ci
+        );
+    }
+
+    #[test]
+    fn test_custom_instructions_active_plans_included() {
+        let ctx = CompactionContext {
+            project_name: Some("test-project".to_string()),
+            active_plans: vec![PlanSummary {
+                title: "Plan A".to_string(),
+                total_tasks: 5,
+                completed_tasks: 2,
+                in_progress_tasks: 1,
+                pending_tasks: 2,
+            }],
+            pending_tasks: vec![TaskSummary {
+                title: "Do something".to_string(),
+                status: "inprogress".to_string(),
+                affected_files: vec![],
+                steps: vec![],
+            }],
+            ..Default::default()
+        };
+        let ci = ctx.to_custom_instructions(None);
+
+        assert!(
+            ci.contains("Active plans: Plan A"),
+            "Missing active plan: {}",
+            ci
+        );
+        assert!(
+            ci.contains("Pending objectives: Do something"),
+            "Missing pending objective: {}",
+            ci
+        );
+    }
+
+    #[test]
+    fn test_custom_instructions_truncation_at_budget() {
+        // Build a context with many steps to exceed 2000 chars
+        let ctx = CompactionContext {
+            task_title: Some("Very long task name".to_string()),
+            steps: (0..50)
+                .map(|i| StepSummary {
+                    order: i,
+                    description: format!(
+                        "Step {} with a fairly long description to fill up chars",
+                        i
+                    ),
+                    status: "pending".to_string(),
+                })
+                .collect(),
+            affected_files: (0..20)
+                .map(|i| format!("src/module_{}/handler_{}.rs", i, i))
+                .collect(),
+            ..Default::default()
+        };
+        let ci = ctx.to_custom_instructions(None);
+
+        assert!(
+            ci.len() <= MAX_CUSTOM_INSTRUCTIONS_CHARS,
+            "Custom instructions {} chars exceeds budget {}",
+            ci.len(),
+            MAX_CUSTOM_INSTRUCTIONS_CHARS
+        );
+        // When content exceeds budget, it gets truncated
+        // The budget check is the important assertion above
+    }
+
+    #[test]
+    fn test_to_markdown_work_log_under_budget() {
+        let mut ctx = sample_context();
+        ctx.work_log = Some(SessionWorkLogSnapshot {
+            files_modified: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+            files_read: vec!["src/c.rs".to_string()],
+            steps_completed: vec![uuid::Uuid::new_v4()],
+            step_in_progress: None,
+            decisions_summary: vec!["bash: cargo check".to_string()],
+            last_tool_name: Some("Edit".to_string()),
+            tool_use_count: 10,
+        });
+        let md = ctx.to_markdown();
+
+        assert!(
+            md.len() <= MAX_MARKDOWN_CHARS,
+            "Markdown {} exceeds budget {}",
+            md.len(),
+            MAX_MARKDOWN_CHARS
+        );
+        assert!(
+            md.contains("## Work Already Done"),
+            "Missing Work Already Done section: {}",
+            md
+        );
+        assert!(md.contains("`src/a.rs`"), "Missing work_log file: {}", md);
+    }
+
+    #[test]
+    fn test_custom_instructions_work_log_merges_affected_files() {
+        let ctx = CompactionContext {
+            task_title: Some("Test task".to_string()),
+            affected_files: vec!["src/existing.rs".to_string()],
+            ..Default::default()
+        };
+        let wl = SessionWorkLogSnapshot {
+            files_modified: vec!["src/new.rs".to_string()],
+            files_read: vec![],
+            steps_completed: vec![],
+            step_in_progress: None,
+            decisions_summary: vec![],
+            last_tool_name: None,
+            tool_use_count: 0,
+        };
+        let ci = ctx.to_custom_instructions(Some(&wl));
+
+        // Both files should appear in "Affected files"
+        assert!(
+            ci.contains("src/existing.rs"),
+            "Missing task affected file: {}",
+            ci
+        );
+        assert!(
+            ci.contains("src/new.rs") || ci.contains("Files already modified"),
+            "Missing work_log file in output: {}",
+            ci
+        );
     }
 }

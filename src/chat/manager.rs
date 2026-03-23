@@ -14,7 +14,7 @@ use super::post_tool_hook;
 use super::skill_hook;
 use super::types::{
     classify_api_error, truncate_snippet, ChatEvent, ChatEventPage, ChatRequest,
-    CreateSessionResponse, MessageSearchHit, MessageSearchResult, PendingMessage,
+    CreateSessionResponse, MessageSearchHit, MessageSearchResult, PendingMessage, SessionWorkLog,
 };
 use crate::meilisearch::SearchStore;
 use crate::neo4j::models::ChatEventRecord;
@@ -138,6 +138,10 @@ pub struct ActiveSession {
     /// reminder was injected. Must reach `OBJECTIVE_REMINDER_COOLDOWN` before another
     /// reminder is sent, to avoid spamming the agent.
     pub objective_reminder_turns_since: Arc<AtomicU32>,
+    /// Accumulates work performed during the session: files modified, files read,
+    /// steps completed, last tool used. Source of truth for resumption after
+    /// compaction or max_turns.
+    pub work_log: Arc<Mutex<SessionWorkLog>>,
 }
 
 /// Runtime-mutable environment config for Claude CLI subprocess.
@@ -235,6 +239,8 @@ pub(crate) struct CompactionNotifier {
     graph: Option<Arc<dyn GraphStore>>,
     /// Context source: task (runner) or session (interactive)
     context_source: CompactionContextSource,
+    /// Session work log for enriching custom_instructions during compaction
+    work_log: Option<Arc<tokio::sync::Mutex<SessionWorkLog>>>,
 }
 
 impl CompactionNotifier {
@@ -249,6 +255,7 @@ impl CompactionNotifier {
             session_id,
             graph: None,
             context_source: CompactionContextSource::None,
+            work_log: None,
         }
     }
 
@@ -260,6 +267,12 @@ impl CompactionNotifier {
     ) -> Self {
         self.graph = Some(graph);
         self.context_source = source;
+        self
+    }
+
+    /// Attach a session work log for enriching custom_instructions with modified files.
+    pub fn with_work_log(mut self, work_log: Arc<tokio::sync::Mutex<SessionWorkLog>>) -> Self {
+        self.work_log = Some(work_log);
         self
     }
 
@@ -287,9 +300,16 @@ impl CompactionNotifier {
             CompactionContextSource::None => return None,
         };
 
+        // Take work_log snapshot if available
+        let work_log_snapshot = if let Some(ref wl) = self.work_log {
+            Some(wl.lock().await.snapshot())
+        } else {
+            None
+        };
+
         match ctx {
             Ok(context) => {
-                let instructions = context.to_custom_instructions();
+                let instructions = context.to_custom_instructions(work_log_snapshot.as_ref());
                 if instructions.is_empty() {
                     None
                 } else {
@@ -2334,6 +2354,9 @@ impl ChatManager {
         // Create broadcast channel early so CompactionNotifier can use the sender
         let (events_tx, _) = broadcast::channel(BROADCAST_BUFFER);
 
+        // Create work_log early so CompactionNotifier can reference it
+        let work_log = Arc::new(Mutex::new(SessionWorkLog::default()));
+
         // Build session hooks: PreCompact (compaction notifier) + PreToolUse (skill activation)
         let session_hooks = {
             let mut hooks = std::collections::HashMap::new();
@@ -2354,7 +2377,8 @@ impl ChatManager {
                 self.nats.clone(),
                 session_id.to_string(),
             )
-            .with_context(self.graph.clone(), context_source);
+            .with_context(self.graph.clone(), context_source)
+            .with_work_log(work_log.clone());
             hooks.insert(
                 "PreCompact".to_string(),
                 vec![nexus_claude::HookMatcher {
@@ -2548,6 +2572,7 @@ impl ChatManager {
                     reasoning_path_tracker: super::feedback::ReasoningPathTracker::new(),
                     objective_tracking: true,
                     objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
+                    work_log: work_log.clone(),
                 },
             );
             interrupt_flag
@@ -2874,13 +2899,18 @@ impl ChatManager {
         //
         // Also clone the stdin_tx sender for auto-allowing AskUserQuestion control
         // requests inline (without going through send_permission_response).
-        let (pending_perm_inputs, stdin_tx_for_auto_allow) = {
+        let (pending_perm_inputs, stdin_tx_for_auto_allow, work_log) = {
             let guard = active_sessions.read().await;
             match guard.get(&session_id) {
-                Some(s) => (s.pending_permission_inputs.clone(), s.stdin_tx.clone()),
+                Some(s) => (
+                    s.pending_permission_inputs.clone(),
+                    s.stdin_tx.clone(),
+                    s.work_log.clone(),
+                ),
                 None => (
                     Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
                     None,
+                    Arc::new(Mutex::new(SessionWorkLog::default())),
                 ),
             }
         };
@@ -3466,9 +3496,15 @@ impl ChatManager {
                                         streaming_events.lock().await.push(event.clone());
                                     }
 
-                                    // Track tool_use for objective tracking
-                                    if matches!(event, ChatEvent::ToolUse { .. }) {
+                                    // Track tool_use for objective tracking + work_log
+                                    if let ChatEvent::ToolUse {
+                                        ref tool,
+                                        ref input,
+                                        ..
+                                    } = event
+                                    {
                                         had_tool_use = true;
+                                        work_log.lock().await.record_tool_use(tool, input);
                                     }
 
                                     // Detect error_max_turns for auto-continue
@@ -3612,6 +3648,7 @@ impl ChatManager {
             event_emitter: event_emitter.clone(),
             search: search.clone(),
             auto_continue: auto_continue.clone(),
+            work_log: work_log.clone(),
         };
 
         // 1. Post-compaction context re-injection
@@ -4357,6 +4394,9 @@ impl ChatManager {
         // Create broadcast channel early so CompactionNotifier can use the sender
         let (events_tx, _) = broadcast::channel(BROADCAST_BUFFER);
 
+        // Create work_log early so CompactionNotifier can reference it
+        let work_log = Arc::new(Mutex::new(SessionWorkLog::default()));
+
         // Build session hooks: PreCompact (compaction notifier) + PreToolUse (skill activation)
         let session_hooks = {
             let mut hooks = std::collections::HashMap::new();
@@ -4372,7 +4412,8 @@ impl ChatManager {
                 self.nats.clone(),
                 session_id.to_string(),
             )
-            .with_context(self.graph.clone(), context_source);
+            .with_context(self.graph.clone(), context_source)
+            .with_work_log(work_log.clone());
             hooks.insert(
                 "PreCompact".to_string(),
                 vec![nexus_claude::HookMatcher {
@@ -4550,6 +4591,7 @@ impl ChatManager {
                     reasoning_path_tracker: super::feedback::ReasoningPathTracker::new(),
                     objective_tracking: true,
                     objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
+                    work_log: work_log.clone(),
                 },
             );
             interrupt_flag
@@ -7123,6 +7165,7 @@ mod tests {
             reasoning_path_tracker: crate::chat::feedback::ReasoningPathTracker::new(),
             objective_tracking: false,
             objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
+            work_log: Arc::new(Mutex::new(SessionWorkLog::default())),
         };
 
         Some((session, pending_messages))
@@ -8018,6 +8061,7 @@ mod tests {
             reasoning_path_tracker: crate::chat::feedback::ReasoningPathTracker::new(),
             objective_tracking: false,
             objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
+            work_log: Arc::new(Mutex::new(SessionWorkLog::default())),
         };
 
         (session, handle)
