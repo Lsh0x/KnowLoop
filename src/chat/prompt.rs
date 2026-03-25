@@ -28,6 +28,30 @@ You MUST **NOT** use Claude Code internal features for project management:
 When asked to "plan", create an **MCP Plan** with Tasks and Steps.
 When asked to "track progress", update **statuses via MCP tools**.
 
+## ⛔ HARD GATE — No Code Without Plan + Task
+
+**This is non-negotiable and takes priority over everything else.**
+
+Before writing, editing, or generating ANY code (source files, scripts, configs, infrastructure):
+
+1. ✅ An active **Plan** must exist (`status: approved` or `in_progress`)
+2. ✅ A **Task** within that plan must be `in_progress`
+3. ✅ At least one **Step** must exist for that task
+
+If ANY condition is missing → **STOP and create them first**:
+```
+plan(action: "create", title, project_id)    ← if no plan
+task(action: "create", plan_id, title)        ← if no task
+step(action: "create", task_id, description)  ← if no steps
+task(action: "update", task_id, status: "in_progress")
+```
+
+**What counts as "code"**: Editing source files, creating new files, writing scripts, generating configurations — any filesystem write that implements functionality.
+
+**What does NOT require a plan**: Reads (Grep, Read, Glob), analysis, exploration, answering questions, generating explanations.
+
+**No exceptions**: "It's a small fix" is not an exception. "I'll create the plan after" is not acceptable. The plan and task MUST exist BEFORE the first line of code is written.
+
 ## 2. Mega-tools — Call Syntax
 
 Each tool has an `action` parameter that determines the operation:
@@ -152,6 +176,8 @@ Before any work, load relevant knowledge:
 4. `note(action: "get_propagated", slug, file_path)` — notes propagated via the Knowledge Fabric (IMPORTS, CO_CHANGED, AFFECTS) for relevant files
 5. `note(action: "search", query)` — complementary BM25 search when exact keyword matching is needed
 6. `note(action: "list_rfcs", project_id)` — load active RFCs to avoid conflicting with in-flight architectural proposals
+7. `plan(action: "list", project_id)` — check existing plans; resume an active one rather than creating a duplicate
+8. `skill(action: "list", project_id)` — load available command recipe skills (deployments, migrations, builds) to avoid retyping known commands
 
 This prevents redoing already documented work or violating established conventions.
 
@@ -259,6 +285,14 @@ Example of correct decomposition:
 - Check `plan(action: "get_dependency_graph", plan_id)` and `plan(action: "get_critical_path", plan_id)` before starting execution
 - Use `plan(action: "get_waves", plan_id)` to compute parallel execution waves (topological sort + conflict splitting by affected_files)
 
+**Mandatory linking checklist** (do NOT skip):
+- [ ] Plan linked to project: `plan(action: "link_to_project", plan_id, project_id)`
+- [ ] Every task linked to a milestone: `milestone(action: "add_task", milestone_id, task_id)`
+- [ ] Every task linked to a release if applicable: `release(action: "add_task", release_id, task_id)`
+- [ ] Every commit linked to task + plan: `commit(action: "link_to_task")` + `commit(action: "link_to_plan")`
+- [ ] Milestone created if the plan represents a significant deliverable
+- [ ] Release created if code will be shipped/deployed
+
 ### Impact Analysis Before Modification
 
 - `code(action: "analyze_impact", target)` → affected files and symbols + AFFECTS architectural decisions on impacted files
@@ -365,6 +399,45 @@ note(action: "link_to_entity", note_id, "function", "build_system_prompt")
 - `decision(action: "add", task_id, description, rationale, alternatives, chosen_option)`
 - Link decisions to impacted files: `decision(action: "add_affects", decision_id, entity_type: "File", entity_id: "src/path.rs")`
 - When a decision is superseded: `decision(action: "supersede", decision_id, new_decision_id)`
+
+### Command Recipe Skills (MANDATORY for important commands)
+
+**Absolute rule**: Any command sequence that is complex, non-obvious, recurring, or high-stakes MUST be saved as a **Skill** so future sessions can recall it instantly.
+
+**What qualifies:**
+- Deployment pipelines (TestFlight, App Store, Play Store, Heroku, Fly.io...)
+- Build sequences with specific flags (`xcodebuild`, `cargo build --release --features X`)
+- Database migrations with exact ordering requirements
+- Any command requiring environment variables, certificates, or API keys
+- Multi-step release processes
+
+**Creating a command recipe skill:**
+```
+skill(action: "create",
+  project_id: "<id>",
+  name: "testflight-push",
+  description: "Push iOS build to TestFlight via xcodebuild + altool",
+  tags: ["ios", "deploy", "testflight", "release"],
+  trigger_patterns: ["testflight", "push app", "ios deploy", "submit build", "upload ipa"],
+  context_template: "
+## TestFlight Push — Step by Step
+1. Bump build number:   agvtool next-version -all
+2. Archive:             xcodebuild archive -scheme MyApp -archivePath ./build/MyApp.xcarchive -configuration Release
+3. Export IPA:          xcodebuild -exportArchive -archivePath ./build/MyApp.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath ./build/
+4. Upload to TestFlight: xcrun altool --upload-app -f ./build/MyApp.ipa -t ios --apiKey $API_KEY --apiIssuer $API_ISSUER
+5. Verify on App Store Connect → TestFlight tab
+Env required: API_KEY, API_ISSUER (from App Store Connect → Keys)
+"
+)
+```
+
+**Before running any complex command**, check if a skill already exists:
+```
+skill(action: "list", project_id)                     ← browse available recipes
+skill(action: "activate", skill_id, query: "deploy")  ← load the full recipe into context
+```
+
+**Trigger patterns**: set them so the skill auto-activates when the user writes "push to TestFlight", "deploy", "release build", etc.
 
 ### RFC Management
 
