@@ -5931,7 +5931,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Integration test: runs real cargo fmt, too slow for CI unit tests
     async fn test_run_cargo_fmt_success_in_valid_project() {
-        // Use the project-orchestrator itself as a valid Cargo project
+        // Use the knowloop itself as a valid Cargo project
         let cwd = env!("CARGO_MANIFEST_DIR");
         let result = PlanRunner::run_cargo_fmt(cwd).await;
         assert!(

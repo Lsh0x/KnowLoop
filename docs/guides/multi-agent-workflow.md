@@ -12,7 +12,7 @@ A single AI agent can only do one thing at a time. With multiple agents, you can
 - **Specialize** — Each agent focuses on what it does best
 - **Scale** — Add more agents for larger projects
 
-Project Orchestrator provides the shared context that makes this possible.
+KnowLoop provides the shared context that makes this possible.
 
 ---
 

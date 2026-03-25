@@ -3,7 +3,7 @@
 //! These tests don't require external services.
 //! Run with: cargo test --test parser_tests
 
-use project_orchestrator::parser::CodeParser;
+use knowloop::parser::CodeParser;
 use std::path::Path;
 
 #[test]

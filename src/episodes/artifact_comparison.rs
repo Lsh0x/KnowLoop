@@ -421,7 +421,7 @@ pub fn generate_fake_enriched(
     crate::api::episode_handlers::EnrichedArtifact {
         schema_version: 1,
         exported_at: chrono::Utc::now(),
-        source_project: "project-orchestrator-backend".to_string(),
+        source_project: "knowloop-backend".to_string(),
         structure,
         episodes,
         stats: crate::api::episode_handlers::ArtifactStats {

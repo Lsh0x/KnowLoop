@@ -1,0 +1,5 @@
+# Minimal config for Docker — marks the instance as already configured.
+# All actual values (neo4j, meilisearch, nats, etc.) come from environment
+# variables set in docker-compose.yml; only setup_completed needs to be
+# in a file because it has no env-var override.
+setup_completed: true

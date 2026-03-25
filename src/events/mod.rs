@@ -1,6 +1,6 @@
 //! # Event System — Real-time CRUD & Graph Notifications
 //!
-//! This module provides the complete event infrastructure for the Project Orchestrator.
+//! This module provides the complete event infrastructure for the KnowLoop.
 //! Events are emitted **after every successful mutation** and broadcast to WebSocket
 //! clients for real-time UI updates and to NATS for cross-instance sync.
 //!

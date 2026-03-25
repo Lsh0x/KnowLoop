@@ -1,19 +1,19 @@
 <p align="center">
-  <img src="dist/logo-512.png" alt="Project Orchestrator" width="128" />
+  <img src="dist/logo-512.png" alt="KnowLoop" width="128" />
 </p>
 
-<h1 align="center">Project Orchestrator</h1>
+<h1 align="center">KnowLoop</h1>
 
 <p align="center">
   <strong>Coordinate AI coding agents with a shared knowledge graph.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/this-rs/project-orchestrator/releases/latest/download/Project.Orchestrator_0.0.11_aarch64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" height="40"></a>
+  <a href="https://github.com/Lsh0x/KnowLoop/releases/latest/download/Project.Orchestrator_0.0.11_aarch64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" height="40"></a>
   &nbsp;&nbsp;
-  <a href="https://github.com/this-rs/project-orchestrator/releases/latest/download/Project.Orchestrator_0.0.11_x64-setup.exe"><img src="https://img.shields.io/badge/Download_for_Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" height="40"></a>
+  <a href="https://github.com/Lsh0x/KnowLoop/releases/latest/download/Project.Orchestrator_0.0.11_x64-setup.exe"><img src="https://img.shields.io/badge/Download_for_Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" height="40"></a>
   &nbsp;&nbsp;
-  <a href="https://github.com/this-rs/project-orchestrator/releases/latest/download/Project.Orchestrator_0.0.11_amd64.AppImage"><img src="https://img.shields.io/badge/Download_for_Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux" height="40"></a>
+  <a href="https://github.com/Lsh0x/KnowLoop/releases/latest/download/Project.Orchestrator_0.0.11_amd64.AppImage"><img src="https://img.shields.io/badge/Download_for_Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux" height="40"></a>
 </p>
 
 <p align="center">
@@ -21,14 +21,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/this-rs/project-orchestrator/actions/workflows/ci.yml"><img src="https://github.com/this-rs/project-orchestrator/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://codecov.io/gh/this-rs/project-orchestrator"><img src="https://codecov.io/gh/this-rs/project-orchestrator/branch/main/graph/badge.svg" alt="codecov"></a>
+  <a href="https://github.com/Lsh0x/KnowLoop/actions/workflows/ci.yml"><img src="https://github.com/Lsh0x/KnowLoop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://codecov.io/gh/Lsh0x/KnowLoop"><img src="https://codecov.io/gh/Lsh0x/KnowLoop/branch/main/graph/badge.svg" alt="codecov"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.75+-orange.svg" alt="Rust"></a>
-  <a href="https://github.com/this-rs/project-orchestrator/releases/latest"><img src="https://img.shields.io/github/v/release/this-rs/project-orchestrator?label=release" alt="Latest Release"></a>
+  <a href="https://github.com/Lsh0x/KnowLoop/releases/latest"><img src="https://img.shields.io/github/v/release/Lsh0x/KnowLoop?label=release" alt="Latest Release"></a>
 </p>
 
-Project Orchestrator gives your AI agents a shared brain. Instead of each agent starting from scratch, they share code understanding, plans, decisions, and progress through a central knowledge base.
+KnowLoop gives your AI agents a shared brain. Instead of each agent starting from scratch, they share code understanding, plans, decisions, and progress through a central knowledge base.
 
 ---
 
@@ -61,32 +61,32 @@ Download the desktop app for your platform:
 
 | Platform | Download | Type |
 |----------|----------|------|
-| **macOS** (Apple Silicon) | [Download .dmg](https://github.com/this-rs/project-orchestrator/releases/latest/download/Project.Orchestrator_0.0.11_aarch64.dmg) | M1/M2/M3/M4 |
-| **macOS** (Intel) | [Download .dmg](https://github.com/this-rs/project-orchestrator/releases/latest/download/Project.Orchestrator_0.0.11_x64.dmg) | Intel Mac |
-| **Windows** (64-bit) | [Download .exe](https://github.com/this-rs/project-orchestrator/releases/latest/download/Project.Orchestrator_0.0.11_x64-setup.exe) | Installer |
-| **Windows** (64-bit MSI) | [Download .msi](https://github.com/this-rs/project-orchestrator/releases/latest/download/Project.Orchestrator_0.0.11_x64_en-US.msi) | MSI |
-| **Linux** (64-bit) | [Download .AppImage](https://github.com/this-rs/project-orchestrator/releases/latest/download/Project.Orchestrator_0.0.11_amd64.AppImage) | Universal |
-| **Linux** (Debian/Ubuntu) | [Download .deb](https://github.com/this-rs/project-orchestrator/releases/latest/download/project-orchestrator_0.0.11-1_amd64.deb) | apt/dpkg |
-| **Linux** (Fedora/RHEL) | [Download .rpm](https://github.com/this-rs/project-orchestrator/releases/latest/download/project-orchestrator-0.0.11-1.x86_64.rpm) | dnf/rpm |
+| **macOS** (Apple Silicon) | [Download .dmg](https://github.com/Lsh0x/KnowLoop/releases/latest/download/Project.Orchestrator_0.0.11_aarch64.dmg) | M1/M2/M3/M4 |
+| **macOS** (Intel) | [Download .dmg](https://github.com/Lsh0x/KnowLoop/releases/latest/download/Project.Orchestrator_0.0.11_x64.dmg) | Intel Mac |
+| **Windows** (64-bit) | [Download .exe](https://github.com/Lsh0x/KnowLoop/releases/latest/download/Project.Orchestrator_0.0.11_x64-setup.exe) | Installer |
+| **Windows** (64-bit MSI) | [Download .msi](https://github.com/Lsh0x/KnowLoop/releases/latest/download/Project.Orchestrator_0.0.11_x64_en-US.msi) | MSI |
+| **Linux** (64-bit) | [Download .AppImage](https://github.com/Lsh0x/KnowLoop/releases/latest/download/Project.Orchestrator_0.0.11_amd64.AppImage) | Universal |
+| **Linux** (Debian/Ubuntu) | [Download .deb](https://github.com/Lsh0x/KnowLoop/releases/latest/download/knowloop_0.0.11-1_amd64.deb) | apt/dpkg |
+| **Linux** (Fedora/RHEL) | [Download .rpm](https://github.com/Lsh0x/KnowLoop/releases/latest/download/knowloop-0.0.11-1.x86_64.rpm) | dnf/rpm |
 
-> All releases are available on the [Releases page](https://github.com/this-rs/project-orchestrator/releases/latest).
+> All releases are available on the [Releases page](https://github.com/Lsh0x/KnowLoop/releases/latest).
 
 ---
 
 ### Homebrew (macOS / Linux)
 
 ```bash
-brew install this-rs/tap/project-orchestrator
+brew install Lsh0x/tap/knowloop
 ```
 
-This installs `orchestrator`, `orch` (CLI shorthand), and `mcp_server`.
+This installs `knowloop`, `kl` (CLI shorthand), and `knowloop_mcp`.
 
 ---
 
 ### Shell Script (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/this-rs/project-orchestrator/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Lsh0x/KnowLoop/main/install.sh | sh
 ```
 
 Options:
@@ -107,7 +107,7 @@ curl -fsSL https://…/install.sh | sh -s -- --install-dir /usr/local/bin
 ### PowerShell (Windows)
 
 ```powershell
-irm https://raw.githubusercontent.com/this-rs/project-orchestrator/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Lsh0x/KnowLoop/main/install.ps1 | iex
 ```
 
 ---
@@ -116,17 +116,17 @@ irm https://raw.githubusercontent.com/this-rs/project-orchestrator/main/install.
 
 ```bash
 # Full (with embedded frontend)
-docker pull ghcr.io/this-rs/project-orchestrator:latest
+docker pull ghcr.io/Lsh0x/KnowLoop:latest
 
 # API-only (lighter, no frontend)
-docker pull ghcr.io/this-rs/project-orchestrator:latest-api
+docker pull ghcr.io/Lsh0x/KnowLoop:latest-api
 ```
 
 Or use Docker Compose with all services (Neo4j, Meilisearch, NATS):
 
 ```bash
-git clone https://github.com/this-rs/project-orchestrator.git
-cd project-orchestrator
+git clone https://github.com/Lsh0x/KnowLoop.git
+cd knowloop
 docker compose up -d
 ```
 
@@ -136,11 +136,11 @@ docker compose up -d
 
 ```bash
 # Download and install the .deb package
-curl -LO https://github.com/this-rs/project-orchestrator/releases/latest/download/project-orchestrator_0.0.11-1_amd64.deb
-sudo dpkg -i project-orchestrator_0.0.11-1_amd64.deb
+curl -LO https://github.com/Lsh0x/KnowLoop/releases/latest/download/knowloop_0.0.11-1_amd64.deb
+sudo dpkg -i knowloop_0.0.11-1_amd64.deb
 
 # Start the service
-sudo systemctl enable --now project-orchestrator
+sudo systemctl enable --now knowloop
 ```
 
 ---
@@ -149,8 +149,8 @@ sudo systemctl enable --now project-orchestrator
 
 ```bash
 # Download and install the .rpm package
-curl -LO https://github.com/this-rs/project-orchestrator/releases/latest/download/project-orchestrator-0.0.11-1.x86_64.rpm
-sudo rpm -i project-orchestrator-0.0.11-1.x86_64.rpm
+curl -LO https://github.com/Lsh0x/KnowLoop/releases/latest/download/knowloop-0.0.11-1.x86_64.rpm
+sudo rpm -i knowloop-0.0.11-1.x86_64.rpm
 ```
 
 ---
@@ -158,14 +158,14 @@ sudo rpm -i project-orchestrator-0.0.11-1.x86_64.rpm
 ### Build from Source
 
 ```bash
-git clone https://github.com/this-rs/project-orchestrator.git
-cd project-orchestrator
+git clone https://github.com/Lsh0x/KnowLoop.git
+cd knowloop
 cargo build --release
 
 # Binaries in target/release/:
 #   orchestrator  — main server
-#   orch          — CLI shorthand
-#   mcp_server    — MCP server for AI tools
+#   kl          — CLI shorthand
+#   knowloop_mcp    — MCP server for AI tools
 ```
 
 ---
@@ -183,7 +183,7 @@ docker compose up -d
 Then start the orchestrator:
 
 ```bash
-orchestrator serve
+knowloop serve
 ```
 
 ### 2. Configure your AI tool
@@ -193,8 +193,8 @@ Add to your MCP configuration (e.g., `~/.claude/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "mcp_server",
+    "knowloop": {
+      "command": "knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -490,7 +490,7 @@ note(action: "list_rfcs", project_id: "...")
 
 ### Knowledge-First Development
 
-The most powerful feature of Project Orchestrator is its knowledge accumulation. Follow these practices to maximize value:
+The most powerful feature of KnowLoop is its knowledge accumulation. Follow these practices to maximize value:
 
 #### 1. Always Warm Up
 
@@ -585,7 +585,7 @@ code(action: "get_node_importance", project_slug: "my-project",
 | **v0.0.2** | 2026-01-28 | Semantic search, decisions, constraints, milestones, releases |
 | **v0.0.1** | 2026-01-20 | Initial release: projects, plans, tasks, steps, Tree-sitter sync |
 
-> All releases with full changelogs are available on the [Releases page](https://github.com/this-rs/project-orchestrator/releases).
+> All releases with full changelogs are available on the [Releases page](https://github.com/Lsh0x/KnowLoop/releases).
 
 ---
 

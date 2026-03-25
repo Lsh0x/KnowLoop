@@ -1,5 +1,5 @@
 # =============================================================================
-# Project Orchestrator — Production Docker Compose
+# KnowLoop — Production Docker Compose
 # =============================================================================
 #
 # All-in-one deployment using the official ghcr.io image.
@@ -10,7 +10,7 @@
 #   # Edit .env to set secure passwords
 #   docker compose -f docker-compose.production.yml up -d
 #
-# Access the UI at http://localhost:8080 (or your configured SERVER_PORT)
+# Access the API at http://localhost:8080 (or your configured SERVER_PORT)
 
 services:
   # ---------------------------------------------------------------------------
@@ -18,7 +18,7 @@ services:
   # ---------------------------------------------------------------------------
   neo4j:
     image: neo4j:5-community
-    container_name: orchestrator-neo4j
+    container_name: knowloop-neo4j
     restart: unless-stopped
     ports:
       - "${NEO4J_HTTP_PORT:-7474}:7474"
@@ -30,8 +30,8 @@ services:
       - NEO4J_dbms_memory_heap_initial__size=${NEO4J_HEAP_INIT:-512m}
       - NEO4J_dbms_memory_heap_max__size=${NEO4J_HEAP_MAX:-1G}
     volumes:
-      - neo4j-data:/data
-      - neo4j-logs:/logs
+      - ./data/neo4j/data:/data
+      - ./data/neo4j/logs:/logs
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
       interval: 10s
@@ -39,14 +39,14 @@ services:
       retries: 5
       start_period: 30s
     networks:
-      - orchestrator
+      - knowloop
 
   # ---------------------------------------------------------------------------
   # MeiliSearch — Semantic search engine
   # ---------------------------------------------------------------------------
   meilisearch:
     image: getmeili/meilisearch:latest
-    container_name: orchestrator-meilisearch
+    container_name: knowloop-meilisearch
     restart: unless-stopped
     ports:
       - "${MEILISEARCH_PORT:-7700}:7700"
@@ -56,44 +56,43 @@ services:
       - MEILI_LOG_LEVEL=INFO
       - MEILI_MAX_INDEXING_MEMORY=${MEILISEARCH_MAX_MEMORY:-512MiB}
     volumes:
-      - meilisearch-data:/meili_data
+      - ./data/meilisearch:/meili_data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - orchestrator
+      - knowloop
 
   # ---------------------------------------------------------------------------
   # NATS — Message broker for inter-process event sync
   # ---------------------------------------------------------------------------
   nats:
     image: nats:2.11-alpine
-    container_name: orchestrator-nats
+    container_name: knowloop-nats
     restart: unless-stopped
     ports:
       - "${NATS_PORT:-4222}:4222"
       - "${NATS_MONITOR_PORT:-8222}:8222"
     command: ["--http_port", "8222", "--jetstream"]
     volumes:
-      - nats-data:/data/jetstream
+      - ./data/nats:/data/jetstream
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8222/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - orchestrator
+      - knowloop
 
   # ---------------------------------------------------------------------------
-  # Orchestrator — Backend + Frontend (ghcr.io image)
-  # Tags: latest (full), latest-api (no frontend), or semver: 1.0.0, 1.0.0-api
+  # KnowLoop — Backend API server (ghcr.io image)
   # Pin to a specific version for reproducible deployments.
   # ---------------------------------------------------------------------------
-  orchestrator:
-    image: ghcr.io/this-rs/project-orchestrator:${ORCHESTRATOR_IMAGE_TAG:-latest}
-    container_name: orchestrator-server
+  knowloop:
+    image: ghcr.io/lsh0x/knowloop:${KNOWLOOP_IMAGE_TAG:-latest}
+    container_name: knowloop-server
     restart: unless-stopped
     ports:
       - "${SERVER_PORT:-8080}:8080"
@@ -103,10 +102,9 @@ services:
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-change-me-please}
       - MEILISEARCH_URL=http://meilisearch:7700
       - MEILISEARCH_KEY=${MEILISEARCH_MASTER_KEY:-change-me-please}
-      - RUST_LOG=${RUST_LOG:-info,project_orchestrator=debug}
+      - SETUP_COMPLETED=true
+      - RUST_LOG=${RUST_LOG:-info,knowloop=debug}
       - WORKSPACE_PATH=/workspace
-      - SERVE_FRONTEND=${SERVE_FRONTEND:-true}
-      - FRONTEND_PATH=/app/dist
       - NATS_URL=nats://nats:4222
       # Auth (uncomment and configure as needed)
       # - JWT_SECRET=${JWT_SECRET}
@@ -119,7 +117,7 @@ services:
       nats:
         condition: service_healthy
     volumes:
-      - orchestrator-data:/workspace
+      - ./data/knowloop:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -127,15 +125,8 @@ services:
       retries: 3
       start_period: 10s
     networks:
-      - orchestrator
-
-volumes:
-  neo4j-data:
-  neo4j-logs:
-  meilisearch-data:
-  nats-data:
-  orchestrator-data:
+      - knowloop
 
 networks:
-  orchestrator:
+  knowloop:
     driver: bridge

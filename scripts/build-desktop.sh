@@ -8,13 +8,13 @@
 #   ./scripts/build-desktop.sh --skip-back  # Skip backend binary rebuild
 #
 # Environment:
-#   FRONTEND_DIR  Path to the frontend repo (default: ../project-orchestrator-frontend)
+#   FRONTEND_DIR  Path to the frontend repo (default: ../knowloop-frontend)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-FRONTEND_DIR="${FRONTEND_DIR:-$PROJECT_DIR/../project-orchestrator-frontend}"
+FRONTEND_DIR="${FRONTEND_DIR:-$PROJECT_DIR/../knowloop-frontend}"
 DESKTOP_DIR="$PROJECT_DIR/desktop"
 DESKTOP_DIST="$DESKTOP_DIR/dist"
 
@@ -45,7 +45,7 @@ for arg in "$@"; do
             echo "  --skip-back   Skip mcp_server binary rebuild"
             echo ""
             echo "Environment variables:"
-            echo "  FRONTEND_DIR  Path to the frontend repo (default: ../project-orchestrator-frontend)"
+            echo "  FRONTEND_DIR  Path to the frontend repo (default: ../knowloop-frontend)"
             exit 0
             ;;
     esac

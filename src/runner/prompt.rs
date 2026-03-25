@@ -276,7 +276,7 @@ Your ONLY job is to **write code, test it, and commit it**. You are NOT in a con
 2. **DO NOT** call `task(action: "update", status: ...)` via MCP — the Runner manages task status transitions.
 3. **UPDATE step statuses in real-time** via MCP: call `step(action: "update", step_id: "<id>", status: "in_progress")` when you START a step, then `step(action: "update", step_id: "<id>", status: "completed")` when DONE. This enables real-time tracking in the UI.
 4. **DO NOT** ask questions, request confirmation, or explain your reasoning at length. Just do the work.
-5. **DO NOT** use MCP project orchestrator tools for searching code — use Read, Grep, Glob directly for speed.
+5. **DO NOT** use MCP KnowLoop tools for searching code — use Read, Grep, Glob directly for speed.
 6. Make atomic commits with conventional format: `<type>(<scope>): <short description>`.
 7. **NEVER** commit sensitive files (.env, credentials, *.key, *.pem, *.secret).
 8. After writing code, ALWAYS run `cargo check` (Rust) or the relevant build command to verify compilation.
@@ -431,7 +431,7 @@ Your ONLY job is to **write code, test it, and commit it**. You are NOT in a con
 1. **Execute immediately** — read the task, analyze the code, implement the solution, test, commit.
 2. **DO NOT** call `task(action: "update")` via MCP — the Runner manages task status transitions.
 3. **UPDATE step statuses in real-time** via MCP: call `step(action: "update", step_id: "<id>", status: "in_progress")` when you START a step, then `step(action: "update", step_id: "<id>", status: "completed")` when DONE. This enables real-time tracking in the UI.
-4. **DO NOT** use MCP project orchestrator tools for searching code — use Read, Grep, Glob directly for speed.
+4. **DO NOT** use MCP KnowLoop tools for searching code — use Read, Grep, Glob directly for speed.
 5. Make atomic commits with conventional format: `<type>(<scope>): <short description>`.
 6. **NEVER** commit sensitive files (.env, credentials, *.key, *.pem, *.secret).
 7. After writing code, ALWAYS run `cargo check` (Rust) or the relevant build command to verify compilation.

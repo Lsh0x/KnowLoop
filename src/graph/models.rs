@@ -1801,7 +1801,7 @@ pub struct TopologyCheckResult {
 ///
 /// # Examples
 /// ```
-/// use project_orchestrator::graph::models::glob_to_regex;
+/// use knowloop::graph::models::glob_to_regex;
 /// assert_eq!(glob_to_regex("src/neo4j/**"), "^src/neo4j/.*$");
 /// assert_eq!(glob_to_regex("src/*.rs"), "^src/[^/]*\\.rs$");
 /// assert_eq!(glob_to_regex("src/api/?.rs"), "^src/api/.\\.rs$");

@@ -16,7 +16,7 @@
     Installation directory (default: $env:LOCALAPPDATA\orchestrator\bin).
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/this-rs/project-orchestrator/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/Lsh0x/KnowLoop/main/install.ps1 | iex
 
 .EXAMPLE
     .\install.ps1 -Version 1.0.0 -NoFrontend
@@ -30,7 +30,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "this-rs/project-orchestrator"
+$Repo = "Lsh0x/KnowLoop"
 $BinaryName = "orchestrator"
 
 # --- Helpers ---

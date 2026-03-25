@@ -325,7 +325,7 @@ struct SectionCentroid {
 /// These are short, keyword-rich descriptions optimized for embedding similarity.
 fn section_semantic_descriptions() -> Vec<(PromptSectionId, &'static str)> {
     vec![
-        (PromptSectionId::IdentityRole, "agent identity role MCP tools project orchestrator"),
+        (PromptSectionId::IdentityRole, "agent identity role MCP tools KnowLoop"),
         (PromptSectionId::MegatoolsSyntax, "mega-tools API syntax action parameters calling convention"),
         (PromptSectionId::DataModel, "data model entities hierarchy project plan task step decision constraint note"),
         (PromptSectionId::TreeSitterSync, "tree-sitter code sync parse source files functions structs imports"),

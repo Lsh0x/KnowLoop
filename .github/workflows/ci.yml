@@ -37,9 +37,9 @@ jobs:
         with:
           name: build-artifacts
           path: |
-            target/release/orchestrator
-            target/release/orch
-            target/release/mcp_server
+            target/release/knowloop
+            target/release/kl
+            target/release/knowloop_mcp
           retention-days: 1
 
   # ==========================================================================
@@ -214,7 +214,7 @@ jobs:
           path: target/release/
 
       - name: Make binaries executable
-        run: chmod +x target/release/orchestrator target/release/orch target/release/mcp_server
+        run: chmod +x target/release/knowloop target/release/kl target/release/knowloop_mcp
 
       - name: Wait for services to be ready
         run: |
@@ -244,7 +244,7 @@ jobs:
         env:
           RUST_LOG: info
         run: |
-          ./target/release/orchestrator serve --port 8080 &
+          ./target/release/knowloop serve --port 8080 &
           echo "Waiting for server to start..."
           timeout 60 bash -c 'until curl -sf http://localhost:8080/health > /dev/null 2>&1; do sleep 1; done'
           echo "Server is ready!"

@@ -1,16 +1,16 @@
-//! Project Orchestrator - Main Server
+//! KnowLoop - Main Server
 //!
 //! An AI agent orchestrator with Neo4j, Meilisearch, and Tree-sitter.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use project_orchestrator::{orchestrator::Orchestrator, setup_claude, update, AppState, Config};
+use knowloop::{orchestrator::Orchestrator, setup_claude, update, AppState, Config};
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
-#[command(name = "orchestrator")]
-#[command(about = "AI Agent Orchestrator Server")]
+#[command(name = "knowloop")]
+#[command(about = "KnowLoop — AI Agent Orchestrator Server")]
 struct Cli {
     /// Path to config.yaml (default: auto-detect)
     #[arg(short, long, global = true)]
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,project_orchestrator=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "info,knowloop=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
             if let Some(path) = frontend_path {
                 config.frontend_path = path;
             }
-            project_orchestrator::start_server(config).await
+            knowloop::start_server(config).await
         }
         Commands::Sync { path } => run_sync(config, &path).await,
         Commands::Update { check } => run_update(check).await,
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
 }
 
 fn run_setup_claude(config: &Config, port: u16) {
-    use project_orchestrator::chat::ChatConfig;
+    use knowloop::chat::ChatConfig;
 
     println!("Configuring Claude Code MCP server (stdio mode)...");
     println!();
@@ -162,7 +162,7 @@ fn run_setup_claude(config: &Config, port: u16) {
         Ok(setup_claude::SetupResult::AlreadyConfigured {
             allowed_tools_configured,
         }) => {
-            println!("  Project Orchestrator is already configured in Claude Code.");
+            println!("  KnowLoop is already configured in Claude Code.");
             if allowed_tools_configured {
                 println!("  MCP tools pre-approved in settings.json.");
             } else {
@@ -174,7 +174,7 @@ fn run_setup_claude(config: &Config, port: u16) {
             eprintln!();
             eprintln!("  You can configure it manually:");
             eprintln!(
-                "    claude mcp add -e PO_SERVER_URL=http://127.0.0.1:{} -e PO_JWT_SECRET=<secret> project-orchestrator -- {}",
+                "    claude mcp add -e PO_SERVER_URL=http://127.0.0.1:{} -e PO_JWT_SECRET=<secret> knowloop -- {}",
                 port,
                 setup_config.mcp_server_path.display()
             );

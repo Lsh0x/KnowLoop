@@ -129,7 +129,7 @@ impl SuffixIndex {
     ///
     /// # Examples
     /// ```
-    /// # use project_orchestrator::resolver::SuffixIndex;
+    /// # use knowloop::resolver::SuffixIndex;
     /// let paths = vec!["src/api/handlers.rs".to_string()];
     /// let index = SuffixIndex::build(&paths);
     /// assert_eq!(index.get("handlers.rs"), Some("src/api/handlers.rs"));

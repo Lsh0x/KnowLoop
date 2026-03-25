@@ -924,7 +924,7 @@ fn truncate_content(content: &str, max_chars: usize) -> String {
 ///
 /// # Examples
 /// ```
-/// use project_orchestrator::skills::activation::extract_path_segments;
+/// use knowloop::skills::activation::extract_path_segments;
 ///
 /// assert_eq!(extract_path_segments("src/neo4j/client.rs"), vec!["neo4j", "client"]);
 /// assert!(extract_path_segments("src/lib.rs").is_empty());
@@ -2845,7 +2845,7 @@ mod tests {
         let result = activate_for_hook(
             &store,
             project_id,
-            "mcp__project-orchestrator__task",
+            "mcp__knowloop__task",
             &tool_input,
             &config,
         )
@@ -2890,7 +2890,7 @@ mod tests {
         let result = activate_for_hook(
             &store,
             project_id,
-            "mcp__project-orchestrator__note",
+            "mcp__knowloop__note",
             &tool_input,
             &config,
         )
@@ -2929,7 +2929,7 @@ mod tests {
         let result = activate_for_hook(
             &store,
             project_id,
-            "mcp__project-orchestrator__code",
+            "mcp__knowloop__code",
             &tool_input,
             &config,
         )
@@ -2972,7 +2972,7 @@ mod tests {
         let result = activate_for_hook(
             &store,
             project_id,
-            "mcp__project-orchestrator__commit",
+            "mcp__knowloop__commit",
             &tool_input,
             &config,
         )
@@ -3012,7 +3012,7 @@ mod tests {
         let result = activate_for_hook(
             &store,
             project_id,
-            "mcp__project-orchestrator__note",
+            "mcp__knowloop__note",
             &tool_input,
             &config,
         )
@@ -3051,7 +3051,7 @@ mod tests {
         let result = activate_for_hook(
             &store,
             project_id,
-            "mcp__project-orchestrator__task",
+            "mcp__knowloop__task",
             &tool_input,
             &config,
         )
@@ -3109,7 +3109,7 @@ mod tests {
         let result = activate_for_hook(
             &store,
             project_id,
-            "mcp__project-orchestrator__task",
+            "mcp__knowloop__task",
             &tool_input,
             &config,
         )
@@ -3167,7 +3167,7 @@ mod tests {
             let _result = activate_for_hook(
                 &store,
                 project_id,
-                "mcp__project-orchestrator__task",
+                "mcp__knowloop__task",
                 &tool_input,
                 &config,
             )
@@ -3199,7 +3199,7 @@ mod tests {
         let result = activate_for_hook(
             &store,
             project_id,
-            "mcp__project-orchestrator__task",
+            "mcp__knowloop__task",
             &tool_input,
             &config,
         )
@@ -3444,13 +3444,13 @@ mod tests {
             &guideline_note,
             Some("src/neo4j/client.rs"),
             None,
-            "mcp__project-orchestrator__task",
+            "mcp__knowloop__task",
         );
         let tip_score = score_note_relevance(
             &tip_note,
             Some("src/neo4j/client.rs"),
             None,
-            "mcp__project-orchestrator__task",
+            "mcp__knowloop__task",
         );
 
         assert!(

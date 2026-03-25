@@ -1325,7 +1325,7 @@ mod tests {
         // MCP tools are pre-approved by default
         let allowed = json["allowed_tools"].as_array().unwrap();
         assert_eq!(allowed.len(), 1);
-        assert_eq!(allowed[0], "mcp__project-orchestrator__*");
+        assert_eq!(allowed[0], "mcp__knowloop__*");
         assert_eq!(json["disallowed_tools"].as_array().unwrap().len(), 0);
         // default_model is now included from ChatConfig
         assert!(
@@ -1442,7 +1442,7 @@ mod tests {
         // MCP tools pre-approved by default when allowed_tools is not specified
         let allowed = json["allowed_tools"].as_array().unwrap();
         assert_eq!(allowed.len(), 1);
-        assert_eq!(allowed[0], "mcp__project-orchestrator__*");
+        assert_eq!(allowed[0], "mcp__knowloop__*");
         assert_eq!(json["disallowed_tools"].as_array().unwrap().len(), 0);
     }
 }

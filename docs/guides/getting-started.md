@@ -1,6 +1,6 @@
 # Getting Started
 
-A step-by-step tutorial to get Project Orchestrator running with your first project.
+A step-by-step tutorial to get KnowLoop running with your first project.
 
 **Time:** ~15 minutes
 
@@ -33,8 +33,8 @@ Clone and start the orchestrator:
 
 ```bash
 # Clone the repository
-git clone https://github.com/this-rs/project-orchestrator.git
-cd project-orchestrator
+git clone https://github.com/Lsh0x/KnowLoop.git
+cd knowloop
 
 # Start Neo4j and Meilisearch
 docker compose up -d neo4j meilisearch
@@ -54,21 +54,21 @@ orchestrator-meilisearch running (healthy)
 ### Build the MCP server
 
 ```bash
-cargo build --release --bin mcp_server
+cargo build --release --bin knowloop_mcp
 ```
 
-The binary is at `./target/release/mcp_server`.
+The binary is at `./target/release/knowloop_mcp`.
 
 **Alternative:** Install the pre-built binary:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/this-rs/project-orchestrator/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Lsh0x/KnowLoop/main/install.sh | sh
 ```
 
 Then auto-configure Claude Code:
 
 ```bash
-orchestrator setup-claude
+knowloop setup-claude
 ```
 
 ---
@@ -84,8 +84,8 @@ Create or edit `~/.claude/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "/full/path/to/mcp_server",
+    "knowloop": {
+      "command": "/full/path/to/knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -107,8 +107,8 @@ Add to your Cursor `settings.json`:
 ```json
 {
   "mcp.servers": {
-    "project-orchestrator": {
-      "command": "/full/path/to/mcp_server",
+    "knowloop": {
+      "command": "/full/path/to/knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -514,4 +514,4 @@ docker compose logs meilisearch
 
 ---
 
-Congratulations! You're now ready to use Project Orchestrator to coordinate your AI-assisted development workflow.
+Congratulations! You're now ready to use KnowLoop to coordinate your AI-assisted development workflow.

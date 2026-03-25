@@ -82,7 +82,7 @@ fn model_dimensions(model: &EmbeddingModel) -> usize {
 /// # Example
 ///
 /// ```rust,ignore
-/// use project_orchestrator::embeddings::FastEmbedProvider;
+/// use knowloop::embeddings::FastEmbedProvider;
 ///
 /// let provider = FastEmbedProvider::from_env()?;
 /// let embedding = provider.embed_text("hello world").await?;

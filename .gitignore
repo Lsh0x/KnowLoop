@@ -10,9 +10,8 @@
 *.swp
 *.swo
 
-# Docker volumes (if running locally)
-neo4j_data/
-meilisearch_data/
+# Docker data (bind mounts for easy backup)
+/data/
 
 # OS
 .DS_Store
@@ -22,12 +21,5 @@ Thumbs.db
 
 /config.yaml
 tarpaulin-report.json
-
-# Desktop (Tauri)
-desktop/src-tauri/target/
-desktop/src-tauri/gen/
-desktop/src-tauri/resources/vc_redist*.exe
-desktop/dist/
-
 
 .fastembed_cache/

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working on the project-orchestrator skill.
+This file provides guidance to Claude Code when working on the knowloop skill.
 
 ## Documentation
 
@@ -22,7 +22,7 @@ For user-facing documentation, see the `docs/` folder:
 
 ## Project Overview
 
-**Project Orchestrator** is a Rust-based service that coordinates AI coding agents on complex projects. It provides:
+**KnowLoop** is a Rust-based service that coordinates AI coding agents on complex projects. It provides:
 
 - Neo4j graph database for code structure and relationships
 - Meilisearch for semantic search across code and decisions
@@ -51,23 +51,23 @@ cargo fmt                      # Format
 docker compose up -d neo4j meilisearch
 
 # Run server
-./target/release/orchestrator serve --port 8080
+./target/release/knowloop serve --port 8080
 
 # Or with debug logging
-RUST_LOG=debug ./target/release/orchestrator serve
+RUST_LOG=debug ./target/release/knowloop serve
 ```
 
 ## MCP Server (Claude Code Integration)
 
-The project-orchestrator can run as an MCP (Model Context Protocol) server, exposing all orchestrator functionality as tools for Claude Code.
+The knowloop can run as an MCP (Model Context Protocol) server, exposing all KnowLoop functionality as tools for Claude Code.
 
 ### Building the MCP Server
 
 ```bash
-cargo build --release --bin mcp_server
+cargo build --release --bin knowloop_mcp
 ```
 
-The binary will be at `./target/release/mcp_server`.
+The binary will be at `./target/release/knowloop_mcp`.
 
 ### Configuring Claude Code
 
@@ -76,8 +76,8 @@ Add to your Claude Code MCP settings (`~/.claude/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -95,8 +95,8 @@ Or use command-line arguments:
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "args": [
         "--neo4j-uri", "bolt://localhost:7687",
         "--neo4j-user", "neo4j",
@@ -145,8 +145,8 @@ Enable debug logging with `RUST_LOG=debug`:
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "env": {
         "RUST_LOG": "debug",
         "NEO4J_URI": "bolt://localhost:7687",
@@ -236,11 +236,11 @@ src/
 │   ├── manager.rs       # Plan/Task CRUD operations
 │   └── models.rs        # Plan/Task/Decision types
 ├── orchestrator/
-│   ├── runner.rs        # Main orchestrator logic
+│   ├── runner.rs        # Main knowloop logic
 │   ├── context.rs       # Agent context builder (includes notes)
 │   └── watcher.rs       # File watcher for auto-sync
 ├── bin/
-│   └── mcp_server.rs    # MCP server binary
+│   └── knowloop_mcp.rs    # MCP server binary
 ├── test_helpers.rs      # mock_app_state(), test_project(), test_plan()...
 ├── lib.rs               # Library exports
 ├── setup_claude.rs      # Auto-configure Claude Code MCP (setup-claude command)
@@ -458,7 +458,7 @@ GET /api/tasks?assigned_to=agent-1&status=in_progress
 GET /api/projects/{id}/milestones?status=open&limit=5
 
 # Recherche projets
-GET /api/projects?search=orchestrator&limit=10
+GET /api/projects?search=knowloop&limit=10
 ```
 
 ### Chat (WebSocket)
@@ -530,7 +530,7 @@ event: error             → {"message": "..."}
 
 1. **Axum 0.8 syntax**: Routes use `{param}` not `:param`
 2. **Error handling**: Use `anyhow::Result` and `AppError` for HTTP errors
-3. **State**: `ServerState` contains `orchestrator`, `watcher`, and `chat_manager`
+3. **State**: `ServerState` contains `knowloop`, `watcher`, and `chat_manager`
 4. **Tests**: All API tests require the server running on port 8080
 5. **File extensions**: Parser supports 16 languages:
    - Rust: `.rs`
@@ -683,9 +683,9 @@ Note: Full file content is NOT stored in Meilisearch. Use Neo4j for structural q
 3. Add migration if needed (manual Cypher)
 
 
-## Project Orchestrator — Mandatory Agent Workflow
+## KnowLoop — Mandatory Agent Workflow
 
-**This project is tracked by the Project Orchestrator (MCP).** All work MUST follow this protocol.
+**This project is tracked by the KnowLoop (MCP).** All work MUST follow this protocol.
 
 ---
 

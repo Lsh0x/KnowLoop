@@ -1,6 +1,6 @@
 # Claude Code Integration
 
-Complete guide to integrating Project Orchestrator with Claude Code (Anthropic's CLI for Claude).
+Complete guide to integrating KnowLoop with Claude Code (Anthropic's CLI for Claude).
 
 ---
 
@@ -35,15 +35,15 @@ mkdir -p ~/.claude
 touch ~/.claude/mcp.json
 ```
 
-### Step 2: Add Project Orchestrator
+### Step 2: Add KnowLoop
 
 Add the following to your `mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -56,7 +56,7 @@ Add the following to your `mcp.json`:
 }
 ```
 
-**Important:** Replace `/path/to/mcp_server` with the absolute path to your binary.
+**Important:** Replace `/path/to/knowloop_mcp` with the absolute path to your binary.
 
 ### Alternative: Using CLI arguments
 
@@ -65,8 +65,8 @@ You can also pass configuration via arguments:
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "args": [
         "--neo4j-uri", "bolt://localhost:7687",
         "--neo4j-user", "neo4j",
@@ -81,10 +81,10 @@ You can also pass configuration via arguments:
 
 ### Alternative: Auto-Configure
 
-If you have the `orchestrator` binary installed, you can auto-configure Claude Code:
+If you have the `knowloop` binary installed, you can auto-configure Claude Code:
 
 ```bash
-orchestrator setup-claude
+knowloop setup-claude
 ```
 
 This detects your Claude Code installation and adds the MCP server to `~/.claude/mcp.json` automatically.
@@ -110,7 +110,7 @@ In Claude Code, run:
 /mcp
 ```
 
-You should see `project-orchestrator` in the list of connected servers.
+You should see `knowloop` in the list of connected servers.
 
 ### Test a tool
 
@@ -126,7 +126,7 @@ Claude should use the `project` tool with action `list` and return results.
 
 ## Available Mega-Tools (22)
 
-Project Orchestrator uses a **mega-tool architecture**: 22 tools, each with an `action` parameter that dispatches to specific operations. This keeps the tool count low while providing comprehensive functionality.
+KnowLoop uses a **mega-tool architecture**: 22 tools, each with an `action` parameter that dispatches to specific operations. This keeps the tool count low while providing comprehensive functionality.
 
 ### How it works
 
@@ -277,7 +277,7 @@ If your deployment uses the HTTP API (not just MCP via stdio), you can set up au
 ```
 You: Set up Google OAuth for the orchestrator
 
-Claude: The Project Orchestrator HTTP API supports two authentication methods:
+Claude: The KnowLoop HTTP API supports two authentication methods:
 
         1. **Google OAuth** — For browser-based access (dashboard, WebSocket chat)
         2. **API Keys** — For programmatic access (CI/CD, scripts)
@@ -379,8 +379,8 @@ Add `RUST_LOG=debug` to your MCP configuration:
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "env": {
         "RUST_LOG": "debug",
         "NEO4J_URI": "bolt://localhost:7687",
@@ -417,8 +417,8 @@ claude --mcp-restart
 Check the binary path is correct and executable:
 
 ```bash
-ls -la /path/to/mcp_server
-chmod +x /path/to/mcp_server
+ls -la /path/to/knowloop_mcp
+chmod +x /path/to/knowloop_mcp
 ```
 
 ### View MCP logs
@@ -426,7 +426,7 @@ chmod +x /path/to/mcp_server
 MCP server logs go to stderr. To capture them:
 
 ```bash
-/path/to/mcp_server 2>/tmp/mcp.log
+/path/to/knowloop_mcp 2>/tmp/mcp.log
 ```
 
 ---
@@ -436,8 +436,8 @@ MCP server logs go to stderr. To capture them:
 ```json
 {
   "mcpServers": {
-    "project-orchestrator": {
-      "command": "/Users/me/.local/bin/mcp_server",
+    "knowloop": {
+      "command": "/Users/me/.local/bin/knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",

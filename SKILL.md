@@ -1,5 +1,5 @@
 ---
-name: project-orchestrator
+name: knowloop
 description: AI agent orchestrator with Neo4j knowledge graph, Meilisearch search, and Tree-sitter parsing. Use for coordinating multiple coding agents on complex projects with shared context and plans.
 metadata:
   clawdbot:
@@ -8,7 +8,7 @@ metadata:
       bins: ["docker", "cargo"]
 ---
 
-# Project Orchestrator
+# KnowLoop
 
 Coordinate multiple AI coding agents with a shared knowledge base.
 
@@ -47,7 +47,7 @@ docker compose up -d
 
 ```bash
 cargo build --release
-./target/release/orchestrator serve
+./target/release/knowloop serve
 ```
 
 Or with Docker:
@@ -59,7 +59,7 @@ docker compose up -d
 
 ```bash
 # Via CLI
-./target/release/orch sync --path /path/to/project
+./target/release/kl sync --path /path/to/project
 
 # Via API
 curl -X POST http://localhost:8080/api/sync \
@@ -94,7 +94,7 @@ curl "http://localhost:8080/api/projects/embryon/code/search?q=tensor&limit=10"
 ### Create a plan
 
 ```bash
-orch plan create \
+kl plan create \
   --title "Implement GPU Backend" \
   --desc "Add Metal GPU support for neural network operations" \
   --priority 10
@@ -103,11 +103,11 @@ orch plan create \
 ### Add tasks to the plan
 
 ```bash
-orch task add \
+kl task add \
   --plan <plan-id> \
   --desc "Implement MatMul Metal shader"
 
-orch task add \
+kl task add \
   --plan <plan-id> \
   --desc "Add attention layer GPU support" \
   --depends <task-1-id>
@@ -117,16 +117,16 @@ orch task add \
 
 ```bash
 # JSON context
-orch context --plan <plan-id> --task <task-id>
+kl context --plan <plan-id> --task <task-id>
 
 # Ready-to-use prompt
-orch context --plan <plan-id> --task <task-id> --prompt
+kl context --plan <plan-id> --task <task-id> --prompt
 ```
 
 ### Record decisions
 
 ```bash
-orch decision add \
+kl decision add \
   --task <task-id> \
   --desc "Use shared memory for tile-based MatMul" \
   --rationale "Better cache locality, 2x performance improvement"
@@ -135,7 +135,7 @@ orch decision add \
 ### Search past decisions
 
 ```bash
-orch decision search "memory management GPU"
+kl decision search "memory management GPU"
 ```
 
 ## API Endpoints

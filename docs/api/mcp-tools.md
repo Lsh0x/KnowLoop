@@ -1,6 +1,6 @@
 # MCP Mega-Tools Reference
 
-Complete documentation for the **22 mega-tools** exposed by Project Orchestrator.
+Complete documentation for the **22 mega-tools** exposed by KnowLoop.
 
 ---
 

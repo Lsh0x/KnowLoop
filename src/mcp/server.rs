@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Write};
 use tracing::{debug, error, info, warn};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
-const SERVER_NAME: &str = "project-orchestrator";
+const SERVER_NAME: &str = "knowloop";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// MCP Server that handles JSON-RPC 2.0 requests over stdio

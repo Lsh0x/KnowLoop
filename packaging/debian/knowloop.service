@@ -1,0 +1,28 @@
+[Unit]
+Description=KnowLoop — AI agent orchestrator
+Documentation=https://github.com/Lsh0x/KnowLoop
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=orchestrator
+Group=orchestrator
+ExecStart=/usr/bin/knowloop serve
+WorkingDirectory=/var/lib/knowloop
+EnvironmentFile=-/etc/knowloop/env
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=knowloop
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/knowloop
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

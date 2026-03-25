@@ -1,6 +1,6 @@
 # Foundation Kit — Bootstrapping a Self-Aware Instance
 
-A fresh Project Orchestrator instance is **blank** — no notes, no decisions,
+A fresh KnowLoop instance is **blank** — no notes, no decisions,
 no protocols, no understanding of what matters. This guide provides the
 **foundational knowledge** to seed on day 1, giving the agent a reference
 frame before it touches any code.

@@ -1,12 +1,12 @@
 //! Instance Identity module for P2P authentication.
 //!
-//! Each Project Orchestrator instance has a unique cryptographic identity based on:
+//! Each KnowLoop instance has a unique cryptographic identity based on:
 //! - **Ed25519 keypair**: for signing and verification
 //! - **did:key identifier**: decentralized identifier derived from the public key
 //! - **PASETO v4.public tokens**: for authenticating P2P messages
 //!
 //! The identity is persisted to the platform config directory
-//! (e.g. `~/Library/Application Support/project-orchestrator/identity.key` on macOS)
+//! (e.g. `~/Library/Application Support/knowloop/identity.key` on macOS)
 //! and loaded on startup.
 
 pub mod did;
@@ -26,7 +26,7 @@ use self::rotation::KeyHistory;
 /// Default identity file name.
 const IDENTITY_FILE: &str = "identity.key";
 
-/// Core identity of a Project Orchestrator instance.
+/// Core identity of a KnowLoop instance.
 ///
 /// Holds the Ed25519 signing key (private) and the derived verifying key (public).
 /// The `did_key` is computed from the verifying key using the did:key method.
@@ -240,22 +240,22 @@ impl InstanceIdentity {
 /// Get the default storage path for identity files.
 ///
 /// Uses the platform-specific app config directory:
-/// - macOS: `~/Library/Application Support/project-orchestrator/identity.key`
-/// - Linux: `~/.config/project-orchestrator/identity.key`
-/// - Windows: `%APPDATA%\ProjectOrchestrator\identity.key`
+/// - macOS: `~/Library/Application Support/knowloop/identity.key`
+/// - Linux: `~/.config/knowloop/identity.key`
+/// - Windows: `%APPDATA%\KnowLoop\identity.key`
 ///
-/// Falls back to `~/.project-orchestrator/identity.key` if `dirs::config_dir()` is unavailable.
+/// Falls back to `~/.knowloop/identity.key` if `dirs::config_dir()` is unavailable.
 fn default_storage_path() -> PathBuf {
     if let Some(config_dir) = dirs::config_dir() {
         #[cfg(target_os = "windows")]
-        let app_dir = config_dir.join("ProjectOrchestrator");
+        let app_dir = config_dir.join("KnowLoop");
         #[cfg(not(target_os = "windows"))]
-        let app_dir = config_dir.join("project-orchestrator");
+        let app_dir = config_dir.join("knowloop");
         app_dir.join(IDENTITY_FILE)
     } else {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".project-orchestrator")
+            .join(".knowloop")
             .join(IDENTITY_FILE)
     }
 }

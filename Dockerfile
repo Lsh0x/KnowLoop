@@ -1,47 +1,8 @@
 # =============================================================================
-# Stage 1: Prepare the frontend assets
-# =============================================================================
-# This stage handles two scenarios:
-#   A) Pre-built dist/ provided (CI: frontend built by separate job, placed in frontend/dist/)
-#   B) Full frontend source provided (local: frontend repo cloned into ./frontend)
-#
-# In both cases, the output is /app/frontend/dist/ with the built assets.
-# =============================================================================
-FROM node:22-slim AS frontend-builder
-
-WORKDIR /app/frontend
-
-# Accept frontend source path as build arg (default: ./frontend)
-ARG FRONTEND_SRC=./frontend
-# Version to inject into the frontend (from git tag). Falls back to package.json default.
-ARG APP_VERSION=""
-
-# Copy everything from the frontend source.
-# Use a wildcard so COPY doesn't fail if only dist/ is present.
-COPY ${FRONTEND_SRC}/ ./
-
-# Build only if package.json exists (full source scenario).
-# If only dist/ was copied (CI scenario), skip the build entirely.
-RUN if [ -f "package.json" ] && grep -q '"build"' package.json; then \
-        echo "Frontend source detected — installing dependencies and building..."; \
-        if [ -n "$APP_VERSION" ]; then \
-            CLEAN_VERSION="${APP_VERSION#v}"; \
-            npm pkg set version="${CLEAN_VERSION}"; \
-            echo "Injected frontend version: ${CLEAN_VERSION}"; \
-        fi; \
-        npm ci --ignore-scripts && npm run build; \
-    elif [ -d "dist" ]; then \
-        echo "Pre-built frontend dist/ detected — skipping build"; \
-    else \
-        echo "No frontend source or dist/ found — creating empty dist/"; \
-        mkdir -p dist; \
-    fi
-
-# =============================================================================
-# Stage 2: Build the backend (Rust)
+# Stage 1: Build the backend (Rust)
 # =============================================================================
 # Trixie (Debian 13) provides glibc 2.40, required because ort-sys prebuilt
-# ONNX Runtime binaries reference __isoc23_* symbols (glibc ≥ 2.38).
+# ONNX Runtime binaries reference __isoc23_* symbols (glibc >= 2.38).
 # Bookworm (glibc 2.36) fails with "undefined symbol: __isoc23_strtoll".
 FROM rust:1.93-trixie AS builder
 
@@ -55,11 +16,6 @@ RUN apt-get update && apt-get install -y \
 
 # Copy manifests for dependency caching (Cargo.lock required for reproducible builds)
 COPY Cargo.toml Cargo.lock ./
-
-# Remove desktop/src-tauri from workspace members — it's not needed for the
-# backend Docker build and would require copying the full Tauri manifest tree.
-# This keeps the Docker build identical to the pre-workspace behavior.
-RUN sed -i 's/, "desktop\/src-tauri"//' Cargo.toml
 
 # Copy local crates (path dependencies referenced in Cargo.toml)
 COPY crates ./crates/
@@ -86,9 +42,6 @@ RUN mkdir -p src/bin \
         echo "" > "src/$dir/mod.rs"; \
     done
 
-# Create empty dist/ so rust-embed doesn't fail during dependency build
-RUN mkdir -p dist
-
 # Build dependencies only
 RUN cargo build --release 2>/dev/null || true
 
@@ -101,9 +54,6 @@ COPY src ./src
 # Copy tree-sitter queries if they exist (optional — may not be present)
 COPY querie[s] ./queries/
 
-# Copy the frontend dist/ from stage 1 (for embedded-frontend feature or ServeDir)
-COPY --from=frontend-builder /app/frontend/dist ./dist
-
 # Touch source files to trigger rebuild
 RUN find src -name "*.rs" -exec touch {} \;
 
@@ -111,17 +61,16 @@ RUN find src -name "*.rs" -exec touch {} \;
 RUN cargo build --release
 
 # =============================================================================
-# Stage 3: Runtime image
+# Stage 2: Runtime image
 # =============================================================================
 # Must match builder glibc version (Trixie = glibc 2.40) so dynamically-linked
 # symbols like __isoc23_strtoll resolve correctly at runtime.
 FROM debian:trixie-slim AS runtime
 
 # OCI labels
-LABEL org.opencontainers.image.source="https://github.com/this-rs/project-orchestrator"
+LABEL org.opencontainers.image.source="https://github.com/Lsh0x/KnowLoop"
 LABEL org.opencontainers.image.description="AI agent orchestrator with Neo4j knowledge graph, Meilisearch, and Tree-sitter"
 LABEL org.opencontainers.image.licenses="MIT"
-LABEL org.opencontainers.image.vendor="OpenClaw"
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
@@ -131,40 +80,27 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy all 3 binaries
-COPY --from=builder /app/target/release/orchestrator /app/orchestrator
-COPY --from=builder /app/target/release/orch /app/orch
-COPY --from=builder /app/target/release/mcp_server /app/mcp_server
+COPY --from=builder /app/target/release/knowloop /app/knowloop
+COPY --from=builder /app/target/release/kl /app/kl
+COPY --from=builder /app/target/release/knowloop_mcp /app/knowloop_mcp
 
 # Copy tree-sitter queries if they exist (optional)
 COPY querie[s] ./queries/
 
-# Build arg: include frontend dist/ or not (default: true)
-ARG INCLUDE_FRONTEND=true
-
-# Copy frontend dist/ conditionally
-# When INCLUDE_FRONTEND=false, dist/ will be empty (created below)
-COPY --from=frontend-builder /app/frontend/dist /tmp/frontend-dist
-
-RUN if [ "$INCLUDE_FRONTEND" = "true" ]; then \
-        cp -r /tmp/frontend-dist ./dist && \
-        echo "Frontend included in image"; \
-    else \
-        mkdir -p ./dist && \
-        echo "API-only image (no frontend)"; \
-    fi && \
-    rm -rf /tmp/frontend-dist
+# Provide a minimal config.yaml so setup_completed=true (env vars handle the rest).
+# Without this file, the server enters setup-wizard mode because the Default trait
+# sets setup_completed=false when no config file is found on disk.
+COPY config.yaml.docker ./config.yaml
 
 # Create data directory
 RUN mkdir -p /data
 
 ENV RUST_LOG=info
 ENV WORKSPACE_PATH=/workspace
-ENV SERVE_FRONTEND=${INCLUDE_FRONTEND}
-ENV FRONTEND_PATH=/app/dist
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-CMD ["./orchestrator", "serve"]
+CMD ["./knowloop", "serve"]

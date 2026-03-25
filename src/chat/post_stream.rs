@@ -665,7 +665,7 @@ pub(crate) fn check_objective_reminder(input: &ObjectiveCheckInput) -> Option<St
     if input.had_productive_tool_use && input.no_active_plan {
         return Some(
             "⛔ **HARD GATE VIOLATION**: You wrote or edited code but no active Plan exists in \
-            the Project Orchestrator. Every code change MUST be linked to a plan and task.\n\
+            the KnowLoop. Every code change MUST be linked to a plan and task.\n\
             \n\
             Please immediately:\n\
             1. `plan(action: \"create\", title: \"...\", project_id: \"...\")`\n\

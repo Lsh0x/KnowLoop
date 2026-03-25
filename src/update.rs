@@ -13,9 +13,9 @@ use std::path::PathBuf;
 // Configuration
 // ============================================================================
 
-const GITHUB_REPO_OWNER: &str = "this-rs";
-const GITHUB_REPO_NAME: &str = "project-orchestrator";
-const BINARY_NAME: &str = "orchestrator";
+const GITHUB_REPO_OWNER: &str = "Lsh0x";
+const GITHUB_REPO_NAME: &str = "KnowLoop";
+const BINARY_NAME: &str = "knowloop";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ============================================================================

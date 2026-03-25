@@ -1,12 +1,12 @@
 # Cursor Integration
 
-Guide to integrating Project Orchestrator with Cursor IDE.
+Guide to integrating KnowLoop with Cursor IDE.
 
 ---
 
 ## Overview
 
-Cursor supports MCP (Model Context Protocol) servers, giving you access to Project Orchestrator's **22 mega-tools** directly in the editor. Use Chat or Composer to:
+Cursor supports MCP (Model Context Protocol) servers, giving you access to KnowLoop's **22 mega-tools** directly in the editor. Use Chat or Composer to:
 
 - **Explore code** with semantic search and graph queries
 - **Manage plans and tasks** without leaving your editor
@@ -25,10 +25,10 @@ Cursor supports MCP (Model Context Protocol) servers, giving you access to Proje
 
 ```bash
 # Build the MCP server
-cargo build --release --bin mcp_server
+cargo build --release --bin knowloop_mcp
 
 # Verify it works
-./target/release/mcp_server --help
+./target/release/knowloop_mcp --help
 ```
 
 ---
@@ -49,8 +49,8 @@ Add the following to your Cursor `settings.json`:
 ```json
 {
   "mcp.servers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -63,7 +63,7 @@ Add the following to your Cursor `settings.json`:
 }
 ```
 
-**Important:** Replace `/path/to/mcp_server` with the absolute path to your binary.
+**Important:** Replace `/path/to/knowloop_mcp` with the absolute path to your binary.
 
 ### Step 3: Restart Cursor
 
@@ -78,8 +78,8 @@ For project-specific settings, create `.cursor/mcp.json` in your project root:
 ```json
 {
   "servers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -102,7 +102,7 @@ This configuration will only apply when working in that project.
 
 1. Open Cursor Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
 2. Search for "MCP: Show Servers"
-3. Verify `project-orchestrator` is listed and connected
+3. Verify `knowloop` is listed and connected
 
 ### Test in Chat
 
@@ -265,7 +265,7 @@ then refactor this function to match the project style.
 Add to your workflow: sync the project when you open Cursor:
 
 ```
-Sync the project-orchestrator project to refresh the code index
+Sync the knowloop project to refresh the code index
 ```
 
 ### 4. Decision Recording
@@ -281,7 +281,7 @@ Record this decision with rationale: better error handling and readability.
 
 ## Available Mega-Tools
 
-All 22 Project Orchestrator mega-tools are available in Cursor. Most useful for editor workflows:
+All 22 KnowLoop mega-tools are available in Cursor. Most useful for editor workflows:
 
 | Mega-Tool | Key Actions | Cursor Use Case |
 |-----------|-------------|-----------------|
@@ -320,7 +320,7 @@ See [MCP Tools Reference](../api/mcp-tools.md) for the complete tool list.
 ### MCP server not connecting
 
 1. Check the binary path is absolute and correct
-2. Verify the binary is executable: `chmod +x /path/to/mcp_server`
+2. Verify the binary is executable: `chmod +x /path/to/knowloop_mcp`
 3. Restart Cursor after config changes
 
 ### "Tool not found" errors
@@ -336,8 +336,8 @@ Enable debug logging in your configuration:
 ```json
 {
   "mcp.servers": {
-    "project-orchestrator": {
-      "command": "/path/to/mcp_server",
+    "knowloop": {
+      "command": "/path/to/knowloop_mcp",
       "env": {
         "RUST_LOG": "debug",
         ...
@@ -350,7 +350,7 @@ Enable debug logging in your configuration:
 View logs in Cursor:
 1. Open Command Palette
 2. Search "MCP: Show Server Logs"
-3. Select `project-orchestrator`
+3. Select `knowloop`
 
 ### Backend connection issues
 
@@ -372,8 +372,8 @@ Complete configuration for Cursor:
 ```json
 {
   "mcp.servers": {
-    "project-orchestrator": {
-      "command": "/Users/me/tools/mcp_server",
+    "knowloop": {
+      "command": "/Users/me/tools/knowloop_mcp",
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",

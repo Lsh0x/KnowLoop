@@ -2154,7 +2154,7 @@ mod tests {
 
         // Step in_progress
         log.record_tool_use(
-            "mcp__project-orchestrator__step",
+            "mcp__knowloop__step",
             &serde_json::json!({"action": "update", "step_id": step1.to_string(), "status": "in_progress"}),
         );
         assert_eq!(log.step_in_progress, Some(step1));
@@ -2162,7 +2162,7 @@ mod tests {
 
         // Step completed
         log.record_tool_use(
-            "mcp__project-orchestrator__step",
+            "mcp__knowloop__step",
             &serde_json::json!({"action": "update", "step_id": step1.to_string(), "status": "completed"}),
         );
         assert_eq!(log.step_in_progress, None);
@@ -2170,14 +2170,14 @@ mod tests {
 
         // Second step in_progress
         log.record_tool_use(
-            "mcp__project-orchestrator__step",
+            "mcp__knowloop__step",
             &serde_json::json!({"action": "update", "step_id": step2.to_string(), "status": "in_progress"}),
         );
         assert_eq!(log.step_in_progress, Some(step2));
 
         // Complete step2
         log.record_tool_use(
-            "mcp__project-orchestrator__step",
+            "mcp__knowloop__step",
             &serde_json::json!({"action": "update", "step_id": step2.to_string(), "status": "completed"}),
         );
         assert_eq!(log.steps_completed, vec![step1, step2]);
@@ -2300,7 +2300,7 @@ mod tests {
         let step = Uuid::new_v4();
         // action: "list" should be ignored by record_step_update
         log.record_tool_use(
-            "mcp__project-orchestrator__step",
+            "mcp__knowloop__step",
             &serde_json::json!({"action": "list", "task_id": step.to_string()}),
         );
         assert!(log.steps_completed.is_empty());
@@ -2311,7 +2311,7 @@ mod tests {
     fn test_session_work_log_step_update_invalid_uuid_ignored() {
         let mut log = SessionWorkLog::default();
         log.record_tool_use(
-            "mcp__project-orchestrator__step",
+            "mcp__knowloop__step",
             &serde_json::json!({"action": "update", "step_id": "not-a-uuid", "status": "completed"}),
         );
         assert!(log.steps_completed.is_empty());
@@ -2323,11 +2323,11 @@ mod tests {
         let step = Uuid::new_v4();
         // Complete the same step twice
         log.record_tool_use(
-            "mcp__project-orchestrator__step",
+            "mcp__knowloop__step",
             &serde_json::json!({"action": "update", "step_id": step.to_string(), "status": "completed"}),
         );
         log.record_tool_use(
-            "mcp__project-orchestrator__step",
+            "mcp__knowloop__step",
             &serde_json::json!({"action": "update", "step_id": step.to_string(), "status": "completed"}),
         );
         assert_eq!(log.steps_completed.len(), 1);

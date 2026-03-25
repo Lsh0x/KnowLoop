@@ -18,22 +18,22 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 
-use project_orchestrator::episodes::distill_models::*;
-use project_orchestrator::identity::did::to_did_key;
-use project_orchestrator::identity::InstanceIdentity;
-use project_orchestrator::reception::anchor::TombstoneRegistry;
-use project_orchestrator::reception::score::LocalContext;
-use project_orchestrator::reception::verify::verify_envelope;
-use project_orchestrator::reception::{receive_envelope, receive_envelope_checked};
-use project_orchestrator::transport::http::{
+use knowloop::episodes::distill_models::*;
+use knowloop::identity::did::to_did_key;
+use knowloop::identity::InstanceIdentity;
+use knowloop::reception::anchor::TombstoneRegistry;
+use knowloop::reception::score::LocalContext;
+use knowloop::reception::verify::verify_envelope;
+use knowloop::reception::{receive_envelope, receive_envelope_checked};
+use knowloop::transport::http::{
     HttpTransport, HttpTransportConfig, IdentityResponse, SyncRequest, SyncResponse,
 };
-use project_orchestrator::transport::http_handlers::{
+use knowloop::transport::http_handlers::{
     get_identity, handle_sync, receive_message, sync_with_peer, P2pState,
 };
-use project_orchestrator::transport::sync::{SyncMessage, VectorClock};
-use project_orchestrator::transport::types::{Message, MessageType, PeerInfo};
-use project_orchestrator::transport::TransportLayer;
+use knowloop::transport::sync::{SyncMessage, VectorClock};
+use knowloop::transport::types::{Message, MessageType, PeerInfo};
+use knowloop::transport::TransportLayer;
 
 // ============================================================================
 // Helper: spin up a P2P node (axum server) on a random port

@@ -1,5 +1,5 @@
 #![recursion_limit = "256"]
-//! Project Orchestrator
+//! KnowLoop
 //!
 //! An AI agent orchestrator with:
 //! - Neo4j knowledge graph for code structure and relationships
@@ -633,7 +633,10 @@ impl Config {
 
         // 2. Build Config with env var overrides
         Ok(Self {
-            setup_completed: yaml.setup_completed,
+            setup_completed: std::env::var("SETUP_COMPLETED")
+                .ok()
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(yaml.setup_completed),
             neo4j_uri: std::env::var("NEO4J_URI").unwrap_or(yaml.neo4j.uri),
             neo4j_user: std::env::var("NEO4J_USER").unwrap_or(yaml.neo4j.user),
             neo4j_password: std::env::var("NEO4J_PASSWORD").unwrap_or(yaml.neo4j.password),
@@ -730,9 +733,9 @@ impl Config {
     /// Search order when `yaml_path` is `None`:
     /// 1. `./config.yaml` (current working directory)
     /// 2. Platform-specific app config dir:
-    ///    - macOS: `~/Library/Application Support/project-orchestrator/config.yaml`
-    ///    - Linux: `~/.config/project-orchestrator/config.yaml`
-    ///    - Windows: `%APPDATA%/ProjectOrchestrator/config.yaml`
+    ///    - macOS: `~/Library/Application Support/knowloop/config.yaml`
+    ///    - Linux: `~/.config/knowloop/config.yaml`
+    ///    - Windows: `%APPDATA%/KnowLoop/config.yaml`
     ///
     /// This ensures the MCP server binary (which may be spawned with an arbitrary
     /// CWD by Claude Code) can still find the config written by the desktop app.
@@ -755,9 +758,9 @@ impl Config {
         // 1. Platform-specific app config directory (same as desktop app)
         if let Some(config_dir) = dirs::config_dir() {
             #[cfg(target_os = "windows")]
-            let app_dir = config_dir.join("ProjectOrchestrator");
+            let app_dir = config_dir.join("KnowLoop");
             #[cfg(not(target_os = "windows"))]
-            let app_dir = config_dir.join("project-orchestrator");
+            let app_dir = config_dir.join("knowloop");
             candidates.push(app_dir.join("config.yaml"));
         }
 

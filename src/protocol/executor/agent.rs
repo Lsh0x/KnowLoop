@@ -250,7 +250,7 @@ fn extract_trigger_from_text(text: &str) -> Option<String> {
 
 /// Extract trigger from a ToolUse event (protocol transition call intercepted).
 fn extract_trigger_from_tool_use(tool: &str, input: &serde_json::Value) -> Option<String> {
-    if tool != "mcp__project-orchestrator__protocol" {
+    if tool != "mcp__knowloop__protocol" {
         return None;
     }
     let action = input.get("action").and_then(|v| v.as_str())?;
@@ -656,7 +656,7 @@ mod tests {
             "trigger": "approved"
         });
         assert_eq!(
-            extract_trigger_from_tool_use("mcp__project-orchestrator__protocol", &input),
+            extract_trigger_from_tool_use("mcp__knowloop__protocol", &input),
             Some("approved".to_string())
         );
     }
@@ -680,7 +680,7 @@ mod tests {
             "run_id": "abc"
         });
         assert_eq!(
-            extract_trigger_from_tool_use("mcp__project-orchestrator__protocol", &input),
+            extract_trigger_from_tool_use("mcp__knowloop__protocol", &input),
             None
         );
     }
