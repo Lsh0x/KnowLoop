@@ -29,7 +29,7 @@ A step-by-step tutorial to get KnowLoop running with your first project.
 
 ## Step 1: Start Backend Services
 
-Clone and start the orchestrator:
+Clone and start KnowLoop:
 
 ```bash
 # Clone the repository
@@ -47,8 +47,8 @@ You should see both services as "healthy":
 
 ```
 NAME                    STATUS
-orchestrator-neo4j      running (healthy)
-orchestrator-meilisearch running (healthy)
+knowloop-neo4j      running (healthy)
+knowloop-meilisearch running (healthy)
 ```
 
 ### Build the MCP server
@@ -134,13 +134,13 @@ See [OpenAI Integration Guide](../integrations/openai.md) for code-based configu
 Ask your AI tool:
 
 ```
-List all projects in the orchestrator
+List all projects in KnowLoop
 ```
 
 Expected response:
 
 ```
-No projects found. The orchestrator is ready to register projects.
+No projects found. KnowLoop is ready to register projects.
 ```
 
 If you get an error, check:

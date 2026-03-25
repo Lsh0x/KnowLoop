@@ -29,7 +29,7 @@ OpenAI Agents SDK supports MCP (Model Context Protocol), allowing your agents to
                               │ MCP Protocol (stdio)
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                PROJECT ORCHESTRATOR MCP                      │
+│                KNOWLOOP MCP                      │
 │                    (knowloop_mcp binary)                       │
 └─────────────────────────────┬───────────────────────────────┘
                               │
@@ -267,8 +267,8 @@ frontend_agent = Agent(
     knowloop_mcps=[mcp]
 )
 
-# Orchestrator Agent
-orchestrator = Agent(
+# KnowLoop Agent
+knowloop_agent = Agent(
     name="tech-lead",
     model="gpt-4o",
     instructions="""You are a tech lead coordinating a team.
@@ -287,7 +287,7 @@ orchestrator = Agent(
 async def run_team():
     runner = Runner()
     await runner.run(
-        agent=orchestrator,
+        agent=knowloop_agent,
         messages=[
             {"role": "user", "content": "Work through the tasks in plan abc-123"}
         ]
@@ -384,7 +384,7 @@ except MCPToolError as e:
 
 ### 4. Use task dependencies
 
-Let the orchestrator handle task ordering:
+Let KnowLoop handle task ordering:
 
 ```python
 # Agent checks blockers before starting

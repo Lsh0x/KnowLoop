@@ -275,7 +275,7 @@ Claude: [Uses task(action: "get_next")]
 If your deployment uses the HTTP API (not just MCP via stdio), you can set up authentication:
 
 ```
-You: Set up Google OAuth for the orchestrator
+You: Set up Google OAuth for KnowLoop
 
 Claude: The KnowLoop HTTP API supports two authentication methods:
 

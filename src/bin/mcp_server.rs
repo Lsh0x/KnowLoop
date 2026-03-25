@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         anyhow!(
             "PO_SERVER_URL environment variable is required.\n\
              The MCP server operates as an HTTP proxy to the REST API.\n\
-             Set PO_SERVER_URL to the orchestrator server URL (e.g. http://127.0.0.1:8080)."
+             Set PO_SERVER_URL to the KnowLoop server URL (e.g. http://127.0.0.1:8080)."
         )
     })?;
 

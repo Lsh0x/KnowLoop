@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 //! KnowLoop
 //!
-//! An AI agent orchestrator with:
+//! An AI agent coordination service with:
 //! - Neo4j knowledge graph for code structure and relationships
 //! - Meilisearch for fast semantic search
 //! - Tree-sitter for precise code parsing
@@ -904,7 +904,7 @@ impl AppState {
 // Server entry point (for embedding in Tauri or other hosts)
 // ============================================================================
 
-/// Start the orchestrator server with the given configuration.
+/// Start the KnowLoop server with the given configuration.
 ///
 /// This is the main entry point for embedding the server in another application
 /// (e.g., Tauri desktop). It initializes all services, creates the Axum router,
@@ -2138,11 +2138,11 @@ server:
 server:
   port: 8080
   serve_frontend: false
-  frontend_path: "/var/www/orchestrator/dist"
+  frontend_path: "/var/www/knowloop/dist"
 "#;
         let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(!config.server.serve_frontend);
-        assert_eq!(config.server.frontend_path, "/var/www/orchestrator/dist");
+        assert_eq!(config.server.frontend_path, "/var/www/knowloop/dist");
     }
 
     #[test]

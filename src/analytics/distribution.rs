@@ -1,4 +1,4 @@
-//! Distribution analysis helpers for Orchestrator graph metrics.
+//! Distribution analysis helpers for KnowLoop graph metrics.
 //!
 //! Wraps `rs_stats` fitting API to produce rich distribution reports from raw
 //! metric slices (PageRank vectors, risk scores, coupling coefficients, etc.).

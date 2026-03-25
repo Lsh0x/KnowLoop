@@ -52,7 +52,7 @@ Each mega-tool uses an **`action` parameter** to select the operation. This cons
 
 ## project
 
-Manage projects (codebases tracked by the orchestrator).
+Manage projects (codebases tracked by KnowLoop).
 
 | Action | Description | Key Parameters |
 |--------|-------------|----------------|

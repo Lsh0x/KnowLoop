@@ -12,10 +12,10 @@ use uuid::Uuid;
 #[command(name = "kl")]
 #[command(about = "CLI for KnowLoop")]
 struct Cli {
-    /// Orchestrator server URL
+    /// KnowLoop server URL
     #[arg(
         long,
-        env = "ORCHESTRATOR_URL",
+        env = "KNOWLOOP_URL",
         default_value = "http://localhost:8080"
     )]
     server: String,

@@ -299,7 +299,7 @@ pub async fn perform_update(info: &UpdateInfo) -> Result<UpdateStatus> {
     })
 }
 
-/// Extract the orchestrator binary from a tar.gz or zip archive.
+/// Extract the knowloop binary from a tar.gz or zip archive.
 fn extract_binary_from_archive(archive_bytes: &[u8]) -> Result<Vec<u8>> {
     #[cfg(not(target_os = "windows"))]
     {

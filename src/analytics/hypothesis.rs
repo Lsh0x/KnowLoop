@@ -1,6 +1,6 @@
-//! Hypothesis testing helpers for Orchestrator statistical analysis.
+//! Hypothesis testing helpers for KnowLoop statistical analysis.
 //!
-//! Wraps `rs_stats` t-test and ANOVA modules with Orchestrator-specific
+//! Wraps `rs_stats` t-test and ANOVA modules with KnowLoop-specific
 //! convenience functions and serde-safe result types.
 //!
 //! ## Use cases

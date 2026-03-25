@@ -19,7 +19,7 @@ Complete setup instructions for KnowLoop.
 | 7474 | Neo4j Browser | HTTP |
 | 7687 | Neo4j Bolt | TCP |
 | 7700 | Meilisearch | HTTP |
-| 8080 | Orchestrator API | HTTP |
+| 8080 | KnowLoop API | HTTP |
 | 4222 | NATS | TCP |
 | 8222 | NATS Monitoring | HTTP |
 
@@ -44,7 +44,7 @@ This starts:
 - **Neo4j** — Graph database for code structure and relationships
 - **Meilisearch** — Search engine for code and decisions
 - **NATS** — Message broker for inter-process event sync (optional, for multi-instance)
-- **Orchestrator** — API server with 22 mega-tools
+- **KnowLoop** — API server with 22 mega-tools
 
 ### Step 3: Verify the installation
 
@@ -60,7 +60,7 @@ curl http://localhost:8080/health
 
 ```bash
 # For local MCP integration, extract the binary from the running container
-docker cp orchestrator-server:/app/knowloop_mcp ./knowloop_mcp
+docker cp knowloop-server:/app/knowloop_mcp ./knowloop_mcp
 chmod +x knowloop_mcp
 
 # Or build from source
@@ -124,7 +124,7 @@ brew install Lsh0x/tap/knowloop
 
 ```bash
 # Download the .deb package from the latest release
-sudo dpkg -i orchestrator_*.deb
+sudo dpkg -i knowloop_*.deb
 sudo systemctl enable --now knowloop
 ```
 
@@ -311,11 +311,11 @@ ghcr.io/Lsh0x/KnowLoop
 - **`:X.Y`** — receives patch updates automatically
 - **`:X`** — receives minor and patch updates
 
-Use `docker-compose.production.yml` with `ORCHESTRATOR_IMAGE_TAG` to set the version:
+Use `docker-compose.production.yml` with `KNOWLOOP_IMAGE_TAG` to set the version:
 
 ```bash
 # Pin to a specific version
-ORCHESTRATOR_IMAGE_TAG=1.0.0 docker compose -f docker-compose.production.yml up -d
+KNOWLOOP_IMAGE_TAG=1.0.0 docker compose -f docker-compose.production.yml up -d
 ```
 
 ---
@@ -365,12 +365,12 @@ nats:
     - nats_data:/data/jetstream
 ```
 
-NATS is optional. It enables cross-instance event synchronization and distributed chat relay. If not running, the orchestrator operates in single-instance mode with local event broadcasting only.
+NATS is optional. It enables cross-instance event synchronization and distributed chat relay. If not running, KnowLoop operates in single-instance mode with local event broadcasting only.
 
-### Orchestrator
+### KnowLoop
 
 ```yaml
-orchestrator:
+knowloop:
   build: .
   ports:
     - "8080:8080"
@@ -383,7 +383,7 @@ orchestrator:
 
 ### Network and Volumes
 
-All three services communicate over a dedicated `orchestrator-net` bridge network.
+All three services communicate over a dedicated `knowloop-net` bridge network.
 Data is persisted in five named Docker volumes:
 
 | Volume | Service | Content |
@@ -391,7 +391,7 @@ Data is persisted in five named Docker volumes:
 | `neo4j_data` | Neo4j | Graph database files |
 | `neo4j_logs` | Neo4j | Server logs |
 | `meilisearch_data` | Meilisearch | Search indexes |
-| `orchestrator_data` | Orchestrator | Application data |
+| `knowloop_data` | KnowLoop | Application data |
 | `nats_data` | NATS | JetStream storage |
 
 To completely reset all data, run `docker compose down -v` (this removes all
@@ -470,7 +470,7 @@ docker compose logs meilisearch
 docker compose restart meilisearch
 ```
 
-### Orchestrator can't connect to Neo4j
+### KnowLoop can't connect to Neo4j
 
 **Error:** `Failed to connect to Neo4j`
 
@@ -481,8 +481,8 @@ docker compose ps neo4j
 # Wait for Neo4j to be ready (can take 30s on first start)
 docker compose logs -f neo4j
 
-# Check connection from orchestrator container
-docker compose exec orchestrator curl -I http://neo4j:7474
+# Check connection from knowloop container
+docker compose exec knowloop curl -I http://neo4j:7474
 ```
 
 ### MCP server not found by Claude Code
@@ -543,7 +543,7 @@ cargo build --release --bin knowloop_mcp
 ### Self-update (installed binary)
 
 ```bash
-orchestrator update
+knowloop update
 ```
 
 This checks GitHub Releases for a newer version, downloads it, verifies the checksum, and replaces the binary atomically.

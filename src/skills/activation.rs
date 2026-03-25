@@ -1527,7 +1527,7 @@ pub async fn auto_anchor_all_notes_to_project(
 }
 
 // ============================================================================
-// Knowledge Link Reconstruction (orchestrator)
+// Knowledge Link Reconstruction (KnowLoop)
 // ============================================================================
 
 /// Report from `reconstruct_knowledge_links` with diagnostic counters.
@@ -4262,7 +4262,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Knowledge link reconstruction (orchestrator) tests
+    // Knowledge link reconstruction (KnowLoop) tests
     // =========================================================================
 
     #[tokio::test]

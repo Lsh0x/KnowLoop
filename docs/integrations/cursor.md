@@ -109,7 +109,7 @@ This configuration will only apply when working in that project.
 Open Cursor Chat (`Cmd+L` / `Ctrl+L`) and ask:
 
 ```
-List all registered projects in the orchestrator
+List all registered projects in KnowLoop
 ```
 
 Cursor should use the `list_projects` tool and return results.

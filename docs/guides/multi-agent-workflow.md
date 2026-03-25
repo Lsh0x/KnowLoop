@@ -20,7 +20,7 @@ KnowLoop provides the shared context that makes this possible.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         PROJECT ORCHESTRATOR                             │
+│                              KNOWLOOP                                    │
 │                        (Shared Knowledge Base)                           │
 │                                                                          │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                   │
@@ -152,7 +152,7 @@ Instructions: You write and run tests.
 ### Sequence Diagram
 
 ```
-Agent 1 (Backend)          Orchestrator          Agent 2 (Frontend)
+Agent 1 (Backend)           KnowLoop             Agent 2 (Frontend)
        │                        │                        │
        │   get_next_task()     │                        │
        │───────────────────────>│                        │

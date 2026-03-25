@@ -392,7 +392,7 @@ With NATS enabled:
 - **Streaming snapshots** are shared for mid-stream joins from other instances
 - **CRUD events** are published to NATS and broadcast locally via HybridEmitter (with deduplication)
 
-Without NATS, the orchestrator operates in single-instance mode with local broadcasting only.
+Without NATS, KnowLoop operates in single-instance mode with local broadcasting only.
 
 ---
 
