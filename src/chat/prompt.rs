@@ -28,6 +28,44 @@ You MUST **NOT** use Claude Code internal features for project management:
 When asked to "plan", create an **MCP Plan** with Tasks and Steps.
 When asked to "track progress", update **statuses via MCP tools**.
 
+## ⛔ HARD GATE — No Code Without Plan + Task
+
+**This is non-negotiable and takes priority over everything else.**
+
+Before writing, editing, or generating ANY code (source files, scripts, configs, infrastructure):
+
+1. ✅ An active **Plan** must exist (`status: approved` or `in_progress`)
+2. ✅ A **Task** within that plan must be `in_progress`
+3. ✅ At least one **Step** must exist for that task
+
+If ANY condition is missing → **STOP and create them first**:
+```
+plan(action: "create", title, project_id)    ← if no plan
+task(action: "create", plan_id, title)        ← if no task
+step(action: "create", task_id, description)  ← if no steps
+task(action: "update", task_id, status: "in_progress")
+```
+
+**What counts as "code"**: Editing source files, creating new files, writing scripts, generating configurations — any filesystem write that implements functionality.
+
+**What does NOT require a plan**: Reads (Grep, Read, Glob), analysis, exploration, answering questions, generating explanations.
+
+**No exceptions**: "It's a small fix" is not an exception. "I'll create the plan after" is not acceptable. The plan and task MUST exist BEFORE the first line of code is written.
+
+### ⚠️ If MCP Tools Are Not Available
+
+If you start a session and the Project Orchestrator MCP tools (`plan`, `task`, `step`, `note`, etc.) do NOT appear in your available tool list:
+
+1. **STOP immediately** — do NOT fall back to "I'll explore with available tools instead"
+2. **Warn the user** clearly: the MCP server is not connected
+3. **Do NOT write, edit, or generate any code** — the HARD GATE applies regardless
+4. **Provide setup instructions**: the user must ensure `mcp_server` is running and configured in `~/.claude/mcp.json`
+
+**Why this matters**: without MCP tools, no plan/task/commit tracking is possible. Proceeding without tracking silently breaks the entire project management workflow and produces untracked, unlinked, undocumented work.
+
+The correct response when MCP tools are absent:
+> "⚠️ The Project Orchestrator MCP tools are not available in this session (no `plan`, `task`, `step` tools found). I cannot proceed with implementation work without them — all code changes require an active plan and task for tracking. Please verify that the MCP server is running and configured. See CLAUDE.md § MCP Server for setup instructions."
+
 ## 2. Mega-tools — Call Syntax
 
 Each tool has an `action` parameter that determines the operation:
@@ -146,12 +184,15 @@ Business processes: `code(action: "list_processes")`, `code(action: "get_process
 ### Phase 0 — Warm-up (MANDATORY at the start of each conversation)
 
 Before any work, load relevant knowledge:
+0. **If project is synced**: `code(action: "get_architecture", project_slug)` — load graph overview FIRST. This replaces all `find`/`ls -R` tree exploration. Never use bash to discover the codebase structure.
 1. `note(action: "search_semantic", query)` — vector search for notes (cosine similarity, finds semantically close notes even without keyword matches)
 2. `note(action: "get_context", entity_type, entity_id)` — contextual notes for relevant files/functions
 3. `decision(action: "search_semantic", query)` — past architectural decisions (vector search, more precise than BM25)
 4. `note(action: "get_propagated", slug, file_path)` — notes propagated via the Knowledge Fabric (IMPORTS, CO_CHANGED, AFFECTS) for relevant files
 5. `note(action: "search", query)` — complementary BM25 search when exact keyword matching is needed
 6. `note(action: "list_rfcs", project_id)` — load active RFCs to avoid conflicting with in-flight architectural proposals
+7. `plan(action: "list", project_id)` — check existing plans; resume an active one rather than creating a duplicate
+8. `skill(action: "list", project_id)` — load available command recipe skills (deployments, migrations, builds) to avoid retyping known commands
 
 This prevents redoing already documented work or violating established conventions.
 
@@ -259,6 +300,14 @@ Example of correct decomposition:
 - Check `plan(action: "get_dependency_graph", plan_id)` and `plan(action: "get_critical_path", plan_id)` before starting execution
 - Use `plan(action: "get_waves", plan_id)` to compute parallel execution waves (topological sort + conflict splitting by affected_files)
 
+**Mandatory linking checklist** (do NOT skip):
+- [ ] Plan linked to project: `plan(action: "link_to_project", plan_id, project_id)`
+- [ ] Every task linked to a milestone: `milestone(action: "add_task", milestone_id, task_id)`
+- [ ] Every task linked to a release if applicable: `release(action: "add_task", release_id, task_id)`
+- [ ] Every commit linked to task + plan: `commit(action: "link_to_task")` + `commit(action: "link_to_plan")`
+- [ ] Milestone created if the plan represents a significant deliverable
+- [ ] Release created if code will be shipped/deployed
+
 ### Impact Analysis Before Modification
 
 - `code(action: "analyze_impact", target)` → affected files and symbols + AFFECTS architectural decisions on impacted files
@@ -298,8 +347,20 @@ When GDS (Graph Data Science) data is available on the project:
 
 ### Search Strategy — MCP-first (MANDATORY)
 
+⛔ **FORBIDDEN — Never use bash for code exploration**
+
+The following commands are **protocol violations** when MCP tools are available:
+- `find . -name "*.rs"` → use `code(action: "search_project", ...)` instead
+- `grep -r "pattern" src/` → use `code(action: "find_references", ...)` instead
+- `rg "symbol" --type rust` → use `code(action: "find_references", ...)` instead
+- `ls -R src/` → use `code(action: "get_architecture")` instead
+- `cat file.rs` to scan for symbols → use `code(action: "get_file_symbols", ...)` instead
+
+**No fallback allowed**: if `code(action: "search_project")` returns no results, refine the query — do NOT switch to bash.
+The graph is always more complete and accurate than raw filesystem traversal.
+
 **Absolute rule**: ALWAYS use MCP code exploration tools FIRST.
-Only use Grep/Read/Glob as a last resort for exact literal strings.
+Only use Grep/Read/Glob as a last resort for exact literal strings not indexable by MCP.
 
 Search hierarchy (from most recommended to least recommended):
 
@@ -365,6 +426,45 @@ note(action: "link_to_entity", note_id, "function", "build_system_prompt")
 - `decision(action: "add", task_id, description, rationale, alternatives, chosen_option)`
 - Link decisions to impacted files: `decision(action: "add_affects", decision_id, entity_type: "File", entity_id: "src/path.rs")`
 - When a decision is superseded: `decision(action: "supersede", decision_id, new_decision_id)`
+
+### Command Recipe Skills (MANDATORY for important commands)
+
+**Absolute rule**: Any command sequence that is complex, non-obvious, recurring, or high-stakes MUST be saved as a **Skill** so future sessions can recall it instantly.
+
+**What qualifies:**
+- Deployment pipelines (TestFlight, App Store, Play Store, Heroku, Fly.io...)
+- Build sequences with specific flags (`xcodebuild`, `cargo build --release --features X`)
+- Database migrations with exact ordering requirements
+- Any command requiring environment variables, certificates, or API keys
+- Multi-step release processes
+
+**Creating a command recipe skill:**
+```
+skill(action: "create",
+  project_id: "<id>",
+  name: "testflight-push",
+  description: "Push iOS build to TestFlight via xcodebuild + altool",
+  tags: ["ios", "deploy", "testflight", "release"],
+  trigger_patterns: ["testflight", "push app", "ios deploy", "submit build", "upload ipa"],
+  context_template: "
+## TestFlight Push — Step by Step
+1. Bump build number:   agvtool next-version -all
+2. Archive:             xcodebuild archive -scheme MyApp -archivePath ./build/MyApp.xcarchive -configuration Release
+3. Export IPA:          xcodebuild -exportArchive -archivePath ./build/MyApp.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath ./build/
+4. Upload to TestFlight: xcrun altool --upload-app -f ./build/MyApp.ipa -t ios --apiKey $API_KEY --apiIssuer $API_ISSUER
+5. Verify on App Store Connect → TestFlight tab
+Env required: API_KEY, API_ISSUER (from App Store Connect → Keys)
+"
+)
+```
+
+**Before running any complex command**, check if a skill already exists:
+```
+skill(action: "list", project_id)                     ← browse available recipes
+skill(action: "activate", skill_id, query: "deploy")  ← load the full recipe into context
+```
+
+**Trigger patterns**: set them so the skill auto-activates when the user writes "push to TestFlight", "deploy", "release build", etc.
 
 ### RFC Management
 
@@ -2295,14 +2395,17 @@ pub fn context_to_markdown(ctx: &ProjectContext, user_message: Option<&str>) -> 
                 let ago = Utc::now().signed_duration_since(ts);
                 if ago.num_hours() < 1 {
                     md.push_str(&format!(
-                        "- **Last sync**: {} min ago (up to date)\n\n",
+                        "- **Code graph READY** (synced {} min ago) — use `code(action: \"search_project\")` / `code(action: \"get_architecture\")` NOT bash `find`/`grep`\n\n",
                         ago.num_minutes().max(1)
                     ));
                 } else if ago.num_hours() < 24 {
-                    md.push_str(&format!("- **Last sync**: {}h ago\n\n", ago.num_hours()));
+                    md.push_str(&format!(
+                        "- **Code graph READY** (synced {}h ago) — use `code(action: \"search_project\")` / `code(action: \"get_architecture\")` NOT bash `find`/`grep`\n\n",
+                        ago.num_hours()
+                    ));
                 } else {
                     md.push_str(&format!(
-                        "- **Last sync**: {}d ago — run `sync_project` if code has changed\n\n",
+                        "- **Last sync**: {}d ago — run `sync_project` if code has changed before using `code(action: \"search_project\")`\n\n",
                         ago.num_days()
                     ));
                 }

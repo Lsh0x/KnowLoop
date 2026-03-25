@@ -681,3 +681,104 @@ Note: Full file content is NOT stored in Meilisearch. Use Neo4j for structural q
 1. Update models in `src/neo4j/models.rs`
 2. Update queries in `src/neo4j/client.rs`
 3. Add migration if needed (manual Cypher)
+
+
+## Project Orchestrator — Mandatory Agent Workflow
+
+**This project is tracked by the Project Orchestrator (MCP).** All work MUST follow this protocol.
+
+---
+
+### ⛔ HARD GATE — No Code Without Plan + Task
+
+**ABSOLUTE RULE — enforced before any filesystem write:**
+
+Before writing, editing, or generating ANY code (source files, scripts, configs):
+1. ✅ An active **Plan** must exist (`status: approved` or `in_progress`)
+2. ✅ A **Task** within that plan must be `in_progress`
+3. ✅ At least one **Step** must exist for that task
+
+If any condition is missing → **create them first, then write code**.
+
+```bash
+# Minimum setup before touching code:
+plan(action: "list")                              # check for existing plan
+plan(action: "create", title, project_id)         # create if none
+task(action: "create", plan_id, title)            # create task
+step(action: "create", task_id, description)      # add steps
+task(action: "update", task_id, status: "in_progress")
+```
+
+"It's a small fix" is NOT an exception. The plan MUST exist BEFORE the first line of code.
+
+---
+
+### Before ANY code change
+
+1. **Check existing plans**: `plan(action: "list")` — resume an active one rather than creating a duplicate
+2. **Load context**: `note(action: "search_semantic", query)` + `decision(action: "search_semantic", query)` — check past knowledge
+3. **Load skills**: `skill(action: "list", project_id)` — check for saved command recipes (deployments, migrations, builds)
+4. **Create or resume a plan**: `plan(action: "create")` with tasks and steps if none exists
+5. **Link to project + milestone**: `plan(action: "link_to_project")` + `milestone(action: "add_task")` if a milestone exists
+6. **Mark task in_progress**: `task(action: "update", task_id, status: "in_progress")`
+
+### During work
+
+7. **Update steps in real-time**: `step(action: "update", step_id, status: "in_progress")` then `"completed"`
+8. **Record decisions**: `decision(action: "add")` for any non-trivial architectural choice
+9. **Capture knowledge**: `note(action: "create")` for every gotcha, pattern, or convention discovered
+
+### After each commit
+
+10. **Register the commit**: `commit(action: "create", sha, message, author, files_changed, project_id)`
+11. **Link to task**: `commit(action: "link_to_task", task_id, commit_sha)`
+12. **Link to plan**: `commit(action: "link_to_plan", plan_id, commit_sha)`
+
+### On task completion
+
+13. **Verify acceptance criteria** before marking completed
+14. **Update task**: `task(action: "update", task_id, status: "completed")`
+15. **Check plan progress**: if all tasks done, mark plan completed
+16. **Update milestone**: if task was in a milestone, check `milestone(action: "get_progress")`
+
+### NEVER
+
+- Write code without an active plan and task (HARD GATE — see above)
+- Commit without linking to a task
+- Mark a task completed without verifying acceptance criteria
+- Skip step status updates
+- Forget to capture knowledge (notes) from debugging sessions
+- Run a complex or high-stakes command without first checking for a saved skill
+
+---
+
+### Saving Important Commands as Skills
+
+Any command that is complex, non-obvious, or high-stakes MUST be saved as a **Skill**.
+
+**Examples of commands that must be saved:**
+- TestFlight / App Store push
+- Build & release pipelines (`xcodebuild`, `cargo build --release`, Docker publish)
+- Database migrations with specific ordering
+- Any multi-step deploy process
+
+**How to save a command recipe:**
+```
+skill(action: "create",
+  project_id: "<id>",
+  name: "testflight-push",
+  description: "Push iOS build to TestFlight",
+  tags: ["ios", "deploy", "testflight"],
+  trigger_patterns: ["testflight", "push app", "ios deploy"],
+  context_template: "
+## TestFlight Push
+1. agvtool next-version -all
+2. xcodebuild archive -scheme MyApp -archivePath ./build/MyApp.xcarchive
+3. xcodebuild -exportArchive -archivePath ./build/MyApp.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath ./build/
+4. xcrun altool --upload-app -f ./build/MyApp.ipa -t ios --apiKey $API_KEY --apiIssuer $API_ISSUER
+Env: API_KEY, API_ISSUER (from App Store Connect → Keys)
+"
+)
+```
+
+**Before running a complex command**: `skill(action: "list", project_id)` → `skill(action: "activate", skill_id, query)`
