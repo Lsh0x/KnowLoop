@@ -622,8 +622,20 @@ When GDS (Graph Data Science) data is available on the project:
 /// §10 — Best Practices: Search Strategy — MCP-first
 pub const SECTION_BP_SEARCH: &str = r#"### Search Strategy — MCP-first (MANDATORY)
 
+⛔ **FORBIDDEN — Never use bash for code exploration**
+
+The following commands are **protocol violations** when MCP tools are available:
+- `find . -name "*.rs"` → use `code(action: "search_project", ...)` instead
+- `grep -r "pattern" src/` → use `code(action: "find_references", ...)` instead
+- `rg "symbol" --type rust` → use `code(action: "find_references", ...)` instead
+- `ls -R src/` → use `code(action: "get_architecture")` instead
+- `cat file.rs` to scan for symbols → use `code(action: "get_file_symbols", ...)` instead
+
+**No fallback allowed**: if `code(action: "search_project")` returns no results, refine the query — do NOT switch to bash.
+The graph is always more complete and accurate than raw filesystem traversal.
+
 **Absolute rule**: ALWAYS use MCP code exploration tools FIRST.
-Only use Grep/Read/Glob as a last resort for exact literal strings.
+Only use Grep/Read/Glob as a last resort for exact literal strings not indexable by MCP.
 
 Search hierarchy (from most recommended to least recommended):
 

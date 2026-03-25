@@ -184,6 +184,7 @@ Business processes: `code(action: "list_processes")`, `code(action: "get_process
 ### Phase 0 — Warm-up (MANDATORY at the start of each conversation)
 
 Before any work, load relevant knowledge:
+0. **If project is synced**: `code(action: "get_architecture", project_slug)` — load graph overview FIRST. This replaces all `find`/`ls -R` tree exploration. Never use bash to discover the codebase structure.
 1. `note(action: "search_semantic", query)` — vector search for notes (cosine similarity, finds semantically close notes even without keyword matches)
 2. `note(action: "get_context", entity_type, entity_id)` — contextual notes for relevant files/functions
 3. `decision(action: "search_semantic", query)` — past architectural decisions (vector search, more precise than BM25)
@@ -346,8 +347,20 @@ When GDS (Graph Data Science) data is available on the project:
 
 ### Search Strategy — MCP-first (MANDATORY)
 
+⛔ **FORBIDDEN — Never use bash for code exploration**
+
+The following commands are **protocol violations** when MCP tools are available:
+- `find . -name "*.rs"` → use `code(action: "search_project", ...)` instead
+- `grep -r "pattern" src/` → use `code(action: "find_references", ...)` instead
+- `rg "symbol" --type rust` → use `code(action: "find_references", ...)` instead
+- `ls -R src/` → use `code(action: "get_architecture")` instead
+- `cat file.rs` to scan for symbols → use `code(action: "get_file_symbols", ...)` instead
+
+**No fallback allowed**: if `code(action: "search_project")` returns no results, refine the query — do NOT switch to bash.
+The graph is always more complete and accurate than raw filesystem traversal.
+
 **Absolute rule**: ALWAYS use MCP code exploration tools FIRST.
-Only use Grep/Read/Glob as a last resort for exact literal strings.
+Only use Grep/Read/Glob as a last resort for exact literal strings not indexable by MCP.
 
 Search hierarchy (from most recommended to least recommended):
 
@@ -2382,14 +2395,17 @@ pub fn context_to_markdown(ctx: &ProjectContext, user_message: Option<&str>) -> 
                 let ago = Utc::now().signed_duration_since(ts);
                 if ago.num_hours() < 1 {
                     md.push_str(&format!(
-                        "- **Last sync**: {} min ago (up to date)\n\n",
+                        "- **Code graph READY** (synced {} min ago) — use `code(action: \"search_project\")` / `code(action: \"get_architecture\")` NOT bash `find`/`grep`\n\n",
                         ago.num_minutes().max(1)
                     ));
                 } else if ago.num_hours() < 24 {
-                    md.push_str(&format!("- **Last sync**: {}h ago\n\n", ago.num_hours()));
+                    md.push_str(&format!(
+                        "- **Code graph READY** (synced {}h ago) — use `code(action: \"search_project\")` / `code(action: \"get_architecture\")` NOT bash `find`/`grep`\n\n",
+                        ago.num_hours()
+                    ));
                 } else {
                     md.push_str(&format!(
-                        "- **Last sync**: {}d ago — run `sync_project` if code has changed\n\n",
+                        "- **Last sync**: {}d ago — run `sync_project` if code has changed before using `code(action: \"search_project\")`\n\n",
                         ago.num_days()
                     ));
                 }
