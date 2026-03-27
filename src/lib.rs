@@ -37,6 +37,7 @@ pub mod reasoning;
 pub mod reception;
 pub mod reflex;
 pub mod resolver;
+pub mod retrospective;
 pub mod runner;
 pub mod setup_claude;
 pub mod sharing;
@@ -1409,8 +1410,9 @@ pub async fn start_server(mut config: Config) -> Result<()> {
     // Runs independently of chat sessions (like ScheduleProvider).
     {
         use heartbeat::checks::{
-            consolidation::ConsolidationCheck, convention_guard::ConventionGuardCheck,
-            git_drift::GitDriftCheck, homeostasis::HomeostasisCheck, maintenance::MaintenanceCheck,
+            cli_health::CliHealthCheck, consolidation::ConsolidationCheck,
+            convention_guard::ConventionGuardCheck, git_drift::GitDriftCheck,
+            homeostasis::HomeostasisCheck, maintenance::MaintenanceCheck,
             staleness::StalenessCheck, synapse_decay::SynapseDecayCheck,
         };
         use heartbeat::engine::HeartbeatEngine;
@@ -1420,7 +1422,7 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         let emitter: Option<Arc<dyn events::EventEmitter>> =
             Some(event_bus.clone() as Arc<dyn events::EventEmitter>);
 
-        let checks: Vec<Box<dyn heartbeat::HeartbeatCheck>> = vec![
+        let mut checks: Vec<Box<dyn heartbeat::HeartbeatCheck>> = vec![
             Box::new(GitDriftCheck),
             Box::new(StalenessCheck),
             Box::new(SynapseDecayCheck),
@@ -1430,11 +1432,17 @@ pub async fn start_server(mut config: Config) -> Result<()> {
             Box::new(HomeostasisCheck::new()),
         ];
 
+        // Add CLI health watchdog if chat manager is available
+        if let Some(ref cm) = chat_manager {
+            checks.push(Box::new(CliHealthCheck::new(cm.active_sessions.clone())));
+        }
+
+        let check_count = checks.len();
         let engine = HeartbeatEngine::new(graph, search, emitter, checks);
         let handle = engine.start_owned();
         // Keep handle alive for the lifetime of the process
         std::mem::forget(handle);
-        tracing::info!("HeartbeatEngine started (7 checks)");
+        tracing::info!("HeartbeatEngine started ({} checks)", check_count);
     }
 
     // Pre-build OIDC client once (avoids fetching discovery document on every request)
