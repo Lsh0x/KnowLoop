@@ -1106,7 +1106,8 @@ mod tests {
         let ctx = CompactionContext::default();
         let ci = ctx.to_custom_instructions(None);
 
-        assert!(ci.is_empty() || ci.len() < 10);
+        // The HARD GATE rule is always appended, so even an empty context produces output
+        assert!(!ci.is_empty());
     }
 
     #[test]

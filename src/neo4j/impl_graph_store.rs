@@ -3985,4 +3985,67 @@ impl GraphStore for Neo4jClient {
     async fn backfill_often_follows(&self) -> anyhow::Result<usize> {
         self.backfill_often_follows().await
     }
+
+    // ── TaskRetrospective ─────────────────────────────────────────────────
+
+    async fn create_task_retrospective(
+        &self,
+        retro: &crate::retrospective::models::TaskRetrospective,
+    ) -> anyhow::Result<()> {
+        self.create_task_retrospective_impl(retro).await
+    }
+
+    async fn get_task_retrospective(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<crate::retrospective::models::TaskRetrospective>> {
+        self.get_task_retrospective_impl(id).await
+    }
+
+    async fn get_retrospective_for_task(
+        &self,
+        task_id: Uuid,
+    ) -> anyhow::Result<Option<crate::retrospective::models::TaskRetrospective>> {
+        self.get_retrospective_for_task_impl(task_id).await
+    }
+
+    async fn list_retrospectives(
+        &self,
+        project_id: Option<Uuid>,
+        outcome: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<crate::retrospective::models::TaskRetrospective>> {
+        self.list_retrospectives_impl(project_id, outcome, limit, offset)
+            .await
+    }
+
+    async fn get_retrospectives_for_cohort(
+        &self,
+        project_id: Uuid,
+        tags: &[String],
+        files: &[String],
+        limit: i64,
+    ) -> anyhow::Result<Vec<crate::retrospective::models::TaskRetrospective>> {
+        self.get_retrospectives_for_cohort_impl(project_id, tags, files, limit)
+            .await
+    }
+
+    async fn get_file_failure_rates(
+        &self,
+        project_id: Uuid,
+        file_paths: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, f64>> {
+        self.get_file_failure_rates_impl(project_id, file_paths)
+            .await
+    }
+
+    async fn link_retrospective_note(
+        &self,
+        retrospective_id: Uuid,
+        note_id: Uuid,
+    ) -> anyhow::Result<()> {
+        self.link_retrospective_note_impl(retrospective_id, note_id)
+            .await
+    }
 }

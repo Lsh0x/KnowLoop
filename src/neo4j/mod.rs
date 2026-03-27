@@ -26,6 +26,7 @@ mod project;
 mod protocol;
 pub(crate) mod reasoning;
 mod registry;
+mod retrospective;
 mod release;
 mod sharing;
 mod skill;

@@ -1670,6 +1670,44 @@ impl PlanRunner {
                                 .await;
                         });
                     }
+
+                    // Fire-and-forget: Task Retrospective (learn from success)
+                    {
+                        let graph = self.graph.clone();
+                        let retro_report = task_report.clone();
+                        let retro_files = retro_report
+                            .as_ref()
+                            .map(|r| r.files_modified.clone())
+                            .unwrap_or_default();
+                        let retro_commits = retro_report
+                            .as_ref()
+                            .map(|r| r.commits.clone())
+                            .unwrap_or_default();
+                        let retro_confidence = retro_report
+                            .as_ref()
+                            .map(|r| r.confidence_score)
+                            .unwrap_or(0.0);
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                crate::retrospective::analyzer::run_retrospective(
+                                    graph,
+                                    task_id,
+                                    project_id,
+                                    task_session_id,
+                                    task_agent_execution_id,
+                                    crate::retrospective::models::RetrospectiveOutcome::Success,
+                                    duration_secs,
+                                    cost_usd,
+                                    retro_confidence,
+                                    retro_files,
+                                    retro_commits,
+                                )
+                                .await
+                            {
+                                warn!("Retrospective failed for task {}: {}", task_id, e);
+                            }
+                        });
+                    }
                 }
                 Ok(TaskResult::Failed {
                     reason,
@@ -1761,6 +1799,38 @@ impl PlanRunner {
                             tokio::spawn(async move {
                                 crate::runner::persona::record_persona_feedback(graph, pids, false)
                                     .await;
+                            });
+                        }
+
+                        // Fire-and-forget: Task Retrospective (learn from failure)
+                        {
+                            let graph = self.graph.clone();
+                            let failure_reason = wave_result
+                                .tasks_failed
+                                .last()
+                                .map(|(_, r)| r.clone())
+                                .unwrap_or_default();
+                            tokio::spawn(async move {
+                                if let Err(e) =
+                                    crate::retrospective::analyzer::run_retrospective(
+                                        graph,
+                                        task_id,
+                                        project_id,
+                                        task_session_id,
+                                        task_agent_execution_id,
+                                        crate::retrospective::models::RetrospectiveOutcome::Failure {
+                                            reason: failure_reason,
+                                        },
+                                        0.0,
+                                        cost_usd,
+                                        0.0,
+                                        vec![],
+                                        vec![],
+                                    )
+                                    .await
+                                {
+                                    warn!("Retrospective failed for task {}: {}", task_id, e);
+                                }
                             });
                         }
                     } // end else (step coherence check)

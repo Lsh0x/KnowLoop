@@ -1740,6 +1740,19 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
             },
         ],
     },
+    // ── Retrospective (Task Learning) ───────────────────────────────
+    ToolGroup {
+        name: "retrospective",
+        description: "Task retrospective learning: analyze completed tasks, cohort comparison, file risk signals, insights",
+        keywords: &[
+            "retrospective", "retro", "learning", "cohort", "failure rate",
+            "insights", "post-mortem", "review", "task analysis",
+        ],
+        tools: &[ToolRef {
+            name: "retrospective",
+            description: "Task retrospective learning (get/get_for_task/list/insights/trigger) — analyze completed tasks for patterns and risk signals",
+        }],
+    },
 ];
 
 /// Total number of unique tools across all groups.
@@ -3038,8 +3051,8 @@ mod tests {
     fn test_tool_groups_cover_all_29_mega_tools() {
         let count = tool_catalog_tool_count();
         assert_eq!(
-            count, 29,
-            "TOOL_GROUPS must cover exactly 29 unique mega-tools (got {}). \
+            count, 30,
+            "TOOL_GROUPS must cover exactly 30 unique mega-tools (got {}). \
              Update the catalog when adding/removing MCP tools.",
             count
         );
@@ -3089,7 +3102,7 @@ mod tests {
 
     #[test]
     fn test_tool_groups_count() {
-        assert_eq!(TOOL_GROUPS.len(), 15, "Expected 15 tool groups");
+        assert_eq!(TOOL_GROUPS.len(), 16, "Expected 16 tool groups");
     }
 
     #[test]

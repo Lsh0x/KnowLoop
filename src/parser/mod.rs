@@ -34,6 +34,7 @@ pub enum SupportedLanguage {
     Scala,
     Zig,
     Hcl,
+    Dart,
 }
 
 impl SupportedLanguage {
@@ -57,6 +58,7 @@ impl SupportedLanguage {
             "scala" | "sc" => Some(Self::Scala),
             "zig" => Some(Self::Zig),
             "tf" | "tfvars" => Some(Self::Hcl),
+            "dart" => Some(Self::Dart),
             _ => None,
         }
     }
@@ -80,6 +82,7 @@ impl SupportedLanguage {
             Self::Scala => tree_sitter_scala::LANGUAGE.into(),
             Self::Zig => tree_sitter_zig::LANGUAGE.into(),
             Self::Hcl => tree_sitter_hcl::LANGUAGE.into(),
+            Self::Dart => tree_sitter_dart::LANGUAGE.into(),
         }
     }
 
@@ -102,6 +105,7 @@ impl SupportedLanguage {
             Self::Scala => "scala",
             Self::Zig => "zig",
             Self::Hcl => "hcl",
+            Self::Dart => "dart",
         }
     }
 
@@ -124,6 +128,7 @@ impl SupportedLanguage {
             Self::Scala,
             Self::Zig,
             Self::Hcl,
+            Self::Dart,
         ]
     }
 }
@@ -239,6 +244,9 @@ impl CodeParser {
             }
             SupportedLanguage::Hcl => {
                 languages::hcl::extract(&root, content, &path_str, &mut parsed)?;
+            }
+            SupportedLanguage::Dart => {
+                languages::dart::extract(&root, content, &path_str, &mut parsed)?;
             }
         }
 

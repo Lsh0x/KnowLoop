@@ -279,14 +279,14 @@ impl ChatConfig {
         // Try relative to current executable
         if let Ok(exe) = std::env::current_exe() {
             let dir = exe.parent().unwrap_or(exe.as_ref());
-            let candidate = dir.join("mcp_server");
+            let candidate = dir.join("knowloop_mcp");
             if candidate.exists() {
                 return candidate;
             }
         }
 
         // Fallback
-        PathBuf::from("mcp_server")
+        PathBuf::from("knowloop_mcp")
     }
 
     /// Build the MCP server config JSON for ClaudeCodeOptions

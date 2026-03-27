@@ -1462,7 +1462,7 @@ impl ToolRefGroupId {
                 "release",
                 "milestone",
             ],
-            Self::Knowledge => &["note", "decision", "commit"],
+            Self::Knowledge => &["note", "decision", "commit", "retrospective"],
             Self::CodeExploration => &["code", "analysis_profile"],
             Self::Structural => &["admin"],
             Self::Behavioral => &["protocol", "skill", "persona", "episode", "lifecycle_hook"],

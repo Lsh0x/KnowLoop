@@ -19,6 +19,7 @@ use super::project_handlers;
 use super::protocol_handlers;
 use super::reason_handlers;
 use super::registry_handlers;
+use super::retrospective_handlers;
 use super::rfc_handlers;
 use super::sharing_handlers;
 use super::skill_handlers;
@@ -1330,6 +1331,25 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/episodes/export-artifact",
             post(episode_handlers::export_artifact),
+        )
+        // ================================================================
+        // Retrospectives (Task Learning)
+        // ================================================================
+        .route(
+            "/api/retrospectives",
+            get(retrospective_handlers::list_retrospectives),
+        )
+        .route(
+            "/api/retrospectives/insights",
+            get(retrospective_handlers::get_insights),
+        )
+        .route(
+            "/api/retrospectives/{id}",
+            get(retrospective_handlers::get_retrospective),
+        )
+        .route(
+            "/api/tasks/{task_id}/retrospective",
+            get(retrospective_handlers::get_task_retrospective),
         )
         // ================================================================
         // Admin — Embedding Backfill
