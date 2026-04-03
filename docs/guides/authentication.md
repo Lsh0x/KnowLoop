@@ -1,15 +1,15 @@
 # Authentication Guide
 
-Multi-provider JWT-based authentication for the Project Orchestrator HTTP API and WebSocket connections. Supports password login, Google OAuth2, and generic OIDC providers (Keycloak, Auth0, Azure AD, Okta, etc.).
+Multi-provider JWT-based authentication for the KnowLoop HTTP API and WebSocket connections. Supports password login, Google OAuth2, and generic OIDC providers (Keycloak, Auth0, Azure AD, Okta, etc.).
 
 **Applies to:** HTTP API server (`api_server` binary)
-**Does not apply to:** MCP server (`mcp_server` binary, runs locally via stdio)
+**Does not apply to:** MCP server (`knowloop_mcp` binary, runs locally via stdio)
 
 ---
 
 ## Overview
 
-Project Orchestrator uses **JWT HS256 tokens** issued after authenticating through one of three supported providers. The security model has two modes:
+KnowLoop uses **JWT HS256 tokens** issued after authenticating through one of three supported providers. The security model has two modes:
 
 - **No-auth mode:** If the `auth` section is absent from `config.yaml`, `auth_config` is `None` and ALL requests pass through freely with anonymous claims. This is useful for local development and single-user setups.
 - **Auth mode:** If the `auth` section is present, JWT authentication is enforced on all protected routes. The specific providers available depend on which sub-sections are configured.
@@ -268,7 +268,7 @@ auth:
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com)
 2. Click **Select a project** at the top, then **New Project**
-3. Enter a project name (e.g., "Project Orchestrator") and click **Create**
+3. Enter a project name (e.g., "KnowLoop") and click **Create**
 
 #### Step 2: Configure the OAuth Consent Screen
 
@@ -329,7 +329,7 @@ Any OpenID Connect-compliant provider can be used. The recommended approach is t
 auth:
   jwt_secret: "$(openssl rand -hex 32)"
   oidc:
-    client_id: "project-orchestrator"
+    client_id: "knowloop"
     client_secret: "your-keycloak-secret"
     redirect_uri: "http://localhost:3000/auth/callback"
     provider_name: "Keycloak"
@@ -702,7 +702,7 @@ This allows the entire API to function without authentication for local developm
 
 ## WebSocket Authentication
 
-WebSocket connections cannot use HTTP `Authorization` headers (browser limitation). Instead, Project Orchestrator uses a **first-message handshake** protocol.
+WebSocket connections cannot use HTTP `Authorization` headers (browser limitation). Instead, KnowLoop uses a **first-message handshake** protocol.
 
 ### Handshake Protocol
 
@@ -820,7 +820,7 @@ The JWT token is validated **once** at connection time. If the token expires dur
 
 ### MCP Server (stdio)
 
-The MCP server binary (`mcp_server`) communicates over **stdin/stdout** and does not use HTTP. Authentication is not needed and not supported for MCP connections. The MCP server is designed to run locally alongside your AI tool (Claude Code, Cursor, etc.).
+The MCP server binary (`knowloop_mcp`) communicates over **stdin/stdout** and does not use HTTP. Authentication is not needed and not supported for MCP connections. The MCP server is designed to run locally alongside your AI tool (Claude Code, Cursor, etc.).
 
 ### HTTP API Server (No-Auth Mode)
 

@@ -1,12 +1,12 @@
 # OpenAI Agents Integration
 
-Guide to integrating Project Orchestrator with OpenAI's Agents SDK.
+Guide to integrating KnowLoop with OpenAI's Agents SDK.
 
 ---
 
 ## Overview
 
-OpenAI Agents SDK supports MCP (Model Context Protocol), allowing your agents to use Project Orchestrator's **22 mega-tools** for code intelligence, plan management, and multi-agent coordination.
+OpenAI Agents SDK supports MCP (Model Context Protocol), allowing your agents to use KnowLoop's **22 mega-tools** for code intelligence, plan management, and multi-agent coordination.
 
 ### What you get
 
@@ -29,8 +29,8 @@ OpenAI Agents SDK supports MCP (Model Context Protocol), allowing your agents to
                               │ MCP Protocol (stdio)
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                PROJECT ORCHESTRATOR MCP                      │
-│                    (mcp_server binary)                       │
+│                KNOWLOOP MCP                      │
+│                    (knowloop_mcp binary)                       │
 └─────────────────────────────┬───────────────────────────────┘
                               │
         ┌─────────────────────┼─────────────────────┐
@@ -69,9 +69,9 @@ npm install @openai/agents
 from openai_agents import Agent, MCPServer
 
 # Configure MCP server
-mcp_server = MCPServer(
-    name="project-orchestrator",
-    command="/path/to/mcp_server",
+knowloop_mcp = MCPServer(
+    name="knowloop",
+    command="/path/to/knowloop_mcp",
     env={
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -85,7 +85,7 @@ mcp_server = MCPServer(
 agent = Agent(
     name="coding-assistant",
     model="gpt-4o",
-    mcp_servers=[mcp_server]
+    knowloop_mcps=[knowloop_mcp]
 )
 ```
 
@@ -96,8 +96,8 @@ import { Agent, MCPServer } from '@openai/agents';
 
 // Configure MCP server
 const mcpServer = new MCPServer({
-  name: 'project-orchestrator',
-  command: '/path/to/mcp_server',
+  name: 'knowloop',
+  command: '/path/to/knowloop_mcp',
   env: {
     NEO4J_URI: 'bolt://localhost:7687',
     NEO4J_USER: 'neo4j',
@@ -126,8 +126,8 @@ from openai_agents import Agent, MCPServer, Runner
 
 # Setup MCP
 mcp = MCPServer(
-    name="project-orchestrator",
-    command="/path/to/mcp_server",
+    name="knowloop",
+    command="/path/to/knowloop_mcp",
     env={
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -149,7 +149,7 @@ coding_agent = Agent(
     - Analyze impact before making changes
 
     Always sync the project before exploring code.""",
-    mcp_servers=[mcp]
+    knowloop_mcps=[mcp]
 )
 
 # Run the agent
@@ -179,8 +179,8 @@ import { Agent, MCPServer, Runner } from '@openai/agents';
 async function main() {
   // Setup MCP
   const mcp = new MCPServer({
-    name: 'project-orchestrator',
-    command: '/path/to/mcp_server',
+    name: 'knowloop',
+    command: '/path/to/knowloop_mcp',
     env: {
       NEO4J_URI: 'bolt://localhost:7687',
       NEO4J_USER: 'neo4j',
@@ -231,8 +231,8 @@ from openai_agents import Agent, MCPServer, Runner, Handoff
 
 # Shared MCP server
 mcp = MCPServer(
-    name="project-orchestrator",
-    command="/path/to/mcp_server",
+    name="knowloop",
+    command="/path/to/knowloop_mcp",
     env={...}
 )
 
@@ -249,7 +249,7 @@ backend_agent = Agent(
     4. Implement the feature
     5. Record decisions using add_decision
     6. Mark task as completed when done""",
-    mcp_servers=[mcp]
+    knowloop_mcps=[mcp]
 )
 
 # Frontend Developer Agent
@@ -264,11 +264,11 @@ frontend_agent = Agent(
     3. If unblocked, mark as in_progress
     4. Implement the UI
     5. Mark task as completed""",
-    mcp_servers=[mcp]
+    knowloop_mcps=[mcp]
 )
 
-# Orchestrator Agent
-orchestrator = Agent(
+# KnowLoop Agent
+knowloop_agent = Agent(
     name="tech-lead",
     model="gpt-4o",
     instructions="""You are a tech lead coordinating a team.
@@ -276,7 +276,7 @@ orchestrator = Agent(
     Use get_next_task to find available work.
     Delegate to backend-developer or frontend-developer based on task tags.
     Monitor progress using list_tasks.""",
-    mcp_servers=[mcp],
+    knowloop_mcps=[mcp],
     handoffs=[
         Handoff(target=backend_agent, filter=lambda m: "backend" in m.lower()),
         Handoff(target=frontend_agent, filter=lambda m: "frontend" in m.lower()),
@@ -287,7 +287,7 @@ orchestrator = Agent(
 async def run_team():
     runner = Runner()
     await runner.run(
-        agent=orchestrator,
+        agent=knowloop_agent,
         messages=[
             {"role": "user", "content": "Work through the tasks in plan abc-123"}
         ]
@@ -298,7 +298,7 @@ async def run_team():
 
 ## Available Mega-Tools
 
-All 22 Project Orchestrator mega-tools are available. See [MCP Tools Reference](../api/mcp-tools.md) for the complete list.
+All 22 KnowLoop mega-tools are available. See [MCP Tools Reference](../api/mcp-tools.md) for the complete list.
 
 Key mega-tools for OpenAI agents:
 
@@ -314,7 +314,7 @@ Key mega-tools for OpenAI agents:
 
 ### Authentication Considerations
 
-The MCP server runs via **stdio** as a child process of your agent, so it does not require authentication itself. However, if your agents also interact with the Project Orchestrator **HTTP REST API** (e.g., for webhooks, dashboard access, or WebSocket chat), you will need to handle authentication:
+The MCP server runs via **stdio** as a child process of your agent, so it does not require authentication itself. However, if your agents also interact with the KnowLoop **HTTP REST API** (e.g., for webhooks, dashboard access, or WebSocket chat), you will need to handle authentication:
 
 - **API Keys** — Best for programmatic access from agents. Pass the key as a Bearer token in the `Authorization` header.
 - **Google OAuth** — Best for browser-based dashboard access, not typically used by agents directly.
@@ -349,13 +349,13 @@ Create one MCP server instance and share it:
 
 ```python
 # Good: Shared MCP server
-mcp = MCPServer(name="orchestrator", ...)
-agent1 = Agent(mcp_servers=[mcp])
-agent2 = Agent(mcp_servers=[mcp])
+mcp = MCPServer(name="knowloop", ...)
+agent1 = Agent(knowloop_mcps=[mcp])
+agent2 = Agent(knowloop_mcps=[mcp])
 
 # Bad: Duplicate servers (resource waste)
-mcp1 = MCPServer(name="orchestrator", ...)
-mcp2 = MCPServer(name="orchestrator", ...)
+mcp1 = MCPServer(name="knowloop", ...)
+mcp2 = MCPServer(name="knowloop", ...)
 ```
 
 ### 2. Add tool usage to instructions
@@ -384,7 +384,7 @@ except MCPToolError as e:
 
 ### 4. Use task dependencies
 
-Let the orchestrator handle task ordering:
+Let KnowLoop handle task ordering:
 
 ```python
 # Agent checks blockers before starting
@@ -401,9 +401,9 @@ instructions="""Before starting a task:
 ### MCP server not found
 
 ```python
-# Error: FileNotFoundError: mcp_server
+# Error: FileNotFoundError: knowloop_mcp
 # Fix: Use absolute path
-mcp = MCPServer(command="/absolute/path/to/mcp_server")
+mcp = MCPServer(command="/absolute/path/to/knowloop_mcp")
 ```
 
 ### Connection refused
@@ -419,7 +419,7 @@ docker compose up -d neo4j meilisearch
 ```python
 # Increase timeout for long operations
 mcp = MCPServer(
-    command="/path/to/mcp_server",
+    command="/path/to/knowloop_mcp",
     timeout=60  # seconds
 )
 ```
@@ -428,7 +428,7 @@ mcp = MCPServer(
 
 ```python
 mcp = MCPServer(
-    command="/path/to/mcp_server",
+    command="/path/to/knowloop_mcp",
     env={
         "RUST_LOG": "debug",
         ...

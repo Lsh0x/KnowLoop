@@ -6,7 +6,7 @@ Real-time chat with Claude and live CRUD notifications via WebSocket connections
 
 ## Overview
 
-Project Orchestrator provides two WebSocket endpoints for real-time communication:
+KnowLoop provides two WebSocket endpoints for real-time communication:
 
 1. **Chat WebSocket** (`/ws/chat/{session_id}`) -- Bidirectional chat with Claude, replacing the previous SSE-based streaming approach with a single WebSocket connection per client per session.
 2. **CRUD Events WebSocket** (`/ws/events`) -- Real-time notifications for all create, update, delete, link, and unlink operations across the system.
@@ -392,7 +392,7 @@ With NATS enabled:
 - **Streaming snapshots** are shared for mid-stream joins from other instances
 - **CRUD events** are published to NATS and broadcast locally via HybridEmitter (with deduplication)
 
-Without NATS, the orchestrator operates in single-instance mode with local broadcasting only.
+Without NATS, KnowLoop operates in single-instance mode with local broadcasting only.
 
 ---
 

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidelines for AI agents working with Project Orchestrator.
+Guidelines for AI agents working with KnowLoop.
 
 > **Detailed guides available:**
 > - [Getting Started Tutorial](docs/guides/getting-started.md)

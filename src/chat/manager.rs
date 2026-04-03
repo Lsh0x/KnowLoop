@@ -2034,7 +2034,7 @@ impl ChatManager {
             .include_partial_messages(true)
             .permission_prompt_tool_name("stdio")
             .cli_channel_buffer_size(8192)
-            .add_mcp_server("project-orchestrator", mcp_config);
+            .add_mcp_server("knowloop", mcp_config);
 
         // Wire allowed/disallowed tool patterns from config
         if !perm_config.allowed_tools.is_empty() {
@@ -5510,7 +5510,7 @@ mod tests {
             )
             .await;
         assert!(matches!(opts.permission_mode, PermissionMode::Default));
-        assert_eq!(opts.allowed_tools, vec!["mcp__project-orchestrator__*"]);
+        assert_eq!(opts.allowed_tools, vec!["mcp__knowloop__*"]);
         assert!(opts.disallowed_tools.is_empty());
     }
 
@@ -5589,7 +5589,7 @@ mod tests {
         let config = manager.get_permission_config().await;
         assert_eq!(config.mode, "default");
         // MCP tools are pre-approved by default
-        assert_eq!(config.allowed_tools, vec!["mcp__project-orchestrator__*"]);
+        assert_eq!(config.allowed_tools, vec!["mcp__knowloop__*"]);
         assert!(config.disallowed_tools.is_empty());
     }
 
@@ -5687,8 +5687,8 @@ mod tests {
         let (prompt, note_ids) = manager
             .build_system_prompt(None, "test", None, None, None)
             .await;
-        assert!(prompt.contains("Project Orchestrator"));
-        assert!(prompt.contains("EXCLUSIVELY the Project Orchestrator MCP tools"));
+        assert!(prompt.contains("KnowLoop"));
+        assert!(prompt.contains("EXCLUSIVELY the KnowLoop MCP tools"));
         assert!(!prompt.contains("Active Project"));
         assert!(note_ids.is_empty(), "No project → no included note IDs");
     }
@@ -5705,7 +5705,7 @@ mod tests {
             .await;
 
         // Contains the base prompt
-        assert!(prompt.contains("EXCLUSIVELY the Project Orchestrator MCP tools"));
+        assert!(prompt.contains("EXCLUSIVELY the KnowLoop MCP tools"));
         // Contains dynamic context section (either oneshot or fallback)
         assert!(prompt.contains("---"));
         // The project name should appear somewhere in the dynamic context
@@ -5745,7 +5745,7 @@ mod tests {
         assert_eq!(options.model, Some("claude-opus-4-6".into()));
         assert_eq!(options.cwd, Some(PathBuf::from("/tmp/project")));
         assert!(options.resume.is_none());
-        assert!(options.mcp_servers.contains_key("project-orchestrator"));
+        assert!(options.mcp_servers.contains_key("knowloop"));
     }
 
     #[tokio::test]
@@ -5779,7 +5779,7 @@ mod tests {
             .build_options("/tmp", "model", "prompt", None, None, None, &[], None)
             .await;
 
-        let mcp = options.mcp_servers.get("project-orchestrator").unwrap();
+        let mcp = options.mcp_servers.get("knowloop").unwrap();
         match mcp {
             McpServerConfig::Stdio { command, env, .. } => {
                 assert_eq!(command, "/usr/bin/mcp_server");
@@ -6494,7 +6494,7 @@ mod tests {
             .await;
 
         // Base prompt present
-        assert!(prompt.contains("EXCLUSIVELY the Project Orchestrator MCP tools"));
+        assert!(prompt.contains("EXCLUSIVELY the KnowLoop MCP tools"));
         // Dynamic context section present (either oneshot or fallback)
         assert!(prompt.contains("---"));
         // Project name should appear in the dynamic context
@@ -8005,7 +8005,7 @@ mod tests {
         // Persist permissions
         let perm = super::super::config::PermissionConfig {
             mode: "plan".into(),
-            allowed_tools: vec!["mcp__project-orchestrator__*".into()],
+            allowed_tools: vec!["mcp__knowloop__*".into()],
             disallowed_tools: vec![],
         };
         ChatManager::persist_permission_to_yaml(&yaml_path, &perm).unwrap();
@@ -8021,10 +8021,7 @@ mod tests {
             .chat_permissions
             .expect("chat_permissions should be Some");
         assert_eq!(loaded_perm.mode, "plan");
-        assert_eq!(
-            loaded_perm.allowed_tools,
-            vec!["mcp__project-orchestrator__*"]
-        );
+        assert_eq!(loaded_perm.allowed_tools, vec!["mcp__knowloop__*"]);
         assert!(loaded_perm.disallowed_tools.is_empty());
 
         // config_yaml_path should be set

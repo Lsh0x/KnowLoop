@@ -1,7 +1,7 @@
 # Protocols — Building a Safe, Self-Aware Setup
 
 How to use the Protocol FSM engine to build repeatable workflows that leverage
-the full power of Project Orchestrator: health checks, impact analysis,
+the full power of KnowLoop: health checks, impact analysis,
 knowledge fabric, risk assessment, and neural maintenance.
 
 **Time:** ~30 minutes to set up a production-ready protocol suite

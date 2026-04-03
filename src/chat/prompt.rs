@@ -6,8 +6,8 @@
 //!    to build a tailored contextual section (<500 words). Programmatic fallback if oneshot fails.
 
 /// Base system prompt — hardcoded protocols, data model, git workflow, statuses, best practices.
-/// MCP-first directive: the agent uses EXCLUSIVELY the Project Orchestrator MCP tools.
-pub const BASE_SYSTEM_PROMPT: &str = r#"# Development Agent — Project Orchestrator
+/// MCP-first directive: the agent uses EXCLUSIVELY the KnowLoop MCP tools.
+pub const BASE_SYSTEM_PROMPT: &str = r#"# Development Agent — KnowLoop
 
 **Language directive:** This prompt is in English for consistency and maintainability.
 Always respond in the user's language (detected from their messages).
@@ -15,11 +15,11 @@ All MCP tool interactions, code, and technical identifiers remain in English reg
 
 ## 1. Identity & Role
 
-You are an autonomous development agent integrated with the **Project Orchestrator**.
+You are an autonomous development agent integrated with the **KnowLoop**.
 You have **28 MCP mega-tools** covering the full project lifecycle: planning, execution, tracking, code exploration, knowledge management, neural skills, reasoning, behavioral patterns, living personas, episodic memory, sharing.
 
 **IMPORTANT — MCP-first Directive:**
-You use **EXCLUSIVELY the Project Orchestrator MCP tools** to organize your work.
+You use **EXCLUSIVELY the KnowLoop MCP tools** to organize your work.
 You MUST **NOT** use Claude Code internal features for project management:
 - ❌ Plan mode (EnterPlanMode / ExitPlanMode) — use `plan(action: "create")`, `task(action: "create")`, `step(action: "create")`
 - ❌ TodoWrite — use `task(action: "update")`, `step(action: "update")` to track progress
@@ -54,7 +54,7 @@ task(action: "update", task_id, status: "in_progress")
 
 ### ⚠️ If MCP Tools Are Not Available
 
-If you start a session and the Project Orchestrator MCP tools (`plan`, `task`, `step`, `note`, etc.) do NOT appear in your available tool list:
+If you start a session and the KnowLoop MCP tools (`plan`, `task`, `step`, `note`, etc.) do NOT appear in your available tool list:
 
 1. **STOP immediately** — do NOT fall back to "I'll explore with available tools instead"
 2. **Warn the user** clearly: the MCP server is not connected
@@ -64,7 +64,7 @@ If you start a session and the Project Orchestrator MCP tools (`plan`, `task`, `
 **Why this matters**: without MCP tools, no plan/task/commit tracking is possible. Proceeding without tracking silently breaks the entire project management workflow and produces untracked, unlinked, undocumented work.
 
 The correct response when MCP tools are absent:
-> "⚠️ The Project Orchestrator MCP tools are not available in this session (no `plan`, `task`, `step` tools found). I cannot proceed with implementation work without them — all code changes require an active plan and task for tracking. Please verify that the MCP server is running and configured. See CLAUDE.md § MCP Server for setup instructions."
+> "⚠️ The KnowLoop MCP tools are not available in this session (no `plan`, `task`, `step` tools found). I cannot proceed with implementation work without them — all code changes require an active plan and task for tracking. Please verify that the MCP server is running and configured. See CLAUDE.md § MCP Server for setup instructions."
 
 ## 2. Mega-tools — Call Syntax
 
@@ -1740,6 +1740,19 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
             },
         ],
     },
+    // ── Retrospective (Task Learning) ───────────────────────────────
+    ToolGroup {
+        name: "retrospective",
+        description: "Task retrospective learning: analyze completed tasks, cohort comparison, file risk signals, insights",
+        keywords: &[
+            "retrospective", "retro", "learning", "cohort", "failure rate",
+            "insights", "post-mortem", "review", "task analysis",
+        ],
+        tools: &[ToolRef {
+            name: "retrospective",
+            description: "Task retrospective learning (get/get_for_task/list/insights/trigger) — analyze completed tasks for patterns and risk signals",
+        }],
+    },
 ];
 
 /// Total number of unique tools across all groups.
@@ -2634,7 +2647,7 @@ mod tests {
 
     #[test]
     fn test_base_system_prompt_contains_key_sections() {
-        assert!(BASE_SYSTEM_PROMPT.contains("EXCLUSIVELY the Project Orchestrator MCP tools"));
+        assert!(BASE_SYSTEM_PROMPT.contains("EXCLUSIVELY the KnowLoop MCP tools"));
         assert!(BASE_SYSTEM_PROMPT.contains("Data Model"));
         assert!(BASE_SYSTEM_PROMPT.contains("Tree-sitter"));
         assert!(BASE_SYSTEM_PROMPT.contains("Git Workflow"));
@@ -3038,8 +3051,8 @@ mod tests {
     fn test_tool_groups_cover_all_29_mega_tools() {
         let count = tool_catalog_tool_count();
         assert_eq!(
-            count, 29,
-            "TOOL_GROUPS must cover exactly 29 unique mega-tools (got {}). \
+            count, 30,
+            "TOOL_GROUPS must cover exactly 30 unique mega-tools (got {}). \
              Update the catalog when adding/removing MCP tools.",
             count
         );
@@ -3089,7 +3102,7 @@ mod tests {
 
     #[test]
     fn test_tool_groups_count() {
-        assert_eq!(TOOL_GROUPS.len(), 15, "Expected 15 tool groups");
+        assert_eq!(TOOL_GROUPS.len(), 16, "Expected 16 tool groups");
     }
 
     #[test]
@@ -3735,7 +3748,7 @@ mod tests {
         let prompt = assemble_prompt(BASE_SYSTEM_PROMPT, &dynamic);
 
         // Base should be present
-        assert!(prompt.contains("EXCLUSIVELY the Project Orchestrator MCP tools"));
+        assert!(prompt.contains("EXCLUSIVELY the KnowLoop MCP tools"));
 
         // Dynamic sections should be present
         assert!(prompt.contains("Always use Arc<dyn GraphStore>"));

@@ -1,6 +1,6 @@
-# Contributing to Project Orchestrator
+# Contributing to KnowLoop
 
-Thank you for your interest in contributing to Project Orchestrator! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to KnowLoop! This document provides guidelines and instructions for contributing.
 
 ## Getting Started
 
@@ -14,8 +14,8 @@ Thank you for your interest in contributing to Project Orchestrator! This docume
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/this-rs/project-orchestrator.git
-   cd project-orchestrator
+   git clone https://github.com/Lsh0x/KnowLoop.git
+   cd knowloop
    ```
 
 2. **Start the backend services**

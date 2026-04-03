@@ -254,13 +254,33 @@ pub fn detect_observations(response_text: &str) -> Option<DetectedObservation> {
     })
 }
 
+/// Snap a byte index to the nearest valid UTF-8 char boundary (searching backwards).
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    let index = index.min(s.len());
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Snap a byte index to the nearest valid UTF-8 char boundary (searching forwards).
+fn ceil_char_boundary(s: &str, index: usize) -> usize {
+    let index = index.min(s.len());
+    let mut i = index;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 /// Extract context around a match position, expanding to sentence boundaries.
 fn extract_context(text: &str, start: usize, end: usize, max_len: usize) -> String {
     let half = max_len / 2;
 
-    // Expand backwards to sentence boundary
+    // Expand backwards to sentence boundary (snap to char boundaries for UTF-8 safety)
     let ctx_start = if start > half {
-        let search_from = start - half;
+        let search_from = floor_char_boundary(text, start - half);
         text[search_from..start]
             .rfind(|c: char| ['.', '\n'].contains(&c))
             .map(|pos| search_from + pos + 1)
@@ -269,9 +289,9 @@ fn extract_context(text: &str, start: usize, end: usize, max_len: usize) -> Stri
         0
     };
 
-    // Expand forwards to sentence boundary
+    // Expand forwards to sentence boundary (snap to char boundaries for UTF-8 safety)
     let ctx_end = {
-        let search_to = (end + half).min(text.len());
+        let search_to = ceil_char_boundary(text, (end + half).min(text.len()));
         text[end..search_to]
             .find(|c: char| ['.', '\n'].contains(&c))
             .map(|pos| end + pos + 1)

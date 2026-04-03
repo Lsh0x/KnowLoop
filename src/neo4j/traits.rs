@@ -3339,4 +3339,52 @@ pub trait GraphStore: Send + Sync {
 
     /// Backfill OFTEN_FOLLOWS relations from consecutive tool use events
     async fn backfill_often_follows(&self) -> Result<usize>;
+
+    // ── TaskRetrospective ─────────────────────────────────────────────────
+
+    /// Create a TaskRetrospective node linked to a Task and optionally an AgentExecution.
+    async fn create_task_retrospective(
+        &self,
+        retro: &crate::retrospective::models::TaskRetrospective,
+    ) -> Result<()>;
+
+    /// Get a TaskRetrospective by ID.
+    async fn get_task_retrospective(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<crate::retrospective::models::TaskRetrospective>>;
+
+    /// Get the most recent retrospective for a specific task.
+    async fn get_retrospective_for_task(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<crate::retrospective::models::TaskRetrospective>>;
+
+    /// List retrospectives with optional project and outcome filters.
+    async fn list_retrospectives(
+        &self,
+        project_id: Option<Uuid>,
+        outcome: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::retrospective::models::TaskRetrospective>>;
+
+    /// Get retrospectives for a cohort: same project, overlapping tags/files.
+    async fn get_retrospectives_for_cohort(
+        &self,
+        project_id: Uuid,
+        tags: &[String],
+        files: &[String],
+        limit: i64,
+    ) -> Result<Vec<crate::retrospective::models::TaskRetrospective>>;
+
+    /// Get failure rates for files based on historical retrospectives.
+    async fn get_file_failure_rates(
+        &self,
+        project_id: Uuid,
+        file_paths: &[String],
+    ) -> Result<std::collections::HashMap<String, f64>>;
+
+    /// Link a generated note to a retrospective via GENERATED_NOTE relationship.
+    async fn link_retrospective_note(&self, retrospective_id: Uuid, note_id: Uuid) -> Result<()>;
 }

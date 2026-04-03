@@ -16,8 +16,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  BINARY_NAME: orchestrator
-  FRONTEND_REPO: this-rs/project-orchestrator-frontend
+  BINARY_NAME: knowloop
+  FRONTEND_REPO: Lsh0x/KnowLoop-frontend
   # Resolve the release tag: use the workflow_dispatch input if provided, otherwise GITHUB_REF_NAME (from tag push)
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
@@ -224,7 +224,7 @@ jobs:
         run: |
           ARCHIVE_NAME="${BINARY_NAME}-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}"
           mkdir -p "staging/${ARCHIVE_NAME}"
-          for bin in orchestrator orch mcp_server; do
+          for bin in knowloop kl knowloop_mcp; do
             cp "target/${{ matrix.target }}/release/${bin}" "staging/${ARCHIVE_NAME}/"
           done
           if [ -d "queries" ]; then
@@ -235,7 +235,7 @@ jobs:
           if [ -n "${ORT_LIB_LOCATION:-}" ]; then
             echo "Bundling ONNX Runtime dylib from $ORT_LIB_LOCATION"
             cp -a "${ORT_LIB_LOCATION}"/libonnxruntime* "staging/${ARCHIVE_NAME}/"
-            for bin in orchestrator orch mcp_server; do
+            for bin in knowloop kl knowloop_mcp; do
               # macOS: @executable_path rpath (dylib next to binary + Homebrew layout)
               install_name_tool -add_rpath @executable_path "staging/${ARCHIVE_NAME}/${bin}" 2>/dev/null || true
               install_name_tool -add_rpath @executable_path/../lib "staging/${ARCHIVE_NAME}/${bin}" 2>/dev/null || true
@@ -254,7 +254,7 @@ jobs:
           $version = "${{ steps.version.outputs.version }}"
           $archiveName = "${env:BINARY_NAME}-${version}-windows-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force -Path "staging/${archiveName}"
-          foreach ($bin in @("orchestrator", "orch", "mcp_server")) {
+          foreach ($bin in @("knowloop", "kl", "knowloop_mcp")) {
             Copy-Item "target/${{ matrix.target }}/release/${bin}.exe" "staging/${archiveName}/"
           }
           if (Test-Path "queries") {
@@ -294,7 +294,7 @@ jobs:
         run: |
           ARCHIVE_NAME="${BINARY_NAME}-full-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}"
           mkdir -p "staging/${ARCHIVE_NAME}"
-          for bin in orchestrator orch mcp_server; do
+          for bin in knowloop kl knowloop_mcp; do
             cp "target/${{ matrix.target }}/release/${bin}" "staging/${ARCHIVE_NAME}/"
           done
           if [ -d "queries" ]; then
@@ -304,7 +304,7 @@ jobs:
           if [ -n "${ORT_LIB_LOCATION:-}" ]; then
             echo "Bundling ONNX Runtime dylib from $ORT_LIB_LOCATION"
             cp -a "${ORT_LIB_LOCATION}"/libonnxruntime* "staging/${ARCHIVE_NAME}/"
-            for bin in orchestrator orch mcp_server; do
+            for bin in knowloop kl knowloop_mcp; do
               # macOS: @executable_path rpath
               install_name_tool -add_rpath @executable_path "staging/${ARCHIVE_NAME}/${bin}" 2>/dev/null || true
               install_name_tool -add_rpath @executable_path/../lib "staging/${ARCHIVE_NAME}/${bin}" 2>/dev/null || true
@@ -323,7 +323,7 @@ jobs:
           $version = "${{ steps.version.outputs.version }}"
           $archiveName = "${env:BINARY_NAME}-full-${version}-windows-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force -Path "staging/${archiveName}"
-          foreach ($bin in @("orchestrator", "orch", "mcp_server")) {
+          foreach ($bin in @("knowloop", "kl", "knowloop_mcp")) {
             Copy-Item "target/${{ matrix.target }}/release/${bin}.exe" "staging/${archiveName}/"
           }
           if (Test-Path "queries") {
@@ -395,7 +395,7 @@ jobs:
           tar xzf "artifact/${ARCHIVE_NAME}.tar.gz" -C artifact/
           # cargo-deb --target expects binaries in target/<triple>/release/
           mkdir -p "target/${{ matrix.target }}/release"
-          for bin in orchestrator orch mcp_server; do
+          for bin in knowloop kl knowloop_mcp; do
             cp "artifact/${ARCHIVE_NAME}/${bin}" "target/${{ matrix.target }}/release/${bin}"
           done
           chmod +x target/${{ matrix.target }}/release/*
@@ -480,7 +480,7 @@ jobs:
           tar xzf "artifact/${ARCHIVE_NAME}.tar.gz" -C artifact/
           # cargo-generate-rpm --target expects binaries in target/<triple>/release/
           mkdir -p "target/${{ matrix.target }}/release"
-          for bin in orchestrator orch mcp_server; do
+          for bin in knowloop kl knowloop_mcp; do
             cp "artifact/${ARCHIVE_NAME}/${bin}" "target/${{ matrix.target }}/release/${bin}"
           done
           chmod +x target/${{ matrix.target }}/release/*
@@ -662,10 +662,10 @@ jobs:
           ARCHIVE_NAME="${BINARY_NAME}-${{ steps.version.outputs.version }}-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}"
           tar xzf "mcp-artifact/${ARCHIVE_NAME}.tar.gz" -C mcp-artifact/
           mkdir -p target/release
-          cp "mcp-artifact/${ARCHIVE_NAME}/mcp_server" target/release/mcp_server
-          chmod +x target/release/mcp_server
+          cp "mcp-artifact/${ARCHIVE_NAME}/mcp_server" target/release/knowloop_mcp
+          chmod +x target/release/knowloop_mcp
           echo "✅ mcp_server extracted to target/release/"
-          ls -la target/release/mcp_server
+          ls -la target/release/knowloop_mcp
 
       - name: Extract mcp_server to target/release (Windows)
         if: runner.os == 'Windows'
@@ -675,9 +675,9 @@ jobs:
           $archiveName = "${env:BINARY_NAME}-${version}-windows-${{ matrix.artifact_arch }}"
           Expand-Archive -Path "mcp-artifact/${archiveName}.zip" -DestinationPath "mcp-artifact/"
           New-Item -ItemType Directory -Force -Path "target/release"
-          Copy-Item "mcp-artifact/${archiveName}/mcp_server.exe" "target/release/mcp_server.exe"
+          Copy-Item "mcp-artifact/${archiveName}/mcp_server.exe" "target/release/knowloop_mcp.exe"
           # Tauri resource path expects "mcp_server" without .exe extension
-          Copy-Item "target/release/mcp_server.exe" "target/release/mcp_server"
+          Copy-Item "target/release/knowloop_mcp.exe" "target/release/knowloop_mcp"
           Write-Host "✅ mcp_server extracted to target/release/"
 
       # --- Windows: Bundle ALL MSVC Runtime DLLs + VC++ Redistributable ---
@@ -854,7 +854,7 @@ jobs:
           # Add rpath so all executables find the dylib in ../Frameworks/
           # NOTE: The .app folder uses productName ("Project Orchestrator") but the
           # binary inside Contents/MacOS/ uses the Cargo package name
-          # ("project-orchestrator-desktop"). We must iterate over actual files.
+          # ("knowloop-desktop"). We must iterate over actual files.
           echo "Adding @executable_path/../Frameworks rpath to all executables..."
           for binary in "$APP_PATH/Contents/MacOS/"*; do
             if [ -f "$binary" ] && [ -x "$binary" ]; then
@@ -1228,14 +1228,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-          pattern: orchestrator-*
+          pattern: knowloop-*
 
       - name: Download release artifacts (deb/rpm)
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           path: artifacts/
-          pattern: project-orchestrator*
+          pattern: knowloop*
 
       - name: Download release artifacts (tauri)
         uses: actions/download-artifact@v4
@@ -1479,7 +1479,7 @@ jobs:
         if: matrix.variant == 'full'
         run: |
           gh api --method PUT \
-            /orgs/${{ github.repository_owner }}/packages/container/project-orchestrator/visibility \
+            /orgs/${{ github.repository_owner }}/packages/container/knowloop/visibility \
             -f visibility=public 2>/dev/null \
           || echo "::warning::Could not set package visibility to public — may need to be done manually in org settings"
         env:
@@ -1513,10 +1513,10 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           cat checksums-sha256.txt
 
-          macos_arm64=$(grep "orchestrator-full-${VERSION}-macos-arm64.tar.gz" checksums-sha256.txt | awk '{print $1}' || true)
-          macos_x86_64=$(grep "orchestrator-full-${VERSION}-macos-x86_64.tar.gz" checksums-sha256.txt | awk '{print $1}' || true)
-          linux_arm64=$(grep "orchestrator-full-${VERSION}-linux-arm64.tar.gz" checksums-sha256.txt | awk '{print $1}' || true)
-          linux_x86_64=$(grep "orchestrator-full-${VERSION}-linux-x86_64.tar.gz" checksums-sha256.txt | awk '{print $1}' || true)
+          macos_arm64=$(grep "knowloop-full-${VERSION}-macos-arm64.tar.gz" checksums-sha256.txt | awk '{print $1}' || true)
+          macos_x86_64=$(grep "knowloop-full-${VERSION}-macos-x86_64.tar.gz" checksums-sha256.txt | awk '{print $1}' || true)
+          linux_arm64=$(grep "knowloop-full-${VERSION}-linux-arm64.tar.gz" checksums-sha256.txt | awk '{print $1}' || true)
+          linux_x86_64=$(grep "knowloop-full-${VERSION}-linux-x86_64.tar.gz" checksums-sha256.txt | awk '{print $1}' || true)
 
           # Validate required checksums (at minimum: macOS ARM64 + Linux x86_64)
           if [ -z "$macos_arm64" ] || [ -z "$linux_x86_64" ]; then
@@ -1541,19 +1541,19 @@ jobs:
               -e "s/SHA256_MACOS_X86_64_PLACEHOLDER/${{ steps.sha.outputs.macos_x86_64 }}/g" \
               -e "s/SHA256_LINUX_ARM64_PLACEHOLDER/${{ steps.sha.outputs.linux_arm64 }}/g" \
               -e "s/SHA256_LINUX_X86_64_PLACEHOLDER/${{ steps.sha.outputs.linux_x86_64 }}/g" \
-              packaging/homebrew/project-orchestrator.rb > project-orchestrator.rb
-          cat project-orchestrator.rb
+              packaging/homebrew/knowloop.rb > knowloop.rb
+          cat knowloop.rb
 
       - name: Push to Homebrew tap
         uses: dmnemec/copy_file_to_another_repo_action@main
         env:
           API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         with:
-          source_file: project-orchestrator.rb
-          destination_repo: this-rs/homebrew-tap
+          source_file: knowloop.rb
+          destination_repo: Lsh0x/homebrew-tap
           destination_folder: Formula
           destination_branch: main
-          destination_file: project-orchestrator.rb
+          destination_file: knowloop.rb
           user_email: "t@ffs.holdings"
           user_name: "Théotime Rivière"
-          commit_message: "Update project-orchestrator to v${{ steps.version.outputs.version }}"
+          commit_message: "Update knowloop to v${{ steps.version.outputs.version }}"

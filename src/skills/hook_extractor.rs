@@ -56,7 +56,7 @@ static CARGO_TEST_PATTERN: LazyLock<Regex> =
 ///
 /// ```
 /// use serde_json::json;
-/// use project_orchestrator::skills::hook_extractor::extract_pattern;
+/// use knowloop::skills::hook_extractor::extract_pattern;
 ///
 /// // Grep tool → extract pattern field
 /// let input = json!({"pattern": "reinforce_synapses", "path": "src/"});
@@ -100,7 +100,7 @@ pub fn extract_pattern(tool_name: &str, tool_input: &serde_json::Value) -> Optio
 
         "Bash" => extract_bash_pattern(tool_input),
 
-        // MCP mega-tools: mcp__project-orchestrator__task, etc.
+        // MCP mega-tools: mcp__knowloop__task, etc.
         name if name.starts_with("mcp__") => extract_mcp_pattern(name, tool_input),
 
         _ => None,
@@ -156,8 +156,8 @@ pub fn extract_file_context(tool_name: &str, tool_input: &serde_json::Value) -> 
 // MCP mega-tool pattern extraction (internal)
 // ============================================================================
 
-/// Known MCP prefix for Project Orchestrator mega-tools.
-const MCP_PO_PREFIX: &str = "mcp__project-orchestrator__";
+/// Known MCP prefix for KnowLoop mega-tools.
+const MCP_PO_PREFIX: &str = "mcp__knowloop__";
 
 /// Key fields to extract per mega-tool, in priority order.
 /// The first matching field becomes part of the pattern string.
@@ -266,7 +266,7 @@ const MCP_KEY_FIELDS: &[(&str, &[&str])] = &[
 ///
 /// # Arguments
 ///
-/// * `tool_name` - Full MCP tool name (e.g., `"mcp__project-orchestrator__task"`)
+/// * `tool_name` - Full MCP tool name (e.g., `"mcp__knowloop__task"`)
 /// * `tool_input` - JSON object with `action` and tool-specific params
 fn extract_mcp_pattern(tool_name: &str, tool_input: &serde_json::Value) -> Option<String> {
     // Extract the mega-tool short name from the MCP prefix
@@ -1087,7 +1087,7 @@ mod tests {
             json!({"action": "create", "plan_id": "abc-123", "title": "Implement auth middleware"});
         // title (1st key) + plan_id (2nd key) both extracted
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__task", &input),
+            extract_pattern("mcp__knowloop__task", &input),
             Some("task create Implement auth middleware abc-123".to_string())
         );
     }
@@ -1096,7 +1096,7 @@ mod tests {
     fn test_mcp_task_get_next() {
         let input = json!({"action": "get_next", "plan_id": "abc-123"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__task", &input),
+            extract_pattern("mcp__knowloop__task", &input),
             Some("task get_next abc-123".to_string())
         );
     }
@@ -1106,7 +1106,7 @@ mod tests {
         let input = json!({"plan_id": "abc-123"});
         // Still returns pattern with empty action — mega_tool name is enough
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__task", &input),
+            extract_pattern("mcp__knowloop__task", &input),
             Some("task abc-123".to_string())
         );
     }
@@ -1115,7 +1115,7 @@ mod tests {
     fn test_mcp_task_update_status() {
         let input = json!({"action": "update", "task_id": "t-123", "status": "completed"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__task", &input),
+            extract_pattern("mcp__knowloop__task", &input),
             Some("task update t-123".to_string())
         );
     }
@@ -1127,7 +1127,7 @@ mod tests {
         let input =
             json!({"action": "create", "title": "Hook Augmentation for MCP", "priority": 85});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__plan", &input),
+            extract_pattern("mcp__knowloop__plan", &input),
             Some("plan create Hook Augmentation for MCP".to_string())
         );
     }
@@ -1136,7 +1136,7 @@ mod tests {
     fn test_mcp_plan_get_dependency_graph() {
         let input = json!({"action": "get_dependency_graph", "plan_id": "plan-uuid"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__plan", &input),
+            extract_pattern("mcp__knowloop__plan", &input),
             Some("plan get_dependency_graph plan-uuid".to_string())
         );
     }
@@ -1147,7 +1147,7 @@ mod tests {
     fn test_mcp_note_search_semantic() {
         let input = json!({"action": "search_semantic", "query": "neo4j batch performance"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__note", &input),
+            extract_pattern("mcp__knowloop__note", &input),
             Some("note search_semantic neo4j batch performance".to_string())
         );
     }
@@ -1156,7 +1156,7 @@ mod tests {
     fn test_mcp_note_create() {
         let input = json!({"action": "create", "content": "Always use parameterized queries", "note_type": "guideline"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__note", &input),
+            extract_pattern("mcp__knowloop__note", &input),
             Some("note create Always use parameterized queries guideline".to_string())
         );
     }
@@ -1165,7 +1165,7 @@ mod tests {
     fn test_mcp_note_link_to_entity() {
         let input = json!({"action": "link_to_entity", "entity_type": "file", "entity_id": "src/neo4j/skill.rs"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__note", &input),
+            extract_pattern("mcp__knowloop__note", &input),
             Some("note link_to_entity file src/neo4j/skill.rs".to_string())
         );
     }
@@ -1176,7 +1176,7 @@ mod tests {
     fn test_mcp_code_search() {
         let input = json!({"action": "search", "query": "neo4j batch UNWIND"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__code", &input),
+            extract_pattern("mcp__knowloop__code", &input),
             Some("code search neo4j batch UNWIND".to_string())
         );
     }
@@ -1185,7 +1185,7 @@ mod tests {
     fn test_mcp_code_find_references() {
         let input = json!({"action": "find_references", "symbol": "activate_for_hook"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__code", &input),
+            extract_pattern("mcp__knowloop__code", &input),
             Some("code find_references activate_for_hook".to_string())
         );
     }
@@ -1194,7 +1194,7 @@ mod tests {
     fn test_mcp_code_analyze_impact() {
         let input = json!({"action": "analyze_impact", "target": "/Users/foo/src/neo4j/client.rs"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__code", &input),
+            extract_pattern("mcp__knowloop__code", &input),
             Some("code analyze_impact /Users/foo/src/neo4j/client.rs".to_string())
         );
     }
@@ -1203,7 +1203,7 @@ mod tests {
     fn test_mcp_code_get_call_graph() {
         let input = json!({"action": "get_call_graph", "function": "stream_response"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__code", &input),
+            extract_pattern("mcp__knowloop__code", &input),
             Some("code get_call_graph stream_response".to_string())
         );
     }
@@ -1212,7 +1212,7 @@ mod tests {
     fn test_mcp_code_get_class_hierarchy() {
         let input = json!({"action": "get_class_hierarchy", "type_name": "GraphStore"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__code", &input),
+            extract_pattern("mcp__knowloop__code", &input),
             Some("code get_class_hierarchy GraphStore".to_string())
         );
     }
@@ -1223,7 +1223,7 @@ mod tests {
     fn test_mcp_skill_activate() {
         let input = json!({"action": "activate", "query": "Tauri auth cookies"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__skill", &input),
+            extract_pattern("mcp__knowloop__skill", &input),
             Some("skill activate Tauri auth cookies".to_string())
         );
     }
@@ -1233,7 +1233,7 @@ mod tests {
         let input = json!({"action": "list", "project_id": "uuid-here"});
         // project_id is not in skill key fields — just action
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__skill", &input),
+            extract_pattern("mcp__knowloop__skill", &input),
             Some("skill list".to_string())
         );
     }
@@ -1244,7 +1244,7 @@ mod tests {
     fn test_mcp_admin_detect_skills() {
         let input = json!({"action": "detect_skills", "project_id": "uuid-here"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__admin", &input),
+            extract_pattern("mcp__knowloop__admin", &input),
             Some("admin detect_skills uuid-here".to_string())
         );
     }
@@ -1253,7 +1253,7 @@ mod tests {
     fn test_mcp_admin_sync_directory() {
         let input = json!({"action": "sync_directory", "path": "/Users/foo/project"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__admin", &input),
+            extract_pattern("mcp__knowloop__admin", &input),
             Some("admin sync_directory /Users/foo/project".to_string())
         );
     }
@@ -1264,7 +1264,7 @@ mod tests {
     fn test_mcp_step_create() {
         let input = json!({"action": "create", "task_id": "t-uuid", "description": "Add batch UNWIND to neo4j queries"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__step", &input),
+            extract_pattern("mcp__knowloop__step", &input),
             Some("step create Add batch UNWIND to neo4j queries t-uuid".to_string())
         );
     }
@@ -1275,7 +1275,7 @@ mod tests {
     fn test_mcp_decision_search_semantic() {
         let input = json!({"action": "search_semantic", "query": "authentication strategy"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__decision", &input),
+            extract_pattern("mcp__knowloop__decision", &input),
             Some("decision search_semantic authentication strategy".to_string())
         );
     }
@@ -1284,7 +1284,7 @@ mod tests {
     fn test_mcp_decision_add() {
         let input = json!({"action": "add", "description": "Use JWT over session cookies", "rationale": "Stateless"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__decision", &input),
+            extract_pattern("mcp__knowloop__decision", &input),
             Some("decision add Use JWT over session cookies Stateless".to_string())
         );
     }
@@ -1293,10 +1293,10 @@ mod tests {
 
     #[test]
     fn test_mcp_project_sync() {
-        let input = json!({"action": "sync", "slug": "project-orchestrator-backend"});
+        let input = json!({"action": "sync", "slug": "knowloop-backend"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__project", &input),
-            Some("project sync project-orchestrator-backend".to_string())
+            extract_pattern("mcp__knowloop__project", &input),
+            Some("project sync knowloop-backend".to_string())
         );
     }
 
@@ -1307,7 +1307,7 @@ mod tests {
         let input =
             json!({"action": "create", "sha": "abc123", "message": "feat: add MCP hook support"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__commit", &input),
+            extract_pattern("mcp__knowloop__commit", &input),
             Some("commit create feat: add MCP hook support abc123".to_string())
         );
     }
@@ -1318,7 +1318,7 @@ mod tests {
     fn test_mcp_chat_send_message() {
         let input = json!({"action": "send_message", "message": "Explain the auth flow"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__chat", &input),
+            extract_pattern("mcp__knowloop__chat", &input),
             Some("chat send_message Explain the auth flow".to_string())
         );
     }
@@ -1330,7 +1330,7 @@ mod tests {
         let input =
             json!({"action": "auto_build", "name": "Auth Flow", "entry_function": "login_handler"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__feature_graph", &input),
+            extract_pattern("mcp__knowloop__feature_graph", &input),
             Some("feature_graph auto_build Auth Flow login_handler".to_string())
         );
     }
@@ -1341,7 +1341,7 @@ mod tests {
     fn test_mcp_milestone_create() {
         let input = json!({"action": "create", "title": "Neural Skills v2", "description": "MCP augmentation"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__milestone", &input),
+            extract_pattern("mcp__knowloop__milestone", &input),
             Some("milestone create Neural Skills v2 MCP augmentation".to_string())
         );
     }
@@ -1352,7 +1352,7 @@ mod tests {
     fn test_mcp_release_create() {
         let input = json!({"action": "create", "version": "0.2.0", "title": "Hook Augmentation"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__release", &input),
+            extract_pattern("mcp__knowloop__release", &input),
             Some("release create Hook Augmentation 0.2.0".to_string())
         );
     }
@@ -1363,7 +1363,7 @@ mod tests {
     fn test_mcp_constraint_add() {
         let input = json!({"action": "add", "description": "P99 < 50ms for activation", "constraint_type": "performance"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__constraint", &input),
+            extract_pattern("mcp__knowloop__constraint", &input),
             Some("constraint add P99 < 50ms for activation performance".to_string())
         );
     }
@@ -1374,7 +1374,7 @@ mod tests {
     fn test_mcp_workspace_get_overview() {
         let input = json!({"action": "get_overview", "slug": "my-workspace"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__workspace", &input),
+            extract_pattern("mcp__knowloop__workspace", &input),
             Some("workspace get_overview my-workspace".to_string())
         );
     }
@@ -1385,7 +1385,7 @@ mod tests {
     fn test_mcp_workspace_milestone_create() {
         let input = json!({"action": "create", "title": "Cross-project delivery"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__workspace_milestone", &input),
+            extract_pattern("mcp__knowloop__workspace_milestone", &input),
             Some("workspace_milestone create Cross-project delivery".to_string())
         );
     }
@@ -1397,7 +1397,7 @@ mod tests {
         let input =
             json!({"action": "create", "name": "OpenAPI schema", "file_path": "/api/openapi.yaml"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__resource", &input),
+            extract_pattern("mcp__knowloop__resource", &input),
             Some("resource create OpenAPI schema /api/openapi.yaml".to_string())
         );
     }
@@ -1409,7 +1409,7 @@ mod tests {
         let input =
             json!({"action": "create", "name": "Auth Service", "description": "JWT + OIDC"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__component", &input),
+            extract_pattern("mcp__knowloop__component", &input),
             Some("component create Auth Service JWT + OIDC".to_string())
         );
     }
@@ -1420,7 +1420,7 @@ mod tests {
     fn test_mcp_empty_action() {
         let input = json!({"action": "", "plan_id": "abc"});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__plan", &input),
+            extract_pattern("mcp__knowloop__plan", &input),
             Some("plan abc".to_string())
         );
     }
@@ -1429,7 +1429,7 @@ mod tests {
     fn test_mcp_no_action_no_fields() {
         let input = json!({});
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__admin", &input),
+            extract_pattern("mcp__knowloop__admin", &input),
             Some("admin".to_string())
         );
     }
@@ -1439,7 +1439,7 @@ mod tests {
         let input = json!({"action": "list", "query": "something"});
         // Unknown mega-tool uses generic fallback fields
         assert_eq!(
-            extract_pattern("mcp__project-orchestrator__unknown_tool", &input),
+            extract_pattern("mcp__knowloop__unknown_tool", &input),
             Some("unknown_tool list something".to_string())
         );
     }
@@ -1458,7 +1458,7 @@ mod tests {
     fn test_mcp_long_value_truncated() {
         let long_value = "a".repeat(300);
         let input = json!({"action": "search", "query": long_value});
-        let result = extract_pattern("mcp__project-orchestrator__code", &input).unwrap();
+        let result = extract_pattern("mcp__knowloop__code", &input).unwrap();
         // Pattern should be capped: "code search " + 200 chars max
         assert!(result.len() <= "code search ".len() + 200);
         assert!(result.starts_with("code search "));
@@ -1470,7 +1470,7 @@ mod tests {
     fn test_mcp_file_context_code_file_path() {
         let input = json!({"action": "get_file_symbols", "file_path": "/Users/foo/src/main.rs"});
         assert_eq!(
-            extract_file_context("mcp__project-orchestrator__code", &input),
+            extract_file_context("mcp__knowloop__code", &input),
             Some("/Users/foo/src/main.rs".to_string())
         );
     }
@@ -1479,7 +1479,7 @@ mod tests {
     fn test_mcp_file_context_admin_path() {
         let input = json!({"action": "sync_directory", "path": "/Users/foo/project"});
         assert_eq!(
-            extract_file_context("mcp__project-orchestrator__admin", &input),
+            extract_file_context("mcp__knowloop__admin", &input),
             Some("/Users/foo/project".to_string())
         );
     }
@@ -1488,7 +1488,7 @@ mod tests {
     fn test_mcp_file_context_code_target() {
         let input = json!({"action": "analyze_impact", "target": "/Users/foo/src/neo4j/client.rs"});
         assert_eq!(
-            extract_file_context("mcp__project-orchestrator__code", &input),
+            extract_file_context("mcp__knowloop__code", &input),
             Some("/Users/foo/src/neo4j/client.rs".to_string())
         );
     }
@@ -1496,17 +1496,14 @@ mod tests {
     #[test]
     fn test_mcp_file_context_no_file_field() {
         let input = json!({"action": "list", "project_id": "uuid"});
-        assert_eq!(
-            extract_file_context("mcp__project-orchestrator__skill", &input),
-            None
-        );
+        assert_eq!(extract_file_context("mcp__knowloop__skill", &input), None);
     }
 
     #[test]
     fn test_mcp_file_context_resource_file_path() {
         let input = json!({"action": "create", "name": "Schema", "file_path": "/api/schema.json"});
         assert_eq!(
-            extract_file_context("mcp__project-orchestrator__resource", &input),
+            extract_file_context("mcp__knowloop__resource", &input),
             Some("/api/schema.json".to_string())
         );
     }

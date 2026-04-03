@@ -1,7 +1,7 @@
 //! HTTP client for MCP → REST API proxy
 //!
 //! Used in HTTP mode where the MCP server delegates tool calls to the REST API
-//! instead of directly using the Orchestrator. The auth token (JWT session token)
+//! instead of directly using KnowLoop. The auth token (JWT session token)
 //! is read from the `PO_AUTH_TOKEN` env var and injected as `Authorization: Bearer`.
 
 use anyhow::{anyhow, Context, Result};
@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 /// HTTP client that proxies MCP tool calls to the REST API.
 ///
 /// Created when `PO_SERVER_URL` is set, indicating the MCP server should
-/// operate in HTTP wrapper mode instead of direct Orchestrator access.
+/// operate in HTTP wrapper mode instead of direct KnowLoop access.
 #[derive(Clone)]
 pub struct McpHttpClient {
     client: Client,
@@ -44,7 +44,7 @@ impl McpHttpClient {
     /// Create from environment variables.
     ///
     /// Returns `Some` if `PO_SERVER_URL` is set, `None` otherwise.
-    /// This is the primary constructor used by `mcp_server` binary.
+    /// This is the primary constructor used by `knowloop_mcp` binary.
     ///
     /// Token resolution order:
     /// 1. `PO_AUTH_TOKEN` (explicit JWT, injected by ChatManager)

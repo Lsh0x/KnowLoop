@@ -1,6 +1,6 @@
 # Installation Guide
 
-Complete setup instructions for Project Orchestrator.
+Complete setup instructions for KnowLoop.
 
 ---
 
@@ -19,7 +19,7 @@ Complete setup instructions for Project Orchestrator.
 | 7474 | Neo4j Browser | HTTP |
 | 7687 | Neo4j Bolt | TCP |
 | 7700 | Meilisearch | HTTP |
-| 8080 | Orchestrator API | HTTP |
+| 8080 | KnowLoop API | HTTP |
 | 4222 | NATS | TCP |
 | 8222 | NATS Monitoring | HTTP |
 
@@ -30,8 +30,8 @@ Complete setup instructions for Project Orchestrator.
 ### Step 1: Clone the repository
 
 ```bash
-git clone https://github.com/this-rs/project-orchestrator.git
-cd project-orchestrator
+git clone https://github.com/Lsh0x/KnowLoop.git
+cd knowloop
 ```
 
 ### Step 2: Start all services
@@ -44,7 +44,7 @@ This starts:
 - **Neo4j** — Graph database for code structure and relationships
 - **Meilisearch** — Search engine for code and decisions
 - **NATS** — Message broker for inter-process event sync (optional, for multi-instance)
-- **Orchestrator** — API server with 22 mega-tools
+- **KnowLoop** — API server with 22 mega-tools
 
 ### Step 3: Verify the installation
 
@@ -60,14 +60,14 @@ curl http://localhost:8080/health
 
 ```bash
 # For local MCP integration, extract the binary from the running container
-docker cp orchestrator-server:/app/mcp_server ./mcp_server
-chmod +x mcp_server
+docker cp knowloop-server:/app/knowloop_mcp ./knowloop_mcp
+chmod +x knowloop_mcp
 
 # Or build from source
-cargo build --release --bin mcp_server
+cargo build --release --bin knowloop_mcp
 ```
 
-The MCP server binary is at `./mcp_server` (or `./target/release/mcp_server` if built from source).
+The MCP server binary is at `./knowloop_mcp` (or `./target/release/knowloop_mcp` if built from source).
 
 ---
 
@@ -88,13 +88,13 @@ cargo build --release
 ### Step 3: Run the server
 
 ```bash
-./target/release/orchestrator serve --port 8080
+./target/release/knowloop serve --port 8080
 ```
 
 ### Step 4: Build the MCP server
 
 ```bash
-cargo build --release --bin mcp_server
+cargo build --release --bin knowloop_mcp
 ```
 
 ---
@@ -106,7 +106,7 @@ Download and install the latest pre-built binary:
 ### macOS / Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/this-rs/project-orchestrator/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Lsh0x/KnowLoop/main/install.sh | sh
 ```
 
 Options:
@@ -117,15 +117,15 @@ Options:
 ### Homebrew (macOS)
 
 ```bash
-brew install this-rs/tap/orchestrator
+brew install Lsh0x/tap/knowloop
 ```
 
 ### Debian / Ubuntu
 
 ```bash
 # Download the .deb package from the latest release
-sudo dpkg -i orchestrator_*.deb
-sudo systemctl enable --now project-orchestrator
+sudo dpkg -i knowloop_*.deb
+sudo systemctl enable --now knowloop
 ```
 
 ### Auto-configure Claude Code
@@ -133,7 +133,7 @@ sudo systemctl enable --now project-orchestrator
 After installation, automatically register the MCP server in Claude Code:
 
 ```bash
-orchestrator setup-claude
+knowloop setup-claude
 ```
 
 This detects your Claude Code installation and adds the MCP server configuration.
@@ -151,7 +151,7 @@ This detects your Claude Code installation and adds the MCP server configuration
 | `MEILISEARCH_KEY` | `orchestrator-meili-key-change-me` | Meilisearch API key |
 | `SERVER_PORT` | `8080` | HTTP API port |
 | `WORKSPACE_PATH` | `.` | Default workspace for syncing |
-| `RUST_LOG` | `info,project_orchestrator=debug` | Log level filter (see [env_logger syntax](https://docs.rs/env_logger)) |
+| `RUST_LOG` | `info,knowloop=debug` | Log level filter (see [env_logger syntax](https://docs.rs/env_logger)) |
 | `NATS_URL` | _(none)_ | NATS server URL (e.g., `nats://localhost:4222`) |
 | `SERVE_FRONTEND` | `false` | Serve embedded frontend (requires `embedded-frontend` feature) |
 | `FRONTEND_PATH` | _(none)_ | Path to external frontend build directory |
@@ -180,7 +180,7 @@ docker compose --env-file .env up -d
 
 ## Configuration System (config.yaml)
 
-Project Orchestrator uses a layered configuration system with the following priority (highest wins):
+KnowLoop uses a layered configuration system with the following priority (highest wins):
 
 1. **Environment variables** -- override everything
 2. **`config.yaml`** -- file-based configuration
@@ -294,7 +294,7 @@ For a detailed walkthrough, see the [Authentication Guide](../guides/authenticat
 Pre-built Docker images are published to GitHub Container Registry on each release:
 
 ```
-ghcr.io/this-rs/project-orchestrator
+ghcr.io/Lsh0x/KnowLoop
 ```
 
 ### Image variants
@@ -311,11 +311,11 @@ ghcr.io/this-rs/project-orchestrator
 - **`:X.Y`** — receives patch updates automatically
 - **`:X`** — receives minor and patch updates
 
-Use `docker-compose.production.yml` with `ORCHESTRATOR_IMAGE_TAG` to set the version:
+Use `docker-compose.production.yml` with `KNOWLOOP_IMAGE_TAG` to set the version:
 
 ```bash
 # Pin to a specific version
-ORCHESTRATOR_IMAGE_TAG=1.0.0 docker compose -f docker-compose.production.yml up -d
+KNOWLOOP_IMAGE_TAG=1.0.0 docker compose -f docker-compose.production.yml up -d
 ```
 
 ---
@@ -365,12 +365,12 @@ nats:
     - nats_data:/data/jetstream
 ```
 
-NATS is optional. It enables cross-instance event synchronization and distributed chat relay. If not running, the orchestrator operates in single-instance mode with local event broadcasting only.
+NATS is optional. It enables cross-instance event synchronization and distributed chat relay. If not running, KnowLoop operates in single-instance mode with local event broadcasting only.
 
-### Orchestrator
+### KnowLoop
 
 ```yaml
-orchestrator:
+knowloop:
   build: .
   ports:
     - "8080:8080"
@@ -383,7 +383,7 @@ orchestrator:
 
 ### Network and Volumes
 
-All three services communicate over a dedicated `orchestrator-net` bridge network.
+All three services communicate over a dedicated `knowloop-net` bridge network.
 Data is persisted in five named Docker volumes:
 
 | Volume | Service | Content |
@@ -391,7 +391,7 @@ Data is persisted in five named Docker volumes:
 | `neo4j_data` | Neo4j | Graph database files |
 | `neo4j_logs` | Neo4j | Server logs |
 | `meilisearch_data` | Meilisearch | Search indexes |
-| `orchestrator_data` | Orchestrator | Application data |
+| `knowloop_data` | KnowLoop | Application data |
 | `nats_data` | NATS | JetStream storage |
 
 To completely reset all data, run `docker compose down -v` (this removes all
@@ -424,10 +424,10 @@ curl http://localhost:7700/health
 
 ```bash
 # Test MCP server starts correctly
-./target/release/mcp_server --help
+./target/release/knowloop_mcp --help
 
 # Test with debug logging
-RUST_LOG=debug ./target/release/mcp_server
+RUST_LOG=debug ./target/release/knowloop_mcp
 ```
 
 ---
@@ -470,7 +470,7 @@ docker compose logs meilisearch
 docker compose restart meilisearch
 ```
 
-### Orchestrator can't connect to Neo4j
+### KnowLoop can't connect to Neo4j
 
 **Error:** `Failed to connect to Neo4j`
 
@@ -481,21 +481,21 @@ docker compose ps neo4j
 # Wait for Neo4j to be ready (can take 30s on first start)
 docker compose logs -f neo4j
 
-# Check connection from orchestrator container
-docker compose exec orchestrator curl -I http://neo4j:7474
+# Check connection from knowloop container
+docker compose exec knowloop curl -I http://neo4j:7474
 ```
 
 ### MCP server not found by Claude Code
 
-**Error:** `spawn mcp_server ENOENT`
+**Error:** `spawn knowloop_mcp ENOENT`
 
 ```bash
 # Use absolute path in mcp.json
-"command": "/absolute/path/to/mcp_server"
+"command": "/absolute/path/to/knowloop_mcp"
 
 # Verify binary exists and is executable
-ls -la /path/to/mcp_server
-chmod +x /path/to/mcp_server
+ls -la /path/to/knowloop_mcp
+chmod +x /path/to/knowloop_mcp
 ```
 
 ### Permission denied on Docker volumes
@@ -537,13 +537,13 @@ docker compose up -d
 ```bash
 git pull
 cargo build --release
-cargo build --release --bin mcp_server
+cargo build --release --bin knowloop_mcp
 ```
 
 ### Self-update (installed binary)
 
 ```bash
-orchestrator update
+knowloop update
 ```
 
 This checks GitHub Releases for a newer version, downloads it, verifies the checksum, and replaces the binary atomically.

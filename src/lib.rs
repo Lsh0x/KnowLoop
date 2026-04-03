@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
-//! Project Orchestrator
+//! KnowLoop
 //!
-//! An AI agent orchestrator with:
+//! An AI agent coordination service with:
 //! - Neo4j knowledge graph for code structure and relationships
 //! - Meilisearch for fast semantic search
 //! - Tree-sitter for precise code parsing
@@ -37,6 +37,7 @@ pub mod reasoning;
 pub mod reception;
 pub mod reflex;
 pub mod resolver;
+pub mod retrospective;
 pub mod runner;
 pub mod setup_claude;
 pub mod sharing;
@@ -633,7 +634,10 @@ impl Config {
 
         // 2. Build Config with env var overrides
         Ok(Self {
-            setup_completed: yaml.setup_completed,
+            setup_completed: std::env::var("SETUP_COMPLETED")
+                .ok()
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(yaml.setup_completed),
             neo4j_uri: std::env::var("NEO4J_URI").unwrap_or(yaml.neo4j.uri),
             neo4j_user: std::env::var("NEO4J_USER").unwrap_or(yaml.neo4j.user),
             neo4j_password: std::env::var("NEO4J_PASSWORD").unwrap_or(yaml.neo4j.password),
@@ -730,9 +734,9 @@ impl Config {
     /// Search order when `yaml_path` is `None`:
     /// 1. `./config.yaml` (current working directory)
     /// 2. Platform-specific app config dir:
-    ///    - macOS: `~/Library/Application Support/project-orchestrator/config.yaml`
-    ///    - Linux: `~/.config/project-orchestrator/config.yaml`
-    ///    - Windows: `%APPDATA%/ProjectOrchestrator/config.yaml`
+    ///    - macOS: `~/Library/Application Support/knowloop/config.yaml`
+    ///    - Linux: `~/.config/knowloop/config.yaml`
+    ///    - Windows: `%APPDATA%/KnowLoop/config.yaml`
     ///
     /// This ensures the MCP server binary (which may be spawned with an arbitrary
     /// CWD by Claude Code) can still find the config written by the desktop app.
@@ -755,9 +759,9 @@ impl Config {
         // 1. Platform-specific app config directory (same as desktop app)
         if let Some(config_dir) = dirs::config_dir() {
             #[cfg(target_os = "windows")]
-            let app_dir = config_dir.join("ProjectOrchestrator");
+            let app_dir = config_dir.join("KnowLoop");
             #[cfg(not(target_os = "windows"))]
-            let app_dir = config_dir.join("project-orchestrator");
+            let app_dir = config_dir.join("knowloop");
             candidates.push(app_dir.join("config.yaml"));
         }
 
@@ -901,7 +905,7 @@ impl AppState {
 // Server entry point (for embedding in Tauri or other hosts)
 // ============================================================================
 
-/// Start the orchestrator server with the given configuration.
+/// Start the KnowLoop server with the given configuration.
 ///
 /// This is the main entry point for embedding the server in another application
 /// (e.g., Tauri desktop). It initializes all services, creates the Axum router,
@@ -1406,8 +1410,9 @@ pub async fn start_server(mut config: Config) -> Result<()> {
     // Runs independently of chat sessions (like ScheduleProvider).
     {
         use heartbeat::checks::{
-            consolidation::ConsolidationCheck, convention_guard::ConventionGuardCheck,
-            git_drift::GitDriftCheck, homeostasis::HomeostasisCheck, maintenance::MaintenanceCheck,
+            cli_health::CliHealthCheck, consolidation::ConsolidationCheck,
+            convention_guard::ConventionGuardCheck, git_drift::GitDriftCheck,
+            homeostasis::HomeostasisCheck, maintenance::MaintenanceCheck,
             staleness::StalenessCheck, synapse_decay::SynapseDecayCheck,
         };
         use heartbeat::engine::HeartbeatEngine;
@@ -1417,7 +1422,7 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         let emitter: Option<Arc<dyn events::EventEmitter>> =
             Some(event_bus.clone() as Arc<dyn events::EventEmitter>);
 
-        let checks: Vec<Box<dyn heartbeat::HeartbeatCheck>> = vec![
+        let mut checks: Vec<Box<dyn heartbeat::HeartbeatCheck>> = vec![
             Box::new(GitDriftCheck),
             Box::new(StalenessCheck),
             Box::new(SynapseDecayCheck),
@@ -1427,11 +1432,17 @@ pub async fn start_server(mut config: Config) -> Result<()> {
             Box::new(HomeostasisCheck::new()),
         ];
 
+        // Add CLI health watchdog if chat manager is available
+        if let Some(ref cm) = chat_manager {
+            checks.push(Box::new(CliHealthCheck::new(cm.active_sessions.clone())));
+        }
+
+        let check_count = checks.len();
         let engine = HeartbeatEngine::new(graph, search, emitter, checks);
         let handle = engine.start_owned();
         // Keep handle alive for the lifetime of the process
         std::mem::forget(handle);
-        tracing::info!("HeartbeatEngine started (7 checks)");
+        tracing::info!("HeartbeatEngine started ({} checks)", check_count);
     }
 
     // Pre-build OIDC client once (avoids fetching discovery document on every request)
@@ -2135,11 +2146,11 @@ server:
 server:
   port: 8080
   serve_frontend: false
-  frontend_path: "/var/www/orchestrator/dist"
+  frontend_path: "/var/www/knowloop/dist"
 "#;
         let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(!config.server.serve_frontend);
-        assert_eq!(config.server.frontend_path, "/var/www/orchestrator/dist");
+        assert_eq!(config.server.frontend_path, "/var/www/knowloop/dist");
     }
 
     #[test]

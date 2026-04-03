@@ -22,8 +22,8 @@ use std::hash::{Hash, Hasher};
 /// # Example
 ///
 /// ```rust
-/// use project_orchestrator::embeddings::MockEmbeddingProvider;
-/// use project_orchestrator::embeddings::EmbeddingProvider;
+/// use knowloop::embeddings::MockEmbeddingProvider;
+/// use knowloop::embeddings::EmbeddingProvider;
 ///
 /// # tokio_test::block_on(async {
 /// let provider = MockEmbeddingProvider::new(768);

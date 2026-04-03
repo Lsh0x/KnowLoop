@@ -415,9 +415,8 @@ impl PostStreamHandler {
         // Should we check for pending objectives?
         // Yes when: (a) no productive tools, OR (b) productive + conclusive (agent wrapping up),
         // OR (c) productive tools used (to detect HARD GATE violations — code without plan).
-        let should_check = !had_productive_tool_use
-            || had_conclusive_tool_use
-            || had_productive_tool_use; // always check when code was written (HARD GATE)
+        // Always check: productive tools need HARD GATE validation, non-productive need objective reminders
+        let should_check = true;
 
         // Fetch pending objectives from graph (only if we might need them)
         let (pending_tasks, work_log_summary, no_active_plan) = if !auto_continue_allowed
@@ -665,7 +664,7 @@ pub(crate) fn check_objective_reminder(input: &ObjectiveCheckInput) -> Option<St
     if input.had_productive_tool_use && input.no_active_plan {
         return Some(
             "⛔ **HARD GATE VIOLATION**: You wrote or edited code but no active Plan exists in \
-            the Project Orchestrator. Every code change MUST be linked to a plan and task.\n\
+            the KnowLoop. Every code change MUST be linked to a plan and task.\n\
             \n\
             Please immediately:\n\
             1. `plan(action: \"create\", title: \"...\", project_id: \"...\")`\n\

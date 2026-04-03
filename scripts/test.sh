@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test script for project-orchestrator
+# Test script for knowloop
 # Usage: ./scripts/test.sh [unit|integration|api|all]
 
 set -e

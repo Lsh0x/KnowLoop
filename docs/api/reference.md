@@ -1,6 +1,6 @@
 # API Reference
 
-Complete REST API documentation for Project Orchestrator.
+Complete REST API documentation for KnowLoop.
 
 **Base URL:** `http://localhost:8080`
 

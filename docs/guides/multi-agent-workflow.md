@@ -12,7 +12,7 @@ A single AI agent can only do one thing at a time. With multiple agents, you can
 - **Specialize** — Each agent focuses on what it does best
 - **Scale** — Add more agents for larger projects
 
-Project Orchestrator provides the shared context that makes this possible.
+KnowLoop provides the shared context that makes this possible.
 
 ---
 
@@ -20,7 +20,7 @@ Project Orchestrator provides the shared context that makes this possible.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         PROJECT ORCHESTRATOR                             │
+│                              KNOWLOOP                                    │
 │                        (Shared Knowledge Base)                           │
 │                                                                          │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                   │
@@ -152,7 +152,7 @@ Instructions: You write and run tests.
 ### Sequence Diagram
 
 ```
-Agent 1 (Backend)          Orchestrator          Agent 2 (Frontend)
+Agent 1 (Backend)           KnowLoop             Agent 2 (Frontend)
        │                        │                        │
        │   get_next_task()     │                        │
        │───────────────────────>│                        │

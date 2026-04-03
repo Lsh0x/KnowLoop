@@ -10,8 +10,8 @@ case "$1" in
         fi
 
         # Remove data and config directories
-        rm -rf /var/lib/project-orchestrator
-        rm -rf /etc/project-orchestrator
+        rm -rf /var/lib/knowloop
+        rm -rf /etc/knowloop
 
         # Reload systemd
         systemctl daemon-reload || true

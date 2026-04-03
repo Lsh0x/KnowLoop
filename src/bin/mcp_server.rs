@@ -1,7 +1,7 @@
 //! MCP Server Binary — HTTP Proxy Mode
 //!
 //! This binary runs a lightweight MCP server that proxies tool calls to the
-//! project-orchestrator REST API. It communicates over stdio for integration
+//! KnowLoop REST API. It communicates over stdio for integration
 //! with Claude Code and other MCP clients.
 //!
 //! # Environment Variables
@@ -23,8 +23,8 @@
 //! ```json
 //! {
 //!   "mcpServers": {
-//!     "project-orchestrator": {
-//!       "command": "/path/to/mcp_server",
+//!     "knowloop": {
+//!       "command": "/path/to/knowloop_mcp",
 //!       "env": {
 //!         "PO_SERVER_URL": "http://127.0.0.1:8080",
 //!         "PO_AUTH_TOKEN": "<jwt-session-token>"
@@ -35,7 +35,7 @@
 //! ```
 
 use anyhow::{anyhow, Result};
-use project_orchestrator::mcp::{McpHttpClient, McpServer};
+use knowloop::mcp::{McpHttpClient, McpServer};
 use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     // Initialize logging (to stderr to keep stdout clean for MCP)
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr))
-        .with(EnvFilter::from_default_env().add_directive("project_orchestrator=info".parse()?))
+        .with(EnvFilter::from_default_env().add_directive("knowloop=info".parse()?))
         .init();
 
     // Create HTTP client from environment
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         anyhow!(
             "PO_SERVER_URL environment variable is required.\n\
              The MCP server operates as an HTTP proxy to the REST API.\n\
-             Set PO_SERVER_URL to the orchestrator server URL (e.g. http://127.0.0.1:8080)."
+             Set PO_SERVER_URL to the KnowLoop server URL (e.g. http://127.0.0.1:8080)."
         )
     })?;
 

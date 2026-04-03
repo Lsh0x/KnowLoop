@@ -1670,6 +1670,46 @@ impl PlanRunner {
                                 .await;
                         });
                     }
+
+                    // Fire-and-forget: Task Retrospective (learn from success)
+                    {
+                        let graph = self.graph.clone();
+                        let retro_report = task_report.clone();
+                        let retro_files = retro_report
+                            .as_ref()
+                            .map(|r| r.files_modified.clone())
+                            .unwrap_or_default();
+                        let retro_commits = retro_report
+                            .as_ref()
+                            .map(|r| r.commits.clone())
+                            .unwrap_or_default();
+                        let retro_confidence = retro_report
+                            .as_ref()
+                            .map(|r| r.confidence_score)
+                            .unwrap_or(0.0);
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::retrospective::analyzer::run_retrospective(
+                                crate::retrospective::analyzer::RetrospectiveInput {
+                                    graph,
+                                    task_id,
+                                    project_id,
+                                    session_id: task_session_id,
+                                    agent_execution_id: task_agent_execution_id,
+                                    outcome:
+                                        crate::retrospective::models::RetrospectiveOutcome::Success,
+                                    duration_secs,
+                                    cost_usd,
+                                    confidence_score: retro_confidence,
+                                    files_modified: retro_files,
+                                    commits: retro_commits,
+                                },
+                            )
+                            .await
+                            {
+                                warn!("Retrospective failed for task {}: {}", task_id, e);
+                            }
+                        });
+                    }
                 }
                 Ok(TaskResult::Failed {
                     reason,
@@ -1761,6 +1801,39 @@ impl PlanRunner {
                             tokio::spawn(async move {
                                 crate::runner::persona::record_persona_feedback(graph, pids, false)
                                     .await;
+                            });
+                        }
+
+                        // Fire-and-forget: Task Retrospective (learn from failure)
+                        {
+                            let graph = self.graph.clone();
+                            let failure_reason = wave_result
+                                .tasks_failed
+                                .last()
+                                .map(|(_, r)| r.clone())
+                                .unwrap_or_default();
+                            tokio::spawn(async move {
+                                if let Err(e) = crate::retrospective::analyzer::run_retrospective(
+                                    crate::retrospective::analyzer::RetrospectiveInput {
+                                        graph,
+                                        task_id,
+                                        project_id,
+                                        session_id: task_session_id,
+                                        agent_execution_id: task_agent_execution_id,
+                                        outcome: crate::retrospective::models::RetrospectiveOutcome::Failure {
+                                            reason: failure_reason,
+                                        },
+                                        duration_secs: 0.0,
+                                        cost_usd,
+                                        confidence_score: 0.0,
+                                        files_modified: vec![],
+                                        commits: vec![],
+                                    },
+                                )
+                                .await
+                                {
+                                    warn!("Retrospective failed for task {}: {}", task_id, e);
+                                }
                             });
                         }
                     } // end else (step coherence check)
@@ -5931,7 +6004,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Integration test: runs real cargo fmt, too slow for CI unit tests
     async fn test_run_cargo_fmt_success_in_valid_project() {
-        // Use the project-orchestrator itself as a valid Cargo project
+        // Use the knowloop itself as a valid Cargo project
         let cwd = env!("CARGO_MANIFEST_DIR");
         let result = PlanRunner::run_cargo_fmt(cwd).await;
         assert!(

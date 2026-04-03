@@ -7,17 +7,17 @@ use std::collections::HashMap;
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 
-use project_orchestrator::episodes::anonymize::anonymize;
-use project_orchestrator::episodes::distill::{abstract_lesson, create_envelope, EpisodeContent};
-use project_orchestrator::episodes::distill_models::*;
-use project_orchestrator::identity::did::to_did_key;
-use project_orchestrator::identity::InstanceIdentity;
-use project_orchestrator::reception::anchor::{anchor_notes, TombstoneRegistry};
-use project_orchestrator::reception::replay::replay_lesson;
-use project_orchestrator::reception::score::{score_relevance, LocalContext};
-use project_orchestrator::reception::trust::TrustManager;
-use project_orchestrator::reception::verify::verify_envelope;
-use project_orchestrator::reception::{receive_envelope, receive_envelope_checked};
+use knowloop::episodes::anonymize::anonymize;
+use knowloop::episodes::distill::{abstract_lesson, create_envelope, EpisodeContent};
+use knowloop::episodes::distill_models::*;
+use knowloop::identity::did::to_did_key;
+use knowloop::identity::InstanceIdentity;
+use knowloop::reception::anchor::{anchor_notes, TombstoneRegistry};
+use knowloop::reception::replay::replay_lesson;
+use knowloop::reception::score::{score_relevance, LocalContext};
+use knowloop::reception::trust::TrustManager;
+use knowloop::reception::verify::verify_envelope;
+use knowloop::reception::{receive_envelope, receive_envelope_checked};
 
 /// Helper: build a properly signed envelope whose content_hash is SHA-256 of the
 /// serialized lesson JSON (matching what `verify_envelope` expects).

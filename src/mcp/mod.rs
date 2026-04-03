@@ -1,6 +1,6 @@
 //! MCP (Model Context Protocol) server implementation
 //!
-//! This module provides an MCP server that exposes the orchestrator API
+//! This module provides an MCP server that exposes the KnowLoop API
 //! as tools for Claude Code and other MCP clients.
 
 pub mod formatter;

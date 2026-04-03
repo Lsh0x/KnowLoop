@@ -20,6 +20,10 @@
 # 4. PASSWORD + OIDC: Add both "root_account" and "oidc" sections.
 #    Users can sign in with either method.
 
+# When false the app starts in setup-wizard mode (minimal server).
+# Set to true once configuration is done.  SETUP_COMPLETED env override.
+setup_completed: true
+
 # -----------------------------------------------------------------------------
 # Server
 # -----------------------------------------------------------------------------

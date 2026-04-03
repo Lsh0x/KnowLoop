@@ -2,7 +2,7 @@
 # Project Orchestrator installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/this-rs/project-orchestrator/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Lsh0x/KnowLoop/main/install.sh | sh
 #
 # Options (via env vars or flags):
 #   --version <version>    Install a specific version (default: latest)
@@ -12,7 +12,7 @@
 
 set -eu
 
-REPO="this-rs/project-orchestrator"
+REPO="Lsh0x/KnowLoop"
 BINARY_NAME="orchestrator"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 

@@ -1,6 +1,6 @@
-//! Project Orchestrator - CLI Tool
+//! KnowLoop - CLI Tool
 //!
-//! Command-line interface for interacting with the orchestrator.
+//! Command-line interface for interacting with KnowLoop.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -9,15 +9,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Parser)]
-#[command(name = "orch")]
-#[command(about = "CLI for Project Orchestrator")]
+#[command(name = "kl")]
+#[command(about = "CLI for KnowLoop")]
 struct Cli {
-    /// Orchestrator server URL
-    #[arg(
-        long,
-        env = "ORCHESTRATOR_URL",
-        default_value = "http://localhost:8080"
-    )]
+    /// KnowLoop server URL
+    #[arg(long, env = "KNOWLOOP_URL", default_value = "http://localhost:8080")]
     server: String,
 
     #[command(subcommand)]

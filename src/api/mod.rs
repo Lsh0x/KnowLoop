@@ -18,6 +18,7 @@ pub mod protocol_handlers;
 pub mod query;
 pub mod reason_handlers;
 pub mod registry_handlers;
+pub mod retrospective_handlers;
 pub mod rfc_handlers;
 pub mod routes;
 pub mod sharing_handlers;

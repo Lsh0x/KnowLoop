@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/*", "desktop/src-tauri"]
+members = [".", "crates/*"]
 resolver = "2"
 
 # =============================================================================
@@ -48,7 +48,7 @@ sysinfo = "0.33"
 # Main crate
 # =============================================================================
 [package]
-name = "project-orchestrator"
+name = "knowloop"
 version = "0.1.0"
 edition = "2021"
 description = "AI agent orchestrator with Neo4j knowledge graph, Meilisearch, and Tree-sitter parsing"
@@ -94,6 +94,7 @@ tree-sitter-c-sharp = "0.23"
 tree-sitter-scala = "0.24"
 tree-sitter-zig = "1.1"
 tree-sitter-hcl = { path = "crates/tree-sitter-hcl" }
+tree-sitter-dart = { path = "crates/tree-sitter-dart" }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -197,15 +198,15 @@ tokio-test = "0.4"
 tempfile = "3.14"
 
 [[bin]]
-name = "orchestrator"
+name = "knowloop"
 path = "src/main.rs"
 
 [[bin]]
-name = "orch"
+name = "kl"
 path = "src/cli.rs"
 
 [[bin]]
-name = "mcp_server"
+name = "knowloop_mcp"
 path = "src/bin/mcp_server.rs"
 
 # =============================================================================
@@ -223,14 +224,14 @@ Provides a REST API, WebSocket events, and an optional embedded React frontend."
 depends = "$auto"
 maintainer-scripts = "packaging/debian/"
 assets = [
-    ["target/release/orchestrator", "/usr/bin/orchestrator", "755"],
-    ["target/release/orch", "/usr/bin/orch", "755"],
-    ["target/release/mcp_server", "/usr/bin/orchestrator-mcp", "755"],
-    ["config.yaml.example", "/etc/project-orchestrator/config.yaml.example", "644"],
-    ["packaging/debian/project-orchestrator.service", "/lib/systemd/system/project-orchestrator.service", "644"],
-    ["packaging/debian/docker-compose.services.yml", "/etc/project-orchestrator/docker-compose.services.yml", "644"],
+    ["target/release/knowloop", "/usr/bin/knowloop", "755"],
+    ["target/release/kl", "/usr/bin/kl", "755"],
+    ["target/release/knowloop_mcp", "/usr/bin/knowloop-mcp", "755"],
+    ["config.yaml.example", "/etc/knowloop/config.yaml.example", "644"],
+    ["packaging/debian/knowloop.service", "/lib/systemd/system/knowloop.service", "644"],
+    ["packaging/debian/docker-compose.services.yml", "/etc/knowloop/docker-compose.services.yml", "644"],
 ]
-conf-files = ["/etc/project-orchestrator/config.yaml"]
+conf-files = ["/etc/knowloop/config.yaml"]
 
 # NOTE: No [package.metadata.deb.systemd-units] section — we handle systemd
 # entirely via the assets entry + custom maintainer-scripts (postinst/prerm/postrm).
@@ -248,12 +249,12 @@ depends = "libc6 (>= 2.35), libgcc-s1"
 # =============================================================================
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/orchestrator", dest = "/usr/bin/orchestrator", mode = "755" },
-    { source = "target/release/orch", dest = "/usr/bin/orch", mode = "755" },
-    { source = "target/release/mcp_server", dest = "/usr/bin/orchestrator-mcp", mode = "755" },
-    { source = "config.yaml.example", dest = "/etc/project-orchestrator/config.yaml.example", mode = "644", config = "noreplace" },
-    { source = "packaging/debian/project-orchestrator.service", dest = "/lib/systemd/system/project-orchestrator.service", mode = "644" },
-    { source = "packaging/debian/docker-compose.services.yml", dest = "/etc/project-orchestrator/docker-compose.services.yml", mode = "644" },
+    { source = "target/release/knowloop", dest = "/usr/bin/knowloop", mode = "755" },
+    { source = "target/release/kl", dest = "/usr/bin/kl", mode = "755" },
+    { source = "target/release/knowloop_mcp", dest = "/usr/bin/knowloop-mcp", mode = "755" },
+    { source = "config.yaml.example", dest = "/etc/knowloop/config.yaml.example", mode = "644", config = "noreplace" },
+    { source = "packaging/debian/knowloop.service", dest = "/lib/systemd/system/knowloop.service", mode = "644" },
+    { source = "packaging/debian/docker-compose.services.yml", dest = "/etc/knowloop/docker-compose.services.yml", mode = "644" },
 ]
 post_install_script = "packaging/rpm/postinst.sh"
 

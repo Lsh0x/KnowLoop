@@ -12,7 +12,7 @@ pub struct PermissionConfig {
     /// Permission mode: "default", "acceptEdits", "plan", "bypassPermissions"
     #[serde(default = "PermissionConfig::default_mode")]
     pub mode: String,
-    /// Tool patterns to explicitly allow (e.g. "Bash(git *)", "mcp__project-orchestrator__*").
+    /// Tool patterns to explicitly allow (e.g. "Bash(git *)", "mcp__knowloop__*").
     /// Defaults to [`DEFAULT_ALLOWED_TOOLS`] when absent from config, ensuring MCP tools
     /// are usable out of the box.
     #[serde(default = "PermissionConfig::default_allowed_tools")]
@@ -66,10 +66,10 @@ impl PermissionConfig {
 
 /// Default allowed tool patterns applied when no explicit configuration is provided.
 ///
-/// These ensure that MCP tools from the Project Orchestrator server are usable
+/// These ensure that MCP tools from the KnowLoop server are usable
 /// out of the box, without requiring the user to manually add them via the
 /// chat settings page or config.yaml.
-pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &["mcp__project-orchestrator__*"];
+pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &["mcp__knowloop__*"];
 
 impl Default for PermissionConfig {
     fn default() -> Self {
@@ -279,14 +279,14 @@ impl ChatConfig {
         // Try relative to current executable
         if let Ok(exe) = std::env::current_exe() {
             let dir = exe.parent().unwrap_or(exe.as_ref());
-            let candidate = dir.join("mcp_server");
+            let candidate = dir.join("knowloop_mcp");
             if candidate.exists() {
                 return candidate;
             }
         }
 
         // Fallback
-        PathBuf::from("mcp_server")
+        PathBuf::from("knowloop_mcp")
     }
 
     /// Build the MCP server config JSON for ClaudeCodeOptions
@@ -307,7 +307,7 @@ impl ChatConfig {
         }
 
         serde_json::json!({
-            "project-orchestrator": {
+            "knowloop": {
                 "command": self.mcp_server_path.to_string_lossy(),
                 "env": env
             }
@@ -378,10 +378,7 @@ mod tests {
         assert_eq!(config.session_timeout.as_secs(), 1800);
         // Permission defaults — MCP tools are pre-approved out of the box
         assert_eq!(config.permission.mode, "default");
-        assert_eq!(
-            config.permission.allowed_tools,
-            vec!["mcp__project-orchestrator__*"]
-        );
+        assert_eq!(config.permission.allowed_tools, vec!["mcp__knowloop__*"]);
         assert!(config.permission.disallowed_tools.is_empty());
         // New fields — defaults when env vars are absent
         assert!(config.process_path.is_none());
@@ -394,10 +391,7 @@ mod tests {
         std::env::set_var("CHAT_SESSION_TIMEOUT_SECS", "600");
         std::env::set_var("MCP_SERVER_PATH", "/custom/path/mcp_server");
         std::env::set_var("CHAT_PERMISSION_MODE", "default");
-        std::env::set_var(
-            "CHAT_ALLOWED_TOOLS",
-            "Bash(git *),Read,mcp__project-orchestrator__*",
-        );
+        std::env::set_var("CHAT_ALLOWED_TOOLS", "Bash(git *),Read,mcp__knowloop__*");
         std::env::set_var("CHAT_DISALLOWED_TOOLS", "Bash(rm -rf *), Bash(sudo *)");
         std::env::set_var(
             "CHAT_PROCESS_PATH",
@@ -417,7 +411,7 @@ mod tests {
         assert_eq!(config.permission.mode, "default");
         assert_eq!(
             config.permission.allowed_tools,
-            vec!["Bash(git *)", "Read", "mcp__project-orchestrator__*"]
+            vec!["Bash(git *)", "Read", "mcp__knowloop__*"]
         );
         assert_eq!(
             config.permission.disallowed_tools,
@@ -507,7 +501,7 @@ mod tests {
         };
 
         let json = config.mcp_server_config();
-        let server = &json["project-orchestrator"];
+        let server = &json["knowloop"];
         assert_eq!(server["command"], "/path/to/mcp_server");
         assert_eq!(server["env"]["NEO4J_URI"], "bolt://localhost:7687");
         assert_eq!(server["env"]["NATS_URL"], "nats://localhost:4222");
@@ -540,7 +534,7 @@ mod tests {
         };
 
         let json = config.mcp_server_config();
-        let server = &json["project-orchestrator"];
+        let server = &json["knowloop"];
         assert_eq!(server["command"], "/path/to/mcp_server");
         // NATS_URL should not be present when not configured
         assert!(server["env"]["NATS_URL"].is_null());
@@ -551,7 +545,7 @@ mod tests {
         let config = PermissionConfig::default();
         assert_eq!(config.mode, "default");
         // MCP tools are pre-approved by default
-        assert_eq!(config.allowed_tools, vec!["mcp__project-orchestrator__*"]);
+        assert_eq!(config.allowed_tools, vec!["mcp__knowloop__*"]);
         assert!(config.disallowed_tools.is_empty());
     }
 
@@ -636,13 +630,13 @@ mod tests {
         // Empty JSON should use defaults — MCP tools pre-approved
         let config: PermissionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.mode, "default");
-        assert_eq!(config.allowed_tools, vec!["mcp__project-orchestrator__*"]);
+        assert_eq!(config.allowed_tools, vec!["mcp__knowloop__*"]);
         assert!(config.disallowed_tools.is_empty());
 
         // Partial JSON should fill defaults
         let config: PermissionConfig = serde_json::from_str(r#"{"mode":"default"}"#).unwrap();
         assert_eq!(config.mode, "default");
-        assert_eq!(config.allowed_tools, vec!["mcp__project-orchestrator__*"]);
+        assert_eq!(config.allowed_tools, vec!["mcp__knowloop__*"]);
 
         // Explicit empty array should be respected (user intent to disable)
         let config: PermissionConfig =

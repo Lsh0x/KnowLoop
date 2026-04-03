@@ -1,10 +1,10 @@
-//! Integration tests for project-orchestrator
+//! Integration tests for knowloop
 //!
 //! These tests require Neo4j and Meilisearch to be running.
 //! Run with: cargo test --test integration_tests
 
-use project_orchestrator::neo4j::models::*;
-use project_orchestrator::{AppState, Config};
+use knowloop::neo4j::models::*;
+use knowloop::{AppState, Config};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -282,7 +282,7 @@ async fn test_meilisearch_code_indexing() {
     let config = test_config();
     let state = AppState::new(config).await.unwrap();
 
-    use project_orchestrator::meilisearch::indexes::CodeDocument;
+    use knowloop::meilisearch::indexes::CodeDocument;
 
     // Create a test document
     let doc = CodeDocument {
@@ -325,7 +325,7 @@ async fn test_meilisearch_decision_indexing() {
     let config = test_config();
     let state = AppState::new(config).await.unwrap();
 
-    use project_orchestrator::meilisearch::indexes::DecisionDocument;
+    use knowloop::meilisearch::indexes::DecisionDocument;
 
     // Create a test decision document
     let doc = DecisionDocument {
@@ -371,7 +371,7 @@ async fn test_neo4j_stale_file_cleanup() {
 
     // Create a test project
     let project_id = Uuid::new_v4();
-    let project = project_orchestrator::neo4j::models::ProjectNode {
+    let project = knowloop::neo4j::models::ProjectNode {
         id: project_id,
         name: format!("Cleanup Test Project {}", project_id),
         slug: format!("cleanup-test-{}", project_id),

@@ -87,7 +87,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Our client info sent during initialize handshake.
 pub fn client_info() -> serde_json::Value {
     serde_json::json!({
-        "name": "project-orchestrator",
+        "name": "knowloop",
         "version": env!("CARGO_PKG_VERSION"),
     })
 }
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn test_client_info() {
         let info = client_info();
-        assert_eq!(info["name"], "project-orchestrator");
+        assert_eq!(info["name"], "knowloop");
         assert!(info["version"].is_string());
         // Version should match CARGO_PKG_VERSION
         assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(params["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert!(params["capabilities"].is_object());
         assert!(params["clientInfo"].is_object());
-        assert_eq!(params["clientInfo"]["name"], "project-orchestrator");
+        assert_eq!(params["clientInfo"]["name"], "knowloop");
     }
 
     #[test]

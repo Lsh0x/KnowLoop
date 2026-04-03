@@ -46,6 +46,8 @@ pub const IGNORED_PATH_SEGMENTS: &[&str] = &[
     // IDE settings
     "/.idea/",
     "/.vscode/",
+    // Python virtual environments
+    "/.venv/",
 ];
 
 /// Check whether a file path should be ignored during sync.

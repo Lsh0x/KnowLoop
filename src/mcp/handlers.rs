@@ -192,6 +192,7 @@ impl ToolHandler {
             "sharing",
             "neural_routing",
             "trajectory",
+            "retrospective",
         ];
 
         if !mega_tools.contains(&name) {
@@ -641,6 +642,13 @@ impl ToolHandler {
             ("admin", "get_learning_stats") => "get_learning_stats",
             ("admin", "learning_metrics") => "learning_metrics",
             ("admin", "analyze_runner_feedback") => "analyze_runner_feedback",
+
+            // Retrospective (Task Learning)
+            ("retrospective", "get") => "get_retrospective",
+            ("retrospective", "get_for_task") => "get_task_retrospective",
+            ("retrospective", "list") => "list_retrospectives",
+            ("retrospective", "insights") => "get_retrospective_insights",
+            ("retrospective", "trigger") => "trigger_retrospective",
 
             // Lifecycle Hooks
             ("lifecycle_hook", "list") => "list_lifecycle_hooks",
@@ -6070,6 +6078,62 @@ impl ToolHandler {
                 } else {
                     result
                 }))
+            }
+
+            // ── Retrospective (Task Learning) ────────────────────────────
+            "get_retrospective" => {
+                let id = extract_id(args, "retrospective_id")?;
+                let result = http.get(&format!("/api/retrospectives/{}", id)).await?;
+                Ok(Some(result))
+            }
+            "get_task_retrospective" => {
+                let task_id = extract_id(args, "task_id")?;
+                let result = http
+                    .get(&format!("/api/tasks/{}/retrospective", task_id))
+                    .await?;
+                Ok(Some(result))
+            }
+            "list_retrospectives" => {
+                let mut query = Vec::new();
+                if let Some(pid) = args.get("project_id").and_then(|v| v.as_str()) {
+                    query.push(("project_id".to_string(), pid.to_string()));
+                }
+                if let Some(o) = args.get("outcome").and_then(|v| v.as_str()) {
+                    query.push(("outcome".to_string(), o.to_string()));
+                }
+                if let Some(l) = args.get("limit").and_then(|v| v.as_u64()) {
+                    query.push(("limit".to_string(), l.to_string()));
+                }
+                if let Some(o) = args.get("offset").and_then(|v| v.as_u64()) {
+                    query.push(("offset".to_string(), o.to_string()));
+                }
+                let result = if query.is_empty() {
+                    http.get("/api/retrospectives").await?
+                } else {
+                    http.get_with_query("/api/retrospectives", &query).await?
+                };
+                Ok(Some(result))
+            }
+            "get_retrospective_insights" => {
+                let project_id = extract_id(args, "project_id")?;
+                let mut query = vec![("project_id".to_string(), project_id)];
+                if let Some(l) = args.get("limit").and_then(|v| v.as_u64()) {
+                    query.push(("limit".to_string(), l.to_string()));
+                }
+                let result = http
+                    .get_with_query("/api/retrospectives/insights", &query)
+                    .await?;
+                Ok(Some(result))
+            }
+            "trigger_retrospective" => {
+                let task_id = extract_id(args, "task_id")?;
+                // Trigger is just getting the retrospective — the system
+                // auto-generates on task completion. This endpoint shows
+                // if one exists, or returns 404 to indicate it needs running.
+                let result = http
+                    .get(&format!("/api/tasks/{}/retrospective", task_id))
+                    .await?;
+                Ok(Some(result))
             }
 
             // ── All tools migrated ──────────────────────────────────────

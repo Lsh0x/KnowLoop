@@ -41,6 +41,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         trajectory_tool(),
         lifecycle_hook_tool(),
         mcp_federation_tool(),
+        retrospective_tool(),
     ]
 }
 
@@ -1415,6 +1416,30 @@ fn mcp_federation_tool() -> ToolDefinition {
     }
 }
 
+fn retrospective_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "retrospective".to_string(),
+        description: "Task retrospective learning system. Analyzes completed tasks to learn from success and failure patterns. Actions: get, get_for_task, list, insights, trigger".to_string(),
+        input_schema: InputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "action": {
+                    "type": "string",
+                    "enum": ["get", "get_for_task", "list", "insights", "trigger"],
+                    "description": "Operation to perform"
+                },
+                "retrospective_id": {"type": "string", "description": "Retrospective UUID (get)"},
+                "task_id": {"type": "string", "description": "Task UUID (get_for_task, trigger)"},
+                "project_id": {"type": "string", "description": "Project UUID (list, insights)"},
+                "outcome": {"type": "string", "enum": ["success", "failure", "partial"], "description": "Filter by outcome (list)"},
+                "limit": {"type": "integer", "description": "Max items to return (list, default 50)"},
+                "offset": {"type": "integer", "description": "Items to skip (list, default 0)"}
+            })),
+            required: Some(vec!["action".to_string()]),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1424,8 +1449,8 @@ mod tests {
         let tools = all_tools();
         assert_eq!(
             tools.len(),
-            29,
-            "Expected 29 mega-tools, got {}",
+            30,
+            "Expected 30 mega-tools, got {}",
             tools.len()
         );
     }

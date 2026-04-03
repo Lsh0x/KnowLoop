@@ -2823,7 +2823,7 @@ mod tests {
             }],
             skill_names: vec!["graph-queries".to_string()],
             source: Some(PersonaPackageSource {
-                project_name: Some("project-orchestrator".to_string()),
+                project_name: Some("knowloop".to_string()),
                 exported_at: Utc::now(),
             }),
         };

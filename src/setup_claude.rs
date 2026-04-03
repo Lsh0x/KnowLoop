@@ -1,6 +1,6 @@
 //! Automatic Claude Code MCP configuration.
 //!
-//! Detects Claude Code CLI and configures the Project Orchestrator
+//! Detects Claude Code CLI and configures the KnowLoop
 //! MCP server in **stdio mode** (the `mcp_server` binary acts as an HTTP
 //! proxy to the REST API). Configuration is done either via `claude mcp add`
 //! or by directly editing `~/.claude/mcp.json`.
@@ -14,7 +14,7 @@
 //! binary auto-generates a fresh token from the secret at startup.
 //!
 //! Also configures `~/.claude/settings.json` to pre-approve all MCP tools
-//! from the Project Orchestrator server (`mcp__project-orchestrator__*`),
+//! from the KnowLoop server (`mcp__knowloop__*`),
 //! so the user doesn't get a permission prompt for every tool call.
 
 use anyhow::{bail, Context, Result};
@@ -59,12 +59,12 @@ pub enum SetupResult {
 // Configuration
 // ============================================================================
 
-const MCP_SERVER_NAME: &str = "project-orchestrator";
+const MCP_SERVER_NAME: &str = "knowloop";
 
-/// Permission pattern that allows all MCP tools from the Project Orchestrator server.
+/// Permission pattern that allows all MCP tools from the KnowLoop server.
 /// Format: `mcp__<server-name>__*` (Claude Code double-underscore convention).
 /// See: https://code.claude.com/docs/en/permissions#mcp
-const MCP_ALLOWED_TOOL_PATTERN: &str = "mcp__project-orchestrator__*";
+const MCP_ALLOWED_TOOL_PATTERN: &str = "mcp__knowloop__*";
 
 // ============================================================================
 // Public API
@@ -107,16 +107,14 @@ pub fn setup_claude_code(config: &SetupConfig) -> Result<SetupResult> {
     // Check if already configured and up-to-date
     match check_existing_config(&mcp_path, &env_vars)? {
         ConfigStatus::UpToDate => {
-            tracing::info!(
-                "Project Orchestrator MCP server is already correctly configured in Claude Code"
-            );
+            tracing::info!("KnowLoop MCP server is already correctly configured in Claude Code");
             return Ok(SetupResult::AlreadyConfigured {
                 allowed_tools_configured: allowed_tools_ok,
             });
         }
         ConfigStatus::Stale => {
             tracing::info!(
-                "Project Orchestrator MCP config is stale — updating to stdio mode with current settings"
+                "KnowLoop MCP config is stale — updating to stdio mode with current settings"
             );
             // Update the existing config in-place
             let path = configure_via_file(&mcp_path, &env_vars)?;
@@ -126,7 +124,7 @@ pub fn setup_claude_code(config: &SetupConfig) -> Result<SetupResult> {
             });
         }
         ConfigStatus::Missing => {
-            tracing::info!("Project Orchestrator MCP server not yet configured");
+            tracing::info!("KnowLoop MCP server not yet configured");
         }
     }
 
@@ -463,8 +461,8 @@ fn settings_json_path() -> Result<PathBuf> {
 
 /// Configure allowed tools in `~/.claude/settings.json`.
 ///
-/// Adds the `mcp__project-orchestrator__*` pattern to `permissions.allow`
-/// so all MCP tools from the Project Orchestrator server are pre-approved.
+/// Adds the `mcp__knowloop__*` pattern to `permissions.allow`
+/// so all MCP tools from the KnowLoop server are pre-approved.
 ///
 /// - Merges with existing settings (never overwrites)
 /// - Creates a backup (.bak) if the file already exists
@@ -610,7 +608,7 @@ mod tests {
         // Verify the config
         let content = std::fs::read_to_string(&mcp_path).unwrap();
         let parsed: Value = serde_json::from_str(&content).unwrap();
-        let server = &parsed["mcpServers"]["project-orchestrator"];
+        let server = &parsed["mcpServers"]["knowloop"];
 
         assert_eq!(server["command"].as_str().unwrap(), "/path/to/mcp_server");
         assert!(server.get("type").is_none(), "should not have SSE type");
@@ -663,7 +661,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let json: Value = serde_json::from_str(&content).unwrap();
 
-        // Verify structure: { "permissions": { "allow": ["mcp__project-orchestrator__*"] } }
+        // Verify structure: { "permissions": { "allow": ["mcp__knowloop__*"] } }
         let allow = json["permissions"]["allow"].as_array().unwrap();
         assert_eq!(allow.len(), 1);
         assert_eq!(allow[0].as_str().unwrap(), MCP_ALLOWED_TOOL_PATTERN);

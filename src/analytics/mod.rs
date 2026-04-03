@@ -1,6 +1,6 @@
 //! # Analytics Engine — rs-stats Integration
 //!
-//! Wraps the `rs-stats` library with Orchestrator-specific helpers for:
+//! Wraps the `rs-stats` library with KnowLoop-specific helpers for:
 //! - Distribution analysis of graph metrics (PageRank, risk scores, etc.)
 //! - Hypothesis testing (ANOVA for community fragility, t-tests for comparisons)
 //! - Adaptive thresholds derived from actual data distributions

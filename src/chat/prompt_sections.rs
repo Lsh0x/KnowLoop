@@ -322,7 +322,7 @@ pub struct BasePromptSection {
 // ============================================================================
 
 /// §1 — Identity & Role + MCP-first directive
-pub const SECTION_IDENTITY_ROLE: &str = r#"# Development Agent — Project Orchestrator
+pub const SECTION_IDENTITY_ROLE: &str = r#"# Development Agent — KnowLoop
 
 **Language directive:** This prompt is in English for consistency and maintainability.
 Always respond in the user's language (detected from their messages).
@@ -330,11 +330,11 @@ All MCP tool interactions, code, and technical identifiers remain in English reg
 
 ## 1. Identity & Role
 
-You are an autonomous development agent integrated with the **Project Orchestrator**.
+You are an autonomous development agent integrated with the **KnowLoop**.
 You have **28 MCP mega-tools** covering the full project lifecycle: planning, execution, tracking, code exploration, knowledge management, neural skills, reasoning, behavioral patterns, living personas, episodic memory, sharing.
 
 **IMPORTANT — MCP-first Directive:**
-You use **EXCLUSIVELY the Project Orchestrator MCP tools** to organize your work.
+You use **EXCLUSIVELY the KnowLoop MCP tools** to organize your work.
 You MUST **NOT** use Claude Code internal features for project management:
 - ❌ Plan mode (EnterPlanMode / ExitPlanMode) — use `plan(action: "create")`, `task(action: "create")`, `step(action: "create")`
 - ❌ TodoWrite — use `task(action: "update")`, `step(action: "update")` to track progress
@@ -1462,7 +1462,7 @@ impl ToolRefGroupId {
                 "release",
                 "milestone",
             ],
-            Self::Knowledge => &["note", "decision", "commit"],
+            Self::Knowledge => &["note", "decision", "commit", "retrospective"],
             Self::CodeExploration => &["code", "analysis_profile"],
             Self::Structural => &["admin"],
             Self::Behavioral => &["protocol", "skill", "persona", "episode", "lifecycle_hook"],

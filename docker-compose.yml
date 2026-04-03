@@ -1,7 +1,7 @@
 services:
   neo4j:
     image: neo4j:5.26.20-community
-    container_name: orchestrator-neo4j
+    container_name: knowloop-neo4j
     ports:
       - "7474:7474"  # HTTP Browser
       - "7687:7687"  # Bolt
@@ -11,9 +11,10 @@ services:
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*
       - NEO4J_dbms_memory_heap_initial__size=2G
       - NEO4J_dbms_memory_heap_max__size=4G
+      - NEO4J_dbms_memory_transaction_total_max=4G
     volumes:
-      - neo4j_data:/data
-      - neo4j_logs:/logs
+      - ./data/neo4j/data:/data
+      - ./data/neo4j/logs:/logs
       - ./init/neo4j:/var/lib/neo4j/import
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
@@ -22,11 +23,11 @@ services:
       retries: 5
       start_period: 30s
     networks:
-      - orchestrator-net
+      - knowloop-net
 
   meilisearch:
     image: getmeili/meilisearch:v1.34.2
-    container_name: orchestrator-meilisearch
+    container_name: knowloop-meilisearch
     ports:
       - "7700:7700"
     environment:
@@ -35,44 +36,37 @@ services:
       - MEILI_LOG_LEVEL=INFO
       - MEILI_MAX_INDEXING_MEMORY=512MiB
     volumes:
-      - meilisearch_data:/meili_data
+      - ./data/meilisearch:/meili_data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - orchestrator-net
+      - knowloop-net
 
   nats:
     image: nats:2.11-alpine
-    container_name: orchestrator-nats
+    container_name: knowloop-nats
     ports:
       - "4222:4222"   # Client connections
       - "8222:8222"   # HTTP monitoring
     command: ["--http_port", "8222", "--jetstream"]
     volumes:
-      - nats_data:/data/jetstream
+      - ./data/nats:/data/jetstream
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8222/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - orchestrator-net
+      - knowloop-net
 
-  orchestrator:
+  knowloop:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        # Path to the frontend source within the build context.
-        # To include the frontend, either:
-        # 1. Symlink/copy the frontend dir into this repo as ./frontend
-        # 2. Pre-build the frontend and copy dist/ to ./dist
-        # 3. Set FRONTEND_SRC to a valid path in the build context
-        FRONTEND_SRC: ./frontend
-    container_name: orchestrator-server
+    container_name: knowloop-server
     ports:
       - "8080:8080"
     environment:
@@ -81,12 +75,10 @@ services:
       - NEO4J_PASSWORD=orchestrator123
       - MEILISEARCH_URL=http://meilisearch:7700
       - MEILISEARCH_KEY=orchestrator-meili-key-change-me
-      - RUST_LOG=info,project_orchestrator=debug
+      - SETUP_COMPLETED=true
+      - RUST_LOG=info,knowloop=debug
       - WORKSPACE_PATH=/workspace
       - NATS_URL=nats://nats:4222
-      # Frontend is served from /app/dist (default: true)
-      # Set to false for API-only mode
-      # - SERVE_FRONTEND=false
     depends_on:
       neo4j:
         condition: service_healthy
@@ -96,17 +88,10 @@ services:
         condition: service_healthy
     volumes:
       - ./workspace:/workspace:ro
-      - orchestrator_data:/data
+      - ./data/knowloop:/data
     networks:
-      - orchestrator-net
-
-volumes:
-  neo4j_data:
-  neo4j_logs:
-  meilisearch_data:
-  nats_data:
-  orchestrator_data:
+      - knowloop-net
 
 networks:
-  orchestrator-net:
+  knowloop-net:
     driver: bridge

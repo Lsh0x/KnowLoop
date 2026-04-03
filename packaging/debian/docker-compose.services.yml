@@ -1,7 +1,7 @@
-# Docker Compose for Project Orchestrator dependencies (Neo4j + MeiliSearch)
+# Docker Compose for KnowLoop dependencies (Neo4j + MeiliSearch)
 #
 # Usage:
-#   cd /etc/project-orchestrator
+#   cd /etc/knowloop
 #   docker compose -f docker-compose.services.yml up -d
 #
 # This only runs the required services. The orchestrator itself runs as a

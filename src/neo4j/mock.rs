@@ -10936,6 +10936,61 @@ impl GraphStore for MockGraphStore {
         // Mock: no chat event records to scan, return 0
         Ok(0)
     }
+
+    // ── TaskRetrospective (mock) ──────────────────────────────────────────
+
+    async fn create_task_retrospective(
+        &self,
+        _retro: &crate::retrospective::models::TaskRetrospective,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_task_retrospective(
+        &self,
+        _id: Uuid,
+    ) -> Result<Option<crate::retrospective::models::TaskRetrospective>> {
+        Ok(None)
+    }
+
+    async fn get_retrospective_for_task(
+        &self,
+        _task_id: Uuid,
+    ) -> Result<Option<crate::retrospective::models::TaskRetrospective>> {
+        Ok(None)
+    }
+
+    async fn list_retrospectives(
+        &self,
+        _project_id: Option<Uuid>,
+        _outcome: Option<&str>,
+        _limit: i64,
+        _offset: i64,
+    ) -> Result<Vec<crate::retrospective::models::TaskRetrospective>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_retrospectives_for_cohort(
+        &self,
+        _project_id: Uuid,
+        _tags: &[String],
+        _files: &[String],
+        _limit: i64,
+    ) -> Result<Vec<crate::retrospective::models::TaskRetrospective>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_file_failure_rates(
+        &self,
+        _project_id: Uuid,
+        _file_paths: &[String],
+    ) -> Result<std::collections::HashMap<String, f64>> {
+        Ok(std::collections::HashMap::new())
+    }
+
+    async fn link_retrospective_note(&self, _retrospective_id: Uuid, _note_id: Uuid) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
