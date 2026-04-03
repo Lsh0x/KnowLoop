@@ -1928,7 +1928,11 @@ extension type Meters(double value) implements double {
     assert!(
         ext.is_some(),
         "Should find extension on List, got impl_blocks: {:?}",
-        parsed.impl_blocks.iter().map(|i| &i.for_type).collect::<Vec<_>>()
+        parsed
+            .impl_blocks
+            .iter()
+            .map(|i| &i.for_type)
+            .collect::<Vec<_>>()
     );
 
     // Extension getter
@@ -2001,7 +2005,7 @@ void noReturn(int a, int b) {
     assert!(named.is_some(), "Should find withNamedParams");
     let named = named.unwrap();
     assert!(
-        named.params.len() >= 1,
+        !named.params.is_empty(),
         "withNamedParams should have at least 1 param, got: {:?}",
         named.params
     );
@@ -2013,14 +2017,18 @@ void noReturn(int a, int b) {
         .find(|f| f.name == "withOptionalParams");
     assert!(opt.is_some(), "Should find withOptionalParams");
     assert!(
-        opt.unwrap().params.len() >= 1,
+        !opt.unwrap().params.is_empty(),
         "withOptionalParams should have at least 1 param"
     );
 
     // noReturn -- void return
     let no_ret = parsed.functions.iter().find(|f| f.name == "noReturn");
     assert!(no_ret.is_some(), "Should find noReturn");
-    assert_eq!(no_ret.unwrap().params.len(), 2, "noReturn should have 2 params");
+    assert_eq!(
+        no_ret.unwrap().params.len(),
+        2,
+        "noReturn should have 2 params"
+    );
 }
 
 #[test]
@@ -2158,10 +2166,7 @@ int calculate(int x) {
     );
 
     let calc_fn = parsed.functions.iter().find(|f| f.name == "calculate");
-    assert!(
-        calc_fn.is_some(),
-        "Should find calculate function"
-    );
+    assert!(calc_fn.is_some(), "Should find calculate function");
     assert_eq!(
         calc_fn.unwrap().return_type.as_deref(),
         Some("int"),
@@ -2211,4 +2216,3 @@ class Documented {
     let do_stuff = parsed.functions.iter().find(|f| f.name == "doStuff");
     assert!(do_stuff.is_some(), "Should find doStuff method");
 }
-
