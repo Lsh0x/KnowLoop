@@ -13,6 +13,21 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+/// Input parameters for [`run_retrospective`].
+pub struct RetrospectiveInput {
+    pub graph: Arc<dyn GraphStore + Send + Sync>,
+    pub task_id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub session_id: Option<Uuid>,
+    pub agent_execution_id: Option<Uuid>,
+    pub outcome: RetrospectiveOutcome,
+    pub duration_secs: f64,
+    pub cost_usd: f64,
+    pub confidence_score: f64,
+    pub files_modified: Vec<String>,
+    pub commits: Vec<String>,
+}
+
 /// Minimum cohort size required for statistical comparison.
 const MIN_COHORT_SIZE: usize = 5;
 
@@ -32,19 +47,20 @@ const EXPENSIVE_ZSCORE_THRESHOLD: f64 = 2.0;
 ///
 /// This is designed to be called as a fire-and-forget `tokio::spawn`.
 /// Errors are logged but don't propagate to the caller.
-pub async fn run_retrospective(
-    graph: Arc<dyn GraphStore + Send + Sync>,
-    task_id: Uuid,
-    project_id: Option<Uuid>,
-    session_id: Option<Uuid>,
-    agent_execution_id: Option<Uuid>,
-    outcome: RetrospectiveOutcome,
-    duration_secs: f64,
-    cost_usd: f64,
-    confidence_score: f64,
-    files_modified: Vec<String>,
-    commits: Vec<String>,
-) -> Result<TaskRetrospective> {
+pub async fn run_retrospective(input: RetrospectiveInput) -> Result<TaskRetrospective> {
+    let RetrospectiveInput {
+        graph,
+        task_id,
+        project_id,
+        session_id,
+        agent_execution_id,
+        outcome,
+        duration_secs,
+        cost_usd,
+        confidence_score,
+        files_modified,
+        commits,
+    } = input;
     info!(
         "Running retrospective for task {} (outcome: {})",
         task_id, outcome

@@ -415,8 +415,8 @@ impl PostStreamHandler {
         // Should we check for pending objectives?
         // Yes when: (a) no productive tools, OR (b) productive + conclusive (agent wrapping up),
         // OR (c) productive tools used (to detect HARD GATE violations — code without plan).
-        let should_check =
-            !had_productive_tool_use || had_conclusive_tool_use || had_productive_tool_use; // always check when code was written (HARD GATE)
+        // Always check: productive tools need HARD GATE validation, non-productive need objective reminders
+        let should_check = true;
 
         // Fetch pending objectives from graph (only if we might need them)
         let (pending_tasks, work_log_summary, no_active_plan) = if !auto_continue_allowed

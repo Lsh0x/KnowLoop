@@ -1689,17 +1689,20 @@ impl PlanRunner {
                             .unwrap_or(0.0);
                         tokio::spawn(async move {
                             if let Err(e) = crate::retrospective::analyzer::run_retrospective(
-                                graph,
-                                task_id,
-                                project_id,
-                                task_session_id,
-                                task_agent_execution_id,
-                                crate::retrospective::models::RetrospectiveOutcome::Success,
-                                duration_secs,
-                                cost_usd,
-                                retro_confidence,
-                                retro_files,
-                                retro_commits,
+                                crate::retrospective::analyzer::RetrospectiveInput {
+                                    graph,
+                                    task_id,
+                                    project_id,
+                                    session_id: task_session_id,
+                                    agent_execution_id: task_agent_execution_id,
+                                    outcome:
+                                        crate::retrospective::models::RetrospectiveOutcome::Success,
+                                    duration_secs,
+                                    cost_usd,
+                                    confidence_score: retro_confidence,
+                                    files_modified: retro_files,
+                                    commits: retro_commits,
+                                },
                             )
                             .await
                             {
@@ -1811,19 +1814,21 @@ impl PlanRunner {
                                 .unwrap_or_default();
                             tokio::spawn(async move {
                                 if let Err(e) = crate::retrospective::analyzer::run_retrospective(
-                                    graph,
-                                    task_id,
-                                    project_id,
-                                    task_session_id,
-                                    task_agent_execution_id,
-                                    crate::retrospective::models::RetrospectiveOutcome::Failure {
-                                        reason: failure_reason,
+                                    crate::retrospective::analyzer::RetrospectiveInput {
+                                        graph,
+                                        task_id,
+                                        project_id,
+                                        session_id: task_session_id,
+                                        agent_execution_id: task_agent_execution_id,
+                                        outcome: crate::retrospective::models::RetrospectiveOutcome::Failure {
+                                            reason: failure_reason,
+                                        },
+                                        duration_secs: 0.0,
+                                        cost_usd,
+                                        confidence_score: 0.0,
+                                        files_modified: vec![],
+                                        commits: vec![],
                                     },
-                                    0.0,
-                                    cost_usd,
-                                    0.0,
-                                    vec![],
-                                    vec![],
                                 )
                                 .await
                                 {
