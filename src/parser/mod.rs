@@ -609,9 +609,9 @@ mod tests {
     }
 
     #[test]
-    fn test_all_returns_16_languages() {
+    fn test_all_returns_17_languages() {
         let all = SupportedLanguage::all();
-        assert_eq!(all.len(), 16);
+        assert_eq!(all.len(), 17);
     }
 
     #[test]

@@ -167,8 +167,7 @@ pub async fn get_insights(
     let success_rate = successes as f64 / total as f64;
     let avg_duration = retros.iter().map(|r| r.duration_secs).sum::<f64>() / total as f64;
     let avg_cost = retros.iter().map(|r| r.cost_usd).sum::<f64>() / total as f64;
-    let avg_confidence =
-        retros.iter().map(|r| r.confidence_score).sum::<f64>() / total as f64;
+    let avg_confidence = retros.iter().map(|r| r.confidence_score).sum::<f64>() / total as f64;
 
     // Compute file failure rates from retrospectives
     let mut file_counts: std::collections::HashMap<String, (usize, usize)> =
@@ -193,7 +192,11 @@ pub async fn get_insights(
             occurrences: total,
         })
         .collect();
-    risky_files.sort_by(|a, b| b.failure_rate.partial_cmp(&a.failure_rate).unwrap_or(std::cmp::Ordering::Equal));
+    risky_files.sort_by(|a, b| {
+        b.failure_rate
+            .partial_cmp(&a.failure_rate)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     risky_files.truncate(10);
 
     // Compute common errors

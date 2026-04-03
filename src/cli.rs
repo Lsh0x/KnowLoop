@@ -13,11 +13,7 @@ use uuid::Uuid;
 #[command(about = "CLI for KnowLoop")]
 struct Cli {
     /// KnowLoop server URL
-    #[arg(
-        long,
-        env = "KNOWLOOP_URL",
-        default_value = "http://localhost:8080"
-    )]
+    #[arg(long, env = "KNOWLOOP_URL", default_value = "http://localhost:8080")]
     server: String,
 
     #[command(subcommand)]
