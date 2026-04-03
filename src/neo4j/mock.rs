@@ -10988,11 +10988,7 @@ impl GraphStore for MockGraphStore {
         Ok(std::collections::HashMap::new())
     }
 
-    async fn link_retrospective_note(
-        &self,
-        _retrospective_id: Uuid,
-        _note_id: Uuid,
-    ) -> Result<()> {
+    async fn link_retrospective_note(&self, _retrospective_id: Uuid, _note_id: Uuid) -> Result<()> {
         Ok(())
     }
 }

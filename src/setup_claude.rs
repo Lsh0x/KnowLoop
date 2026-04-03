@@ -107,9 +107,7 @@ pub fn setup_claude_code(config: &SetupConfig) -> Result<SetupResult> {
     // Check if already configured and up-to-date
     match check_existing_config(&mcp_path, &env_vars)? {
         ConfigStatus::UpToDate => {
-            tracing::info!(
-                "KnowLoop MCP server is already correctly configured in Claude Code"
-            );
+            tracing::info!("KnowLoop MCP server is already correctly configured in Claude Code");
             return Ok(SetupResult::AlreadyConfigured {
                 allowed_tools_configured: allowed_tools_ok,
             });

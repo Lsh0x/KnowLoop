@@ -100,7 +100,9 @@ fn extract_toplevel(
                     None
                 };
 
-                if let Some(func) = extract_function_from_signature(&child, body_node.as_ref(), source, file_path) {
+                if let Some(func) =
+                    extract_function_from_signature(&child, body_node.as_ref(), source, file_path)
+                {
                     let func_id = format!("{}:{}:{}", file_path, func.name, func.line_start);
                     if let Some(ref body) = body_node {
                         let calls = extract_calls_from_node(body, source, &func_id);
@@ -173,9 +175,7 @@ fn extract_function_from_signature(
         get_text(b, source).map_or(false, |t| t.starts_with("async"))
     });
 
-    let complexity = body
-        .map(|b| calculate_complexity(b))
-        .unwrap_or(1);
+    let complexity = body.map(|b| calculate_complexity(b)).unwrap_or(1);
 
     Some(FunctionNode {
         name,
@@ -282,11 +282,7 @@ fn find_function_signature<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitt
     None
 }
 
-fn extract_class(
-    node: &tree_sitter::Node,
-    source: &str,
-    file_path: &str,
-) -> Option<StructNode> {
+fn extract_class(node: &tree_sitter::Node, source: &str, file_path: &str) -> Option<StructNode> {
     let name = get_field_text(node, "name", source)?;
     let visibility = if name.starts_with('_') {
         Visibility::Private
@@ -331,11 +327,7 @@ fn extract_class(
     })
 }
 
-fn extract_mixin(
-    node: &tree_sitter::Node,
-    source: &str,
-    file_path: &str,
-) -> Option<TraitNode> {
+fn extract_mixin(node: &tree_sitter::Node, source: &str, file_path: &str) -> Option<TraitNode> {
     let name = get_field_text(node, "name", source)?;
     let visibility = if name.starts_with('_') {
         Visibility::Private
@@ -361,11 +353,7 @@ fn extract_mixin(
     })
 }
 
-fn extract_enum(
-    node: &tree_sitter::Node,
-    source: &str,
-    file_path: &str,
-) -> Option<EnumNode> {
+fn extract_enum(node: &tree_sitter::Node, source: &str, file_path: &str) -> Option<EnumNode> {
     let name = get_field_text(node, "name", source)?;
     let visibility = if name.starts_with('_') {
         Visibility::Private
@@ -380,9 +368,10 @@ fn extract_enum(
             body.children(&mut body.walk())
                 .filter(|c| c.kind() == "enum_constant")
                 .filter_map(|v| {
-                    get_field_text(&v, "name", source)
-                        .or_else(|| find_child_by_kind(&v, "identifier")
-                            .and_then(|id| get_text(&id, source).map(|s| s.to_string())))
+                    get_field_text(&v, "name", source).or_else(|| {
+                        find_child_by_kind(&v, "identifier")
+                            .and_then(|id| get_text(&id, source).map(|s| s.to_string()))
+                    })
                 })
                 .collect()
         })
@@ -452,7 +441,9 @@ fn extract_imports_regex(source: &str, file_path: &str, parsed: &mut ParsedFile)
         if let Some(uri) = uri {
             let alias = if let Some(as_pos) = trimmed.find(" as ") {
                 let after_as = &trimmed[as_pos + 4..];
-                let end = after_as.find(|c: char| c == ';' || c == ' ').unwrap_or(after_as.len());
+                let end = after_as
+                    .find(|c: char| c == ';' || c == ' ')
+                    .unwrap_or(after_as.len());
                 Some(after_as[..end].to_string())
             } else {
                 None
@@ -469,11 +460,7 @@ fn extract_imports_regex(source: &str, file_path: &str, parsed: &mut ParsedFile)
     }
 }
 
-fn extract_import(
-    node: &tree_sitter::Node,
-    source: &str,
-    file_path: &str,
-) -> Option<ImportNode> {
+fn extract_import(node: &tree_sitter::Node, source: &str, file_path: &str) -> Option<ImportNode> {
     let spec = find_child_by_kind(node, "import_specification")?;
 
     let uri = spec
@@ -584,7 +571,9 @@ fn extract_dart_type_params(node: &tree_sitter::Node, source: &str) -> Vec<Strin
 fn extract_type_list(node: &tree_sitter::Node, source: &str) -> Vec<String> {
     node.children(&mut node.walk())
         .filter(|c| c.kind() == "type_identifier" || c.kind() == "type_arguments")
-        .filter_map(|c| get_text(&c, source).map(|s| s.split('<').next().unwrap_or(s).trim().to_string()))
+        .filter_map(|c| {
+            get_text(&c, source).map(|s| s.split('<').next().unwrap_or(s).trim().to_string())
+        })
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -599,11 +588,7 @@ fn get_dart_doc(node: &tree_sitter::Node, source: &str) -> Option<String> {
             "comment" => {
                 let text = get_text(&sibling, source)?;
                 if text.starts_with("///") {
-                    doc_lines.push(
-                        text.trim_start_matches('/')
-                            .trim()
-                            .to_string(),
-                    );
+                    doc_lines.push(text.trim_start_matches('/').trim().to_string());
                 } else {
                     break;
                 }

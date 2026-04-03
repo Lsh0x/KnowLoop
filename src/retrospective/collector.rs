@@ -11,10 +11,7 @@ use uuid::Uuid;
 ///
 /// Reads all persisted events, filters for ToolUse and ToolResult,
 /// and builds a structured trace with per-tool breakdown and error counts.
-pub async fn collect_tool_trace(
-    graph: &dyn GraphStore,
-    session_id: Uuid,
-) -> Result<ToolTrace> {
+pub async fn collect_tool_trace(graph: &dyn GraphStore, session_id: Uuid) -> Result<ToolTrace> {
     let events = graph.get_chat_events(session_id, 0, 50_000).await?;
 
     let mut trace = ToolTrace::default();
@@ -38,10 +35,7 @@ pub async fn collect_tool_trace(
                     .and_then(|v| v.get("action"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let input_json = data
-                    .get("input")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default();
+                let input_json = data.get("input").map(|v| v.to_string()).unwrap_or_default();
                 let tool_use_id = data
                     .get("id")
                     .and_then(|v| v.as_str())

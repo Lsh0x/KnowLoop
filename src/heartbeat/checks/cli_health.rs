@@ -100,9 +100,9 @@ impl HeartbeatCheck for CliHealthCheck {
 
                 // Also emit StreamingStatus false so the UI stops showing the spinner
                 if was_streaming {
-                    let _ = session
-                        .events_tx
-                        .send(ChatEvent::StreamingStatus { is_streaming: false });
+                    let _ = session.events_tx.send(ChatEvent::StreamingStatus {
+                        is_streaming: false,
+                    });
                 }
 
                 warn!(

@@ -57,10 +57,7 @@ impl HeartbeatCheck for GitDriftCheck {
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
-                            warn!(
-                                "GitDriftCheck: error checking '{}': {}",
-                                project.name, e
-                            );
+                            warn!("GitDriftCheck: error checking '{}': {}", project.name, e);
                         }
                         Err(_) => {
                             warn!(

@@ -378,10 +378,7 @@ mod tests {
         assert_eq!(config.session_timeout.as_secs(), 1800);
         // Permission defaults — MCP tools are pre-approved out of the box
         assert_eq!(config.permission.mode, "default");
-        assert_eq!(
-            config.permission.allowed_tools,
-            vec!["mcp__knowloop__*"]
-        );
+        assert_eq!(config.permission.allowed_tools, vec!["mcp__knowloop__*"]);
         assert!(config.permission.disallowed_tools.is_empty());
         // New fields — defaults when env vars are absent
         assert!(config.process_path.is_none());
@@ -394,10 +391,7 @@ mod tests {
         std::env::set_var("CHAT_SESSION_TIMEOUT_SECS", "600");
         std::env::set_var("MCP_SERVER_PATH", "/custom/path/mcp_server");
         std::env::set_var("CHAT_PERMISSION_MODE", "default");
-        std::env::set_var(
-            "CHAT_ALLOWED_TOOLS",
-            "Bash(git *),Read,mcp__knowloop__*",
-        );
+        std::env::set_var("CHAT_ALLOWED_TOOLS", "Bash(git *),Read,mcp__knowloop__*");
         std::env::set_var("CHAT_DISALLOWED_TOOLS", "Bash(rm -rf *), Bash(sudo *)");
         std::env::set_var(
             "CHAT_PROCESS_PATH",

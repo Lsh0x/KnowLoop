@@ -18,7 +18,11 @@ impl Neo4jClient {
     /// Create a TaskRetrospective node and link it to Task (and optionally AgentExecution).
     pub async fn create_task_retrospective_impl(&self, retro: &TaskRetrospective) -> Result<()> {
         let tool_breakdown_json = serde_json::to_string(&retro.tool_call_breakdown)?;
-        let notes_generated: Vec<String> = retro.notes_generated.iter().map(|u| u.to_string()).collect();
+        let notes_generated: Vec<String> = retro
+            .notes_generated
+            .iter()
+            .map(|u| u.to_string())
+            .collect();
         let outcome_json = serde_json::to_string(&retro.outcome)?;
 
         let q = query(
@@ -64,10 +68,7 @@ impl Neo4jClient {
         )
         .param(
             "project_id",
-            retro
-                .project_id
-                .map(|u| u.to_string())
-                .unwrap_or_default(),
+            retro.project_id.map(|u| u.to_string()).unwrap_or_default(),
         )
         .param("outcome", retro.outcome.as_str())
         .param("outcome_json", outcome_json)
@@ -77,17 +78,11 @@ impl Neo4jClient {
         .param("tool_call_count", retro.tool_call_count as i64)
         .param("tool_breakdown", tool_breakdown_json)
         .param("error_count", retro.error_count as i64)
-        .param(
-            "last_error",
-            retro.last_error.clone().unwrap_or_default(),
-        )
+        .param("last_error", retro.last_error.clone().unwrap_or_default())
         .param("files_modified", retro.files_modified.clone())
         .param("commits", retro.commits.clone())
         .param("notes_generated", notes_generated)
-        .param(
-            "cohort_json",
-            retro.cohort_json.clone().unwrap_or_default(),
-        )
+        .param("cohort_json", retro.cohort_json.clone().unwrap_or_default())
         .param("created_at", retro.created_at.to_rfc3339());
 
         self.graph.run(q).await?;
@@ -95,10 +90,7 @@ impl Neo4jClient {
     }
 
     /// Get a TaskRetrospective by ID.
-    pub async fn get_task_retrospective_impl(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<TaskRetrospective>> {
+    pub async fn get_task_retrospective_impl(&self, id: Uuid) -> Result<Option<TaskRetrospective>> {
         let q = query(
             r#"
             MATCH (r:TaskRetrospective {id: $id})
@@ -159,9 +151,7 @@ impl Neo4jClient {
 
         cypher.push_str("RETURN r ORDER BY r.created_at DESC SKIP $offset LIMIT $limit");
 
-        let mut q = query(&cypher)
-            .param("limit", limit)
-            .param("offset", offset);
+        let mut q = query(&cypher).param("limit", limit).param("offset", offset);
 
         if let Some(pid) = project_id {
             q = q.param("project_id", pid.to_string());
@@ -285,9 +275,8 @@ impl Neo4jClient {
         let tool_breakdown_str: String = node.get("tool_call_breakdown").unwrap_or_default();
 
         let outcome = if let Some(ref json) = outcome_json {
-            serde_json::from_str(json).unwrap_or_else(|_| {
-                RetrospectiveOutcome::from_neo4j(&outcome_str, None)
-            })
+            serde_json::from_str(json)
+                .unwrap_or_else(|_| RetrospectiveOutcome::from_neo4j(&outcome_str, None))
         } else {
             RetrospectiveOutcome::from_neo4j(&outcome_str, None)
         };
@@ -295,10 +284,7 @@ impl Neo4jClient {
         let tool_call_breakdown: HashMap<String, u32> =
             serde_json::from_str(&tool_breakdown_str).unwrap_or_default();
 
-        let notes_generated: Vec<Uuid> = notes_strs
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let notes_generated: Vec<Uuid> = notes_strs.iter().filter_map(|s| s.parse().ok()).collect();
 
         Ok(TaskRetrospective {
             id: id.parse()?,
@@ -318,11 +304,17 @@ impl Neo4jClient {
             tool_call_count: node.get::<i64>("tool_call_count").unwrap_or(0) as u32,
             tool_call_breakdown,
             error_count: node.get::<i64>("error_count").unwrap_or(0) as u32,
-            last_error: node.get("last_error").ok().filter(|s: &String| !s.is_empty()),
+            last_error: node
+                .get("last_error")
+                .ok()
+                .filter(|s: &String| !s.is_empty()),
             files_modified: node.get("files_modified").unwrap_or_default(),
             commits: node.get("commits").unwrap_or_default(),
             notes_generated,
-            cohort_json: node.get("cohort_json").ok().filter(|s: &String| !s.is_empty()),
+            cohort_json: node
+                .get("cohort_json")
+                .ok()
+                .filter(|s: &String| !s.is_empty()),
             created_at: created_at.parse()?,
         })
     }

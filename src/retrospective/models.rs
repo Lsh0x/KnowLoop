@@ -248,10 +248,7 @@ mod tests {
     fn test_outcome_as_str() {
         assert_eq!(RetrospectiveOutcome::Success.as_str(), "success");
         assert_eq!(
-            RetrospectiveOutcome::Failure {
-                reason: "x".into()
-            }
-            .as_str(),
+            RetrospectiveOutcome::Failure { reason: "x".into() }.as_str(),
             "failure"
         );
         assert_eq!(

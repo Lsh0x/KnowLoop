@@ -1688,21 +1688,20 @@ impl PlanRunner {
                             .map(|r| r.confidence_score)
                             .unwrap_or(0.0);
                         tokio::spawn(async move {
-                            if let Err(e) =
-                                crate::retrospective::analyzer::run_retrospective(
-                                    graph,
-                                    task_id,
-                                    project_id,
-                                    task_session_id,
-                                    task_agent_execution_id,
-                                    crate::retrospective::models::RetrospectiveOutcome::Success,
-                                    duration_secs,
-                                    cost_usd,
-                                    retro_confidence,
-                                    retro_files,
-                                    retro_commits,
-                                )
-                                .await
+                            if let Err(e) = crate::retrospective::analyzer::run_retrospective(
+                                graph,
+                                task_id,
+                                project_id,
+                                task_session_id,
+                                task_agent_execution_id,
+                                crate::retrospective::models::RetrospectiveOutcome::Success,
+                                duration_secs,
+                                cost_usd,
+                                retro_confidence,
+                                retro_files,
+                                retro_commits,
+                            )
+                            .await
                             {
                                 warn!("Retrospective failed for task {}: {}", task_id, e);
                             }
@@ -1811,23 +1810,22 @@ impl PlanRunner {
                                 .map(|(_, r)| r.clone())
                                 .unwrap_or_default();
                             tokio::spawn(async move {
-                                if let Err(e) =
-                                    crate::retrospective::analyzer::run_retrospective(
-                                        graph,
-                                        task_id,
-                                        project_id,
-                                        task_session_id,
-                                        task_agent_execution_id,
-                                        crate::retrospective::models::RetrospectiveOutcome::Failure {
-                                            reason: failure_reason,
-                                        },
-                                        0.0,
-                                        cost_usd,
-                                        0.0,
-                                        vec![],
-                                        vec![],
-                                    )
-                                    .await
+                                if let Err(e) = crate::retrospective::analyzer::run_retrospective(
+                                    graph,
+                                    task_id,
+                                    project_id,
+                                    task_session_id,
+                                    task_agent_execution_id,
+                                    crate::retrospective::models::RetrospectiveOutcome::Failure {
+                                        reason: failure_reason,
+                                    },
+                                    0.0,
+                                    cost_usd,
+                                    0.0,
+                                    vec![],
+                                    vec![],
+                                )
+                                .await
                                 {
                                     warn!("Retrospective failed for task {}: {}", task_id, e);
                                 }

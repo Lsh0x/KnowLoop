@@ -8021,10 +8021,7 @@ mod tests {
             .chat_permissions
             .expect("chat_permissions should be Some");
         assert_eq!(loaded_perm.mode, "plan");
-        assert_eq!(
-            loaded_perm.allowed_tools,
-            vec!["mcp__knowloop__*"]
-        );
+        assert_eq!(loaded_perm.allowed_tools, vec!["mcp__knowloop__*"]);
         assert!(loaded_perm.disallowed_tools.is_empty());
 
         // config_yaml_path should be set

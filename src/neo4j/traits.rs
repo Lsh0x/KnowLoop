@@ -3386,9 +3386,5 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<std::collections::HashMap<String, f64>>;
 
     /// Link a generated note to a retrospective via GENERATED_NOTE relationship.
-    async fn link_retrospective_note(
-        &self,
-        retrospective_id: Uuid,
-        note_id: Uuid,
-    ) -> Result<()>;
+    async fn link_retrospective_note(&self, retrospective_id: Uuid, note_id: Uuid) -> Result<()>;
 }

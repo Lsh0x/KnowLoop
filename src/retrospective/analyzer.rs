@@ -87,13 +87,7 @@ pub async fn run_retrospective(
 
     // Step 3: Find cohort and compare
     let cohort_comparison = if let Some(pid) = project_id {
-        build_cohort_comparison(
-            graph.as_ref(),
-            pid,
-            &files_modified,
-            &retro,
-        )
-        .await
+        build_cohort_comparison(graph.as_ref(), pid, &files_modified, &retro).await
     } else {
         None
     };
@@ -103,18 +97,16 @@ pub async fn run_retrospective(
     }
 
     // Step 4: Auto-generate notes
-    let notes = generate_learning_notes(
-        graph.as_ref(),
-        &retro,
-        cohort_comparison.as_ref(),
-    )
-    .await;
+    let notes = generate_learning_notes(graph.as_ref(), &retro, cohort_comparison.as_ref()).await;
 
     retro.notes_generated = notes.iter().map(|n| n.id).collect();
 
     // Step 5: Persist everything
     if let Err(e) = graph.create_task_retrospective(&retro).await {
-        warn!("Failed to persist retrospective for task {}: {}", task_id, e);
+        warn!(
+            "Failed to persist retrospective for task {}: {}",
+            task_id, e
+        );
         return Err(e);
     }
 
@@ -170,10 +162,7 @@ async fn build_cohort_comparison(
     };
 
     // Exclude current retrospective from cohort
-    let cohort: Vec<_> = cohort
-        .into_iter()
-        .filter(|r| r.id != current.id)
-        .collect();
+    let cohort: Vec<_> = cohort.into_iter().filter(|r| r.id != current.id).collect();
 
     if cohort.len() < MIN_COHORT_SIZE {
         debug!(
@@ -232,20 +221,21 @@ fn detect_tool_anomalies(
     let mut anomalies = Vec::new();
 
     // Collect all tool names from current + cohort
-    let mut all_tools: std::collections::HashSet<String> = current.tool_call_breakdown.keys().cloned().collect();
+    let mut all_tools: std::collections::HashSet<String> =
+        current.tool_call_breakdown.keys().cloned().collect();
     for r in cohort {
         all_tools.extend(r.tool_call_breakdown.keys().cloned());
     }
 
     for tool in &all_tools {
-        let current_ratio = *current.tool_call_breakdown.get(tool).unwrap_or(&0) as f64 / current_total;
+        let current_ratio =
+            *current.tool_call_breakdown.get(tool).unwrap_or(&0) as f64 / current_total;
 
         let cohort_ratios: Vec<f64> = cohort
             .iter()
             .filter(|r| r.tool_call_count > 0)
             .map(|r| {
-                *r.tool_call_breakdown.get(tool).unwrap_or(&0) as f64
-                    / r.tool_call_count as f64
+                *r.tool_call_breakdown.get(tool).unwrap_or(&0) as f64 / r.tool_call_count as f64
             })
             .collect();
 
@@ -398,8 +388,7 @@ async fn generate_learning_notes(
 
     // Rule 4: Cost significantly above cohort → Observation
     if let Some(comparison) = cohort {
-        if comparison.cost.z_score > EXPENSIVE_ZSCORE_THRESHOLD
-            && notes.len() < MAX_NOTES_PER_RETRO
+        if comparison.cost.z_score > EXPENSIVE_ZSCORE_THRESHOLD && notes.len() < MAX_NOTES_PER_RETRO
         {
             let mut tags = base_tags.clone();
             tags.push("cost-alert".to_string());
@@ -423,11 +412,7 @@ async fn generate_learning_notes(
 }
 
 /// Check if a note with a specific tag already exists for this project.
-async fn note_exists_with_tag(
-    graph: &dyn GraphStore,
-    project_id: Option<Uuid>,
-    tag: &str,
-) -> bool {
+async fn note_exists_with_tag(graph: &dyn GraphStore, project_id: Option<Uuid>, tag: &str) -> bool {
     if let Some(pid) = project_id {
         let filters = crate::notes::NoteFilters {
             tags: Some(vec![tag.to_string()]),

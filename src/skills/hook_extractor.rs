@@ -1496,10 +1496,7 @@ mod tests {
     #[test]
     fn test_mcp_file_context_no_file_field() {
         let input = json!({"action": "list", "project_id": "uuid"});
-        assert_eq!(
-            extract_file_context("mcp__knowloop__skill", &input),
-            None
-        );
+        assert_eq!(extract_file_context("mcp__knowloop__skill", &input), None);
     }
 
     #[test]
