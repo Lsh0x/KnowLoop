@@ -106,6 +106,21 @@ pub struct ChatSessionNode {
     /// None/empty for normal user-initiated sessions.
     #[serde(default)]
     pub spawned_by: Option<String>,
+
+    // -- Fork / sub-conversation fields --
+    /// Depth in the fork tree (0 = root session, max 5).
+    #[serde(default)]
+    pub fork_depth: u32,
+    /// Fork type: "agent" (MCP/auto) or "user" (UI-initiated). None for root sessions.
+    #[serde(default)]
+    pub fork_type: Option<String>,
+    /// Fork lifecycle status: "active", "completed", "cancelled". None for root sessions.
+    #[serde(default)]
+    pub fork_status: Option<String>,
+    /// Snapshot of the context injected at fork creation (JSON). Includes entities,
+    /// persona, task_id, and either agent-built context or LLM summary.
+    #[serde(default)]
+    pub fork_context_snapshot: Option<String>,
 }
 
 // ============================================================================
@@ -2548,6 +2563,10 @@ mod tests {
             permission_mode: None,
             add_dirs: Some(vec!["/dir/a".to_string(), "/dir/b".to_string()]),
             spawned_by: None,
+            fork_depth: 0,
+            fork_type: None,
+            fork_status: None,
+            fork_context_snapshot: None,
         };
 
         let json = serde_json::to_string(&session).unwrap();
@@ -2576,6 +2595,10 @@ mod tests {
             permission_mode: None,
             add_dirs: None,
             spawned_by: None,
+            fork_depth: 0,
+            fork_type: None,
+            fork_status: None,
+            fork_context_snapshot: None,
         };
 
         let json = serde_json::to_string(&session).unwrap();

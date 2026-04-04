@@ -6703,6 +6703,36 @@ impl GraphStore for MockGraphStore {
         Ok(())
     }
 
+    async fn create_fork_relation(
+        &self,
+        _child_session_id: &str,
+        _parent_session_id: &str,
+        _fork_type: &str,
+        _max_depth: u32,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_fork_children(&self, _session_id: &str) -> Result<Vec<ChatSessionNode>> {
+        Ok(vec![])
+    }
+
+    async fn get_fork_tree(
+        &self,
+        _session_id: &str,
+        _max_depth: u32,
+    ) -> Result<Vec<ChatSessionNode>> {
+        Ok(vec![])
+    }
+
+    async fn close_fork_children(&self, _session_id: &str) -> Result<u64> {
+        Ok(0)
+    }
+
+    async fn update_fork_status(&self, _session_id: &str, _status: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn get_session_tree(&self, session_id: &str) -> Result<Vec<SessionTreeNode>> {
         // Mock: return the session itself as root with depth 0
         Ok(vec![SessionTreeNode {

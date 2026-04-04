@@ -167,6 +167,100 @@ impl RunnerContext {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fork / Sub-conversation types
+// ---------------------------------------------------------------------------
+
+/// How a fork was initiated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkType {
+    /// Forked by the agent via MCP (auto-context: task + entities + persona).
+    Agent,
+    /// Forked by the user via UI/API (context: LLM summary of recent messages).
+    User,
+}
+
+impl std::fmt::Display for ForkType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Agent => write!(f, "agent"),
+            Self::User => write!(f, "user"),
+        }
+    }
+}
+
+impl std::str::FromStr for ForkType {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "agent" => Ok(Self::Agent),
+            "user" => Ok(Self::User),
+            _ => Err(anyhow::anyhow!("unknown fork type: {s}")),
+        }
+    }
+}
+
+/// Lifecycle status of a forked session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkStatus {
+    Active,
+    Completed,
+    Cancelled,
+}
+
+impl std::fmt::Display for ForkStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Completed => write!(f, "completed"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+impl std::str::FromStr for ForkStatus {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "completed" => Ok(Self::Completed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(anyhow::anyhow!("unknown fork status: {s}")),
+        }
+    }
+}
+
+/// Configuration for creating a fork.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkConfig {
+    /// How the fork was initiated.
+    pub fork_type: ForkType,
+    /// Optional task to scope the fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<Uuid>,
+    /// Optional persona to assign to the fork agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Initial message to seed the fork conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_message: Option<String>,
+    /// Maximum fork depth (default: 5). Enforced recursively.
+    #[serde(default = "ForkConfig::default_max_depth")]
+    pub max_depth: u32,
+}
+
+impl ForkConfig {
+    fn default_max_depth() -> u32 {
+        5
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chat request / response types
+// ---------------------------------------------------------------------------
+
 /// Request to send a chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {

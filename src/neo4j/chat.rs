@@ -32,7 +32,11 @@ impl Neo4jClient {
                     preview: $preview,
                     permission_mode: $permission_mode,
                     add_dirs: $add_dirs,
-                    spawned_by: $spawned_by
+                    spawned_by: $spawned_by,
+                    fork_depth: $fork_depth,
+                    fork_type: $fork_type,
+                    fork_status: $fork_status,
+                    fork_context_snapshot: $fork_context_snapshot
                 })
                 WITH s
                 OPTIONAL MATCH (p:Project {slug: $project_slug})
@@ -60,7 +64,11 @@ impl Neo4jClient {
                     preview: $preview,
                     permission_mode: $permission_mode,
                     add_dirs: $add_dirs,
-                    spawned_by: $spawned_by
+                    spawned_by: $spawned_by,
+                    fork_depth: $fork_depth,
+                    fork_type: $fork_type,
+                    fork_status: $fork_status,
+                    fork_context_snapshot: $fork_context_snapshot
                 })
                 "#,
             )
@@ -102,7 +110,17 @@ impl Neo4jClient {
                         serde_json::to_string(&session.add_dirs.clone().unwrap_or_default())
                             .unwrap_or_else(|_| "[]".to_string()),
                     )
-                    .param("spawned_by", session.spawned_by.clone().unwrap_or_default()),
+                    .param("spawned_by", session.spawned_by.clone().unwrap_or_default())
+                    .param("fork_depth", session.fork_depth as i64)
+                    .param("fork_type", session.fork_type.clone().unwrap_or_default())
+                    .param(
+                        "fork_status",
+                        session.fork_status.clone().unwrap_or_default(),
+                    )
+                    .param(
+                        "fork_context_snapshot",
+                        session.fork_context_snapshot.clone().unwrap_or_default(),
+                    ),
             )
             .await?;
         Ok(())
@@ -449,6 +467,140 @@ impl Neo4jClient {
         Ok(())
     }
 
+    // ========================================================================
+    // Fork / sub-conversation operations
+    // ========================================================================
+
+    /// Create a FORKED_FROM relation between a child and parent session.
+    /// Returns an error if the parent's fork_depth >= max_depth.
+    pub async fn create_fork_relation(
+        &self,
+        child_session_id: &str,
+        parent_session_id: &str,
+        fork_type: &str,
+        max_depth: u32,
+    ) -> Result<()> {
+        // Validate depth: read parent's fork_depth first
+        let depth_q = query("MATCH (p:ChatSession {id: $parent_id}) RETURN p.fork_depth AS depth")
+            .param("parent_id", parent_session_id.to_string());
+
+        let mut result = self.graph.execute(depth_q).await?;
+        let parent_depth: u32 = if let Some(row) = result.next().await? {
+            row.get::<i64>("depth").unwrap_or(0) as u32
+        } else {
+            return Err(anyhow::anyhow!(
+                "parent session {} not found",
+                parent_session_id
+            ));
+        };
+
+        if parent_depth >= max_depth {
+            return Err(anyhow::anyhow!(
+                "max fork depth ({max_depth}) exceeded: parent is at depth {parent_depth}"
+            ));
+        }
+
+        let q = query(
+            r#"
+            MATCH (child:ChatSession {id: $child_id})
+            MATCH (parent:ChatSession {id: $parent_id})
+            CREATE (child)-[:FORKED_FROM {
+                fork_type: $fork_type,
+                created_at: datetime()
+            }]->(parent)
+            "#,
+        )
+        .param("child_id", child_session_id.to_string())
+        .param("parent_id", parent_session_id.to_string())
+        .param("fork_type", fork_type.to_string());
+
+        self.graph.run(q).await?;
+        Ok(())
+    }
+
+    /// Get direct fork children of a session.
+    pub async fn get_fork_children(&self, session_id: &str) -> Result<Vec<ChatSessionNode>> {
+        let q = query(
+            r#"
+            MATCH (child:ChatSession)-[:FORKED_FROM]->(parent:ChatSession {id: $id})
+            RETURN child
+            ORDER BY child.created_at ASC
+            "#,
+        )
+        .param("id", session_id.to_string());
+
+        let mut result = self.graph.execute(q).await?;
+        let mut children = Vec::new();
+        while let Some(row) = result.next().await? {
+            let node: neo4rs::Node = row.get("child")?;
+            children.push(Self::parse_chat_session_node(&node)?);
+        }
+        Ok(children)
+    }
+
+    /// Get the full fork tree rooted at `session_id` (max 5 levels via FORKED_FROM).
+    /// Returns a flat list of all descendants with their fork_depth.
+    pub async fn get_fork_tree(
+        &self,
+        session_id: &str,
+        max_depth: u32,
+    ) -> Result<Vec<ChatSessionNode>> {
+        let q = query(
+            r#"
+            MATCH (root:ChatSession {id: $id})<-[:FORKED_FROM*1..5]-(child:ChatSession)
+            WHERE child.fork_depth <= $max_depth
+            RETURN child
+            ORDER BY child.fork_depth ASC, child.created_at ASC
+            "#,
+        )
+        .param("id", session_id.to_string())
+        .param("max_depth", max_depth as i64);
+
+        let mut result = self.graph.execute(q).await?;
+        let mut nodes = Vec::new();
+        while let Some(row) = result.next().await? {
+            let node: neo4rs::Node = row.get("child")?;
+            nodes.push(Self::parse_chat_session_node(&node)?);
+        }
+        Ok(nodes)
+    }
+
+    /// Close all active fork children (recursively) by setting fork_status = "cancelled".
+    /// Returns the number of forks cancelled.
+    pub async fn close_fork_children(&self, session_id: &str) -> Result<u64> {
+        let q = query(
+            r#"
+            MATCH (parent:ChatSession {id: $id})<-[:FORKED_FROM*1..5]-(child:ChatSession)
+            WHERE child.fork_status = 'active'
+            SET child.fork_status = 'cancelled', child.updated_at = datetime()
+            RETURN count(child) AS cancelled
+            "#,
+        )
+        .param("id", session_id.to_string());
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            Ok(row.get::<i64>("cancelled").unwrap_or(0) as u64)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Update fork_status for a single session.
+    pub async fn update_fork_status(&self, session_id: &str, status: &str) -> Result<()> {
+        let q = query(
+            r#"
+            MATCH (s:ChatSession {id: $id})
+            SET s.fork_status = $status, s.updated_at = datetime()
+            "#,
+        )
+        .param("id", session_id.to_string())
+        .param("status", status.to_string());
+
+        self.graph.run(q).await?;
+        Ok(())
+    }
+
     /// Get the full session tree rooted at `session_id` (recursive traversal via SPAWNED_BY).
     /// Bounded to 10 levels max for performance.
     pub async fn get_session_tree(&self, session_id: &str) -> Result<Vec<SessionTreeNode>> {
@@ -714,6 +866,31 @@ impl Neo4jClient {
                 None
             } else {
                 Some(spawned_by)
+            },
+            fork_depth: node.get::<i64>("fork_depth").unwrap_or(0) as u32,
+            fork_type: {
+                let v: String = node.get("fork_type").unwrap_or_default();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            },
+            fork_status: {
+                let v: String = node.get("fork_status").unwrap_or_default();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            },
+            fork_context_snapshot: {
+                let v: String = node.get("fork_context_snapshot").unwrap_or_default();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
             },
         })
     }

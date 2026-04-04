@@ -2182,6 +2182,37 @@ impl GraphStore for Neo4jClient {
         .await
     }
 
+    async fn create_fork_relation(
+        &self,
+        child_session_id: &str,
+        parent_session_id: &str,
+        fork_type: &str,
+        max_depth: u32,
+    ) -> anyhow::Result<()> {
+        self.create_fork_relation(child_session_id, parent_session_id, fork_type, max_depth)
+            .await
+    }
+
+    async fn get_fork_children(&self, session_id: &str) -> anyhow::Result<Vec<ChatSessionNode>> {
+        self.get_fork_children(session_id).await
+    }
+
+    async fn get_fork_tree(
+        &self,
+        session_id: &str,
+        max_depth: u32,
+    ) -> anyhow::Result<Vec<ChatSessionNode>> {
+        self.get_fork_tree(session_id, max_depth).await
+    }
+
+    async fn close_fork_children(&self, session_id: &str) -> anyhow::Result<u64> {
+        self.close_fork_children(session_id).await
+    }
+
+    async fn update_fork_status(&self, session_id: &str, status: &str) -> anyhow::Result<()> {
+        self.update_fork_status(session_id, status).await
+    }
+
     async fn get_session_tree(&self, session_id: &str) -> anyhow::Result<Vec<SessionTreeNode>> {
         self.get_session_tree(session_id).await
     }

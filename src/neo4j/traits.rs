@@ -1813,6 +1813,30 @@ pub trait GraphStore: Send + Sync {
         task_id: Option<Uuid>,
     ) -> Result<()>;
 
+    // -- Fork / sub-conversation --
+
+    /// Create a FORKED_FROM relation. Fails if parent depth >= max_depth.
+    async fn create_fork_relation(
+        &self,
+        child_session_id: &str,
+        parent_session_id: &str,
+        fork_type: &str,
+        max_depth: u32,
+    ) -> Result<()>;
+
+    /// Get direct fork children of a session.
+    async fn get_fork_children(&self, session_id: &str) -> Result<Vec<ChatSessionNode>>;
+
+    /// Get the full fork tree (max depth levels via FORKED_FROM).
+    async fn get_fork_tree(&self, session_id: &str, max_depth: u32)
+        -> Result<Vec<ChatSessionNode>>;
+
+    /// Cancel all active fork descendants recursively. Returns count cancelled.
+    async fn close_fork_children(&self, session_id: &str) -> Result<u64>;
+
+    /// Update fork_status for a single session.
+    async fn update_fork_status(&self, session_id: &str, status: &str) -> Result<()>;
+
     /// Get the full session tree rooted at a session (recursive SPAWNED_BY traversal, max 10 levels)
     async fn get_session_tree(&self, session_id: &str) -> Result<Vec<SessionTreeNode>>;
 

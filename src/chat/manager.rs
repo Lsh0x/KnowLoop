@@ -2371,6 +2371,10 @@ impl ChatManager {
                 Some(resolved_add_dirs.clone())
             },
             spawned_by: request.spawned_by.clone(),
+            fork_depth: 0,
+            fork_type: None,
+            fork_status: None,
+            fork_context_snapshot: None,
         };
         self.graph
             .create_chat_session(&session_node)
@@ -6769,6 +6773,10 @@ mod tests {
             permission_mode: None,
             add_dirs: None,
             spawned_by: None,
+            fork_depth: 0,
+            fork_type: None,
+            fork_status: None,
+            fork_context_snapshot: None,
         };
 
         let json = serde_json::to_string(&session).unwrap();
@@ -7128,6 +7136,10 @@ mod tests {
             permission_mode: None,
             add_dirs: None,
             spawned_by: None,
+            fork_depth: 0,
+            fork_type: None,
+            fork_status: None,
+            fork_context_snapshot: None,
         };
 
         let json = serde_json::to_string(&session).unwrap();
@@ -7159,6 +7171,10 @@ mod tests {
             permission_mode: None,
             add_dirs: None,
             spawned_by: None,
+            fork_depth: 0,
+            fork_type: None,
+            fork_status: None,
+            fork_context_snapshot: None,
         };
 
         let json = serde_json::to_string(&session).unwrap();
