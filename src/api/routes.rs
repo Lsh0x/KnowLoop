@@ -24,6 +24,7 @@ use super::retrospective_handlers;
 use super::rfc_handlers;
 use super::sharing_handlers;
 use super::skill_handlers;
+use super::stt_handlers;
 use super::trajectory_handlers;
 use super::trigger_handlers;
 use super::workspace_handlers;
@@ -1747,6 +1748,11 @@ fn protected_routes() -> Router<OrchestratorState> {
             get(chat_handlers::get_cli_auth_status),
         )
         // ================================================================
+        // Speech-to-Text (Murmure STT sidecar)
+        // ================================================================
+        .route("/api/stt/status", get(stt_handlers::stt_status))
+        .route("/api/stt/transcribe", post(stt_handlers::stt_transcribe))
+        // ================================================================
         // MCP Federation (external MCP server connections)
         // ================================================================
         .route(
@@ -1819,6 +1825,8 @@ mod tests {
             reactor_counters: std::sync::OnceLock::new(),
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         create_router(state)
     }
@@ -1853,6 +1861,8 @@ mod tests {
             reactor_counters: std::sync::OnceLock::new(),
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         create_router(state)
     }

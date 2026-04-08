@@ -84,6 +84,10 @@ pub struct ServerState {
     /// MCP Federation registry — external MCP server connections.
     /// Always initialized (empty registry). Servers are added/removed dynamically via API.
     pub mcp_registry: crate::mcp_federation::registry::SharedRegistry,
+    /// Murmure STT client — None when STT is not configured.
+    pub murmure_client: Option<Arc<crate::stt::MurmureClient>>,
+    /// STT configuration
+    pub stt_config: crate::stt::SttConfig,
 }
 
 /// Shared orchestrator state
@@ -6241,6 +6245,8 @@ mod tests {
             reactor_counters: std::sync::OnceLock::new(),
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         (create_router(state), milestone.id, task1.id, task2.id)
     }
@@ -6454,6 +6460,8 @@ mod tests {
             reactor_counters: std::sync::OnceLock::new(),
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         }
     }
 
@@ -6614,6 +6622,8 @@ mod tests {
             reactor_counters: std::sync::OnceLock::new(),
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         create_router(state)
     }
@@ -7391,6 +7401,8 @@ mod tests {
             reactor_counters: std::sync::OnceLock::new(),
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         (create_router(state), plan.id, task1.id, task2.id)
     }
@@ -7500,6 +7512,8 @@ mod tests {
             reactor_counters: std::sync::OnceLock::new(),
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         let app = create_router(state);
 
@@ -7676,6 +7690,8 @@ mod tests {
             reactor_counters,
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         let app = create_router(state);
 
@@ -7726,6 +7742,8 @@ mod tests {
             reactor_counters,
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         let app = create_router(state);
 

@@ -1664,6 +1664,8 @@ mod tests {
             reactor_counters: std::sync::OnceLock::new(),
             confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            murmure_client: None,
+            stt_config: crate::stt::SttConfig::default(),
         });
         create_router(state)
     }

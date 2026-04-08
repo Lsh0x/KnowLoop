@@ -62,6 +62,32 @@ services:
     networks:
       - knowloop-net
 
+  murmure:
+    image: ghcr.io/lsh0x/murmure-api:latest
+    container_name: knowloop-murmure
+    ports:
+      - "50051:50051"
+    environment:
+      - MURMURE_MODEL_PATH=/app/resources/parakeet-tdt-0.6b-v3-int8
+      - MURMURE_CC_RULES_PATH=/app/resources/cc-rules
+      - MURMURE_GRPC_PORT=50051
+      - MURMURE_LOG_LEVEL=info
+    volumes:
+      - ./resources/parakeet-tdt-0.6b-v3-int8:/app/resources/parakeet-tdt-0.6b-v3-int8:ro
+      - ./resources/cc-rules:/app/resources/cc-rules:ro
+    healthcheck:
+      test: ["CMD-SHELL", "grpcurl -plaintext localhost:50051 list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - knowloop-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
 networks:
   knowloop-net:
     driver: bridge

@@ -43,6 +43,7 @@ pub mod runner;
 pub mod setup_claude;
 pub mod sharing;
 pub mod skills;
+pub mod stt;
 pub mod transport;
 pub mod update;
 pub(crate) mod utils;
@@ -1467,6 +1468,31 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         None
     };
 
+    // Initialize Murmure STT client (optional — graceful degradation if unavailable)
+    let stt_config = stt::SttConfig {
+        grpc_url: std::env::var("MURMURE_GRPC_URL").ok(),
+        ..Default::default()
+    };
+    let murmure_client = if stt_config.effective_url().is_some() {
+        let client = stt::MurmureClient::new(stt_config.clone());
+        let available = client.is_available().await;
+        if available {
+            tracing::info!(
+                url = stt_config.grpc_url.as_deref().unwrap_or("?"),
+                "Murmure STT sidecar connected"
+            );
+        } else {
+            tracing::warn!(
+                url = stt_config.grpc_url.as_deref().unwrap_or("?"),
+                "Murmure STT sidecar not responding — STT features disabled"
+            );
+        }
+        Some(Arc::new(client))
+    } else {
+        tracing::info!("MURMURE_GRPC_URL not set — STT features disabled");
+        None
+    };
+
     // Subscribe to the event bus BEFORE creating ServerState (the bus lives independently)
     let reactor_receiver = event_bus.subscribe();
 
@@ -1507,6 +1533,8 @@ pub async fn start_server(mut config: Config) -> Result<()> {
         reactor_counters: std::sync::OnceLock::new(),
         confidence_tracker: Arc::new(crate::graph::confidence::ConfidenceTracker::default()),
         mcp_registry: mcp_federation::registry::new_shared_registry(),
+        murmure_client,
+        stt_config,
     });
 
     // ── EventReactor: build, register built-in reactions, and spawn ──
