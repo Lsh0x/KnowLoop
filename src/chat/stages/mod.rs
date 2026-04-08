@@ -7,6 +7,7 @@
 
 pub mod biomimicry;
 pub mod file_context;
+pub mod fork_context;
 pub mod intent_weights;
 pub mod knowledge_injection;
 pub mod mcp_federation_stage;
@@ -19,6 +20,7 @@ pub mod user_profile;
 
 pub use biomimicry::BiomimicryStage;
 pub use file_context::FileContextStage;
+pub use fork_context::ForkContextStage;
 pub use knowledge_injection::KnowledgeInjectionStage;
 pub use mcp_federation_stage::McpFederationStage;
 pub use persona::PersonaStage;

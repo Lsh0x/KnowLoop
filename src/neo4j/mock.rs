@@ -6627,6 +6627,7 @@ impl GraphStore for MockGraphStore {
         limit: usize,
         offset: usize,
         include_detached: bool,
+        _include_archived: bool,
     ) -> Result<(Vec<ChatSessionNode>, usize)> {
         let sessions = self.chat_sessions.read().await;
         // Collect workspace project slugs for membership check
@@ -6713,7 +6714,7 @@ impl GraphStore for MockGraphStore {
         Ok(())
     }
 
-    async fn get_fork_children(&self, _session_id: &str) -> Result<Vec<ChatSessionNode>> {
+    async fn get_fork_children(&self, _session_id: &str, _include_archived: bool) -> Result<Vec<ChatSessionNode>> {
         Ok(vec![])
     }
 
@@ -6731,6 +6732,22 @@ impl GraphStore for MockGraphStore {
 
     async fn update_fork_status(&self, _session_id: &str, _status: &str) -> Result<()> {
         Ok(())
+    }
+
+    async fn create_summarized_by_relation(
+        &self,
+        _session_id: &str,
+        _note_id: uuid::Uuid,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn archive_session(&self, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_session_notes(&self, _session_id: &str) -> Result<Vec<crate::notes::models::Note>> {
+        Ok(vec![])
     }
 
     async fn get_session_tree(&self, session_id: &str) -> Result<Vec<SessionTreeNode>> {
@@ -6792,6 +6809,15 @@ impl GraphStore for MockGraphStore {
         } else {
             Ok(None)
         }
+    }
+
+    async fn update_chat_session_model(&self, id: Uuid, model: &str) -> Result<()> {
+        let mut sessions = self.chat_sessions.write().await;
+        if let Some(session) = sessions.get_mut(&id) {
+            session.model = model.to_string();
+            session.updated_at = Utc::now();
+        }
+        Ok(())
     }
 
     async fn update_chat_session_permission_mode(&self, id: Uuid, mode: &str) -> Result<()> {
@@ -9212,6 +9238,113 @@ impl GraphStore for MockGraphStore {
             persona_count: 0,
             total_knows: 0,
         })
+    }
+
+    // ========================================================================
+    // Blueprint operations
+    // ========================================================================
+
+    async fn create_blueprint(
+        &self,
+        _req: &crate::blueprint::CreateBlueprintRequest,
+    ) -> anyhow::Result<crate::blueprint::BlueprintNode> {
+        unimplemented!("MockGraphStore::create_blueprint")
+    }
+
+    async fn get_blueprint(
+        &self,
+        _id: &str,
+    ) -> anyhow::Result<Option<crate::blueprint::BlueprintNode>> {
+        Ok(None)
+    }
+
+    async fn get_blueprint_by_slug(
+        &self,
+        _slug: &str,
+    ) -> anyhow::Result<Option<crate::blueprint::BlueprintNode>> {
+        Ok(None)
+    }
+
+    async fn update_blueprint(
+        &self,
+        _id: &str,
+        _req: &crate::blueprint::UpdateBlueprintRequest,
+    ) -> anyhow::Result<crate::blueprint::BlueprintNode> {
+        unimplemented!("MockGraphStore::update_blueprint")
+    }
+
+    async fn delete_blueprint(&self, _id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn list_blueprints(
+        &self,
+        _query: &crate::blueprint::ListBlueprintsQuery,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        Ok(vec![])
+    }
+
+    async fn add_blueprint_relation(
+        &self,
+        _from_slug: &str,
+        _to_slug: &str,
+        _relation_type: crate::blueprint::BlueprintRelationType,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn remove_blueprint_relation(
+        &self,
+        _from_slug: &str,
+        _to_slug: &str,
+        _relation_type: crate::blueprint::BlueprintRelationType,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn get_blueprint_dependencies(
+        &self,
+        _slug: &str,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        Ok(vec![])
+    }
+
+    async fn get_blueprint_dependents(
+        &self,
+        _slug: &str,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        Ok(vec![])
+    }
+
+    async fn get_blueprint_pairs(
+        &self,
+        _slug: &str,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        Ok(vec![])
+    }
+
+    async fn link_blueprint_to_project(
+        &self,
+        _slug: &str,
+        _project_id: &str,
+        _relevance: f64,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn unlink_blueprint_from_project(
+        &self,
+        _slug: &str,
+        _project_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn get_project_blueprints(
+        &self,
+        _project_id: &str,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        Ok(vec![])
     }
 
     // ========================================================================

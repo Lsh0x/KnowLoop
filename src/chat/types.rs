@@ -232,11 +232,60 @@ impl std::str::FromStr for ForkStatus {
     }
 }
 
+/// Intent classification for a fork — determines lifecycle policy.
+/// (RFC: Subchat Lifecycle Intelligence)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkIntent {
+    /// One-off task, auto-closable when done.
+    Job,
+    /// Persistent persona, never auto-closes.
+    Role,
+    /// Sub-project scope, closes when plan/milestone completes.
+    Scope,
+    /// Fallback — legacy behavior, no lifecycle automation.
+    Unknown,
+}
+
+impl std::fmt::Display for ForkIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Job => write!(f, "job"),
+            Self::Role => write!(f, "role"),
+            Self::Scope => write!(f, "scope"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+impl std::str::FromStr for ForkIntent {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "job" => Ok(Self::Job),
+            "role" => Ok(Self::Role),
+            "scope" => Ok(Self::Scope),
+            "unknown" => Ok(Self::Unknown),
+            _ => Ok(Self::Unknown), // graceful fallback for old data
+        }
+    }
+}
+
+impl Default for ForkIntent {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 /// Configuration for creating a fork.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkConfig {
     /// How the fork was initiated.
     pub fork_type: ForkType,
+    /// Intent classification — determines lifecycle policy.
+    /// Auto-detected if not provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<ForkIntent>,
     /// Optional task to scope the fork.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<Uuid>,
@@ -246,6 +295,9 @@ pub struct ForkConfig {
     /// Initial message to seed the fork conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_message: Option<String>,
+    /// LLM model to use for the fork (e.g. "claude-sonnet-4-6"). None = inherit default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Maximum fork depth (default: 5). Enforced recursively.
     #[serde(default = "ForkConfig::default_max_depth")]
     pub max_depth: u32,
@@ -255,6 +307,35 @@ impl ForkConfig {
     fn default_max_depth() -> u32 {
         5
     }
+}
+
+/// Response from `fork_session()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkResponse {
+    /// The newly created child session ID.
+    pub session_id: Uuid,
+    /// Depth of the child fork (parent_depth + 1).
+    pub fork_depth: u32,
+    /// How the fork was initiated.
+    pub fork_type: ForkType,
+    /// Lifecycle status (always `Active` on creation).
+    pub fork_status: ForkStatus,
+    /// Intent classification for lifecycle policy.
+    pub fork_intent: ForkIntent,
+}
+
+/// Serialisable summary of a fork child (for `list_forks`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkInfo {
+    pub session_id: Uuid,
+    pub fork_depth: u32,
+    pub fork_type: Option<String>,
+    pub fork_status: Option<String>,
+    pub fork_intent: Option<String>,
+    pub title: Option<String>,
+    pub model: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub message_count: i64,
 }
 
 // ---------------------------------------------------------------------------

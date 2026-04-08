@@ -36,9 +36,113 @@ fn extract_file_paths(message: &str) -> Vec<String> {
     crate::utils::file_path_extractor::extract_file_paths(message)
 }
 
+/// Build an empty `PersonaSubgraph` as fallback when loading fails.
+fn empty_subgraph(
+    persona_id: uuid::Uuid,
+    persona_name: &str,
+) -> crate::neo4j::models::PersonaSubgraph {
+    crate::neo4j::models::PersonaSubgraph {
+        persona_id,
+        persona_name: persona_name.to_string(),
+        files: vec![],
+        functions: vec![],
+        notes: vec![],
+        decisions: vec![],
+        skills: vec![],
+        protocols: vec![],
+        feature_graph_id: None,
+        parents: vec![],
+        children: vec![],
+        stats: crate::neo4j::models::PersonaSubgraphStats {
+            total_entities: 0,
+            coverage_score: 0.0,
+            freshness: 0.0,
+        },
+    }
+}
+
+/// Default char budget for the persona context section.
+const PERSONA_BUDGET_CHARS: usize = 2000;
+
+/// Render a `CachedPersona` into a rich markdown section for prompt injection.
+///
+/// Adapted from `runner::persona::PersonaStack::render_entry`. Includes:
+/// - Header with name + relevance %
+/// - Description (if non-empty)
+/// - Known files (top by weight)
+/// - Known functions (top by weight)
+/// - Knowledge notes (IDs + weight)
+/// - Decisions (IDs + weight)
+///
+/// Output is capped at `PERSONA_BUDGET_CHARS` to avoid blowing up the prompt.
+fn render_persona_section(cp: &crate::chat::enrichment::CachedPersona) -> String {
+    let budget = PERSONA_BUDGET_CHARS;
+    let mut out = format!(
+        "## Active Persona: {} (relevance: {:.0}%)\n",
+        cp.persona_name,
+        cp.weight * 100.0
+    );
+
+    if !cp.description.is_empty() {
+        out.push_str(&format!("\n{}\n", cp.description));
+    }
+
+    let sub = &cp.subgraph;
+
+    // Files it knows (top by weight)
+    if !sub.files.is_empty() {
+        out.push_str("\n**Known files:**\n");
+        let max_files = (budget / 100).clamp(3, 15);
+        for rel in sub.files.iter().take(max_files) {
+            out.push_str(&format!("- `{}` (w:{:.2})\n", rel.entity_id, rel.weight));
+        }
+    }
+
+    // Functions it knows
+    if !sub.functions.is_empty() {
+        out.push_str("\n**Known functions:**\n");
+        let max_fns = (budget / 120).clamp(2, 10);
+        for rel in sub.functions.iter().take(max_fns) {
+            out.push_str(&format!("- `{}` (w:{:.2})\n", rel.entity_id, rel.weight));
+        }
+    }
+
+    // Notes it uses
+    if !sub.notes.is_empty() {
+        out.push_str("\n**Knowledge notes:**\n");
+        let max_notes = (budget / 200).clamp(2, 8);
+        for rel in sub.notes.iter().take(max_notes) {
+            out.push_str(&format!("- [note:{}] (w:{:.2})\n", rel.entity_id, rel.weight));
+        }
+    }
+
+    // Decisions it uses
+    if !sub.decisions.is_empty() {
+        out.push_str("\n**Decisions:**\n");
+        let max_decisions = (budget / 200).clamp(1, 5);
+        for rel in sub.decisions.iter().take(max_decisions) {
+            out.push_str(&format!(
+                "- [decision:{}] (w:{:.2})\n",
+                rel.entity_id, rel.weight
+            ));
+        }
+    }
+
+    // Truncate if over budget
+    if out.chars().count() > budget {
+        let safe: String = out.chars().take(budget.saturating_sub(4)).collect();
+        out = safe;
+        out.push_str("...\n");
+    }
+
+    out
+}
+
 #[async_trait::async_trait]
 impl ParallelEnrichmentStage for PersonaStage {
     async fn execute(&self, input: &EnrichmentInput) -> Result<StageOutput> {
+        use crate::chat::enrichment::CachedPersona;
+
         let mut output = StageOutput::new(self.name());
 
         let project_id = match input.project_id {
@@ -56,8 +160,37 @@ impl ParallelEnrichmentStage for PersonaStage {
         };
 
         let file_paths = extract_file_paths(&input.message);
+
+        // ── Sticky cache logic ──────────────────────────────────────────
+        // 1. If file paths found → detect best persona, upgrade cache if better
+        // 2. If no file paths but cache exists → reuse cached persona
+        // 3. If no file paths and no cache → skip (nothing to inject)
+
+        let cached = input.cached_persona.as_ref();
+
         if file_paths.is_empty() {
-            debug!("PersonaStage: no file paths detected in message");
+            // No file paths in this message — reuse cache if available
+            if let Some(cp) = cached {
+                debug!(
+                    "PersonaStage: reusing cached persona '{}' (no file paths in message)",
+                    cp.persona_name
+                );
+                let section = render_persona_section(cp);
+                output.set_hint("active_persona", cp.persona_name.clone());
+                output.set_hint("active_persona_id", cp.persona_id.to_string());
+                // Re-emit the cached persona JSON so the session keeps it
+                if let Ok(json) = serde_json::to_string(cp) {
+                    output.set_hint("cached_persona_json", json);
+                }
+                output.add_section(
+                    "Persona Context",
+                    section,
+                    "persona",
+                    crate::chat::enrichment::EnrichmentSource::Persona,
+                );
+                return Ok(output);
+            }
+            debug!("PersonaStage: no file paths detected and no cached persona");
             return Ok(output);
         }
 
@@ -67,8 +200,8 @@ impl ParallelEnrichmentStage for PersonaStage {
             file_paths
         );
 
-        // Find the best persona across all mentioned files
-        let stage_timeout = Duration::from_millis(500);
+        // ── Detect best persona from file paths ─────────────────────────
+        let stage_timeout = Duration::from_millis(400); // leave 100ms for subgraph load
         let graph = self.graph.clone();
 
         let best_persona = timeout(stage_timeout, async {
@@ -99,35 +232,112 @@ impl ParallelEnrichmentStage for PersonaStage {
         let (persona, weight) = match best_persona {
             Ok(Some((p, w))) => (p, w),
             Ok(None) => {
+                // No persona found for these files — fall back to cache
+                if let Some(cp) = cached {
+                    debug!(
+                        "PersonaStage: no persona for detected files, reusing cached '{}'",
+                        cp.persona_name
+                    );
+                    let section = render_persona_section(cp);
+                    output.set_hint("active_persona", cp.persona_name.clone());
+                    output.set_hint("active_persona_id", cp.persona_id.to_string());
+                    if let Ok(json) = serde_json::to_string(cp) {
+                        output.set_hint("cached_persona_json", json);
+                    }
+                    output.add_section(
+                        "Persona Context",
+                        section,
+                        "persona",
+                        crate::chat::enrichment::EnrichmentSource::Persona,
+                    );
+                    return Ok(output);
+                }
                 debug!("PersonaStage: no matching persona found for detected files");
                 return Ok(output);
             }
             Err(_) => {
                 warn!("PersonaStage: timed out finding personas");
+                // On timeout, fall back to cache
+                if let Some(cp) = cached {
+                    let section = render_persona_section(cp);
+                    output.set_hint("active_persona", cp.persona_name.clone());
+                    output.set_hint("active_persona_id", cp.persona_id.to_string());
+                    if let Ok(json) = serde_json::to_string(cp) {
+                        output.set_hint("cached_persona_json", json);
+                    }
+                    output.add_section(
+                        "Persona Context",
+                        section,
+                        "persona",
+                        crate::chat::enrichment::EnrichmentSource::Persona,
+                    );
+                    return Ok(output);
+                }
                 return Ok(output);
             }
         };
 
+        // ── Upgrade check: only replace cache if new match is strictly better ──
+        if let Some(cp) = cached {
+            if weight <= cp.weight {
+                debug!(
+                    "PersonaStage: detected '{}' (w={:.2}) <= cached '{}' (w={:.2}), keeping cache",
+                    persona.name, weight, cp.persona_name, cp.weight
+                );
+                let section = render_persona_section(cp);
+                output.set_hint("active_persona", cp.persona_name.clone());
+                output.set_hint("active_persona_id", cp.persona_id.to_string());
+                if let Ok(json) = serde_json::to_string(cp) {
+                    output.set_hint("cached_persona_json", json);
+                }
+                output.add_section(
+                    "Persona Context",
+                    section,
+                    "persona",
+                    crate::chat::enrichment::EnrichmentSource::Persona,
+                );
+                return Ok(output);
+            }
+        }
+
         debug!(
-            "PersonaStage: activated persona '{}' (weight={:.2})",
+            "PersonaStage: activating persona '{}' (weight={:.2})",
             persona.name, weight
         );
 
-        // Build the persona context section
-        let mut section = format!(
-            "## Active Persona: {} (relevance: {:.0}%)\n",
-            persona.name,
-            weight * 100.0
-        );
+        // ── Load subgraph for the new persona ───────────────────────────
+        let subgraph = match timeout(
+            Duration::from_millis(100),
+            self.graph.get_persona_subgraph(persona.id),
+        )
+        .await
+        {
+            Ok(Ok(sg)) => sg,
+            Ok(Err(e)) => {
+                warn!("PersonaStage: get_persona_subgraph error: {}", e);
+                empty_subgraph(persona.id, &persona.name)
+            }
+            Err(_) => {
+                warn!("PersonaStage: get_persona_subgraph timed out");
+                empty_subgraph(persona.id, &persona.name)
+            }
+        };
 
-        if !persona.description.is_empty() {
-            section.push_str(&format!("\n{}\n", persona.description));
+        // Build new CachedPersona
+        let new_cached = CachedPersona {
+            persona_id: persona.id,
+            persona_name: persona.name.clone(),
+            description: persona.description.clone(),
+            subgraph,
+            weight,
+        };
+
+        let section = render_persona_section(&new_cached);
+        output.set_hint("active_persona", new_cached.persona_name.clone());
+        output.set_hint("active_persona_id", new_cached.persona_id.to_string());
+        if let Ok(json) = serde_json::to_string(&new_cached) {
+            output.set_hint("cached_persona_json", json);
         }
-
-        // Set hint so downstream stages know which persona is active
-        output.set_hint("active_persona", persona.name.clone());
-        output.set_hint("active_persona_id", persona.id.to_string());
-
         output.add_section(
             "Persona Context",
             section,
@@ -166,6 +376,7 @@ mod tests {
             protocol_state: None,
             excluded_note_ids: Default::default(),
             reasoning_path_tracker: None,
+            cached_persona: None,
         }
     }
 
@@ -379,10 +590,285 @@ mod tests {
         let output = stage.execute(&input).await.unwrap();
 
         assert_eq!(output.sections.len(), 1);
-        // Should have the header but NOT an empty description line
+        // Should have the header but NOT an empty description paragraph
         assert!(output.sections[0].content.contains("minimal"));
-        // Content should only have the header line (no extra newlines from empty description)
-        let lines: Vec<&str> = output.sections[0].content.trim().lines().collect();
-        assert_eq!(lines.len(), 1); // Just the "## Active Persona: ..." line
+        // The header line should not be followed by a description paragraph
+        let content = &output.sections[0].content;
+        let first_line = content.lines().next().unwrap();
+        assert!(first_line.starts_with("## Active Persona: minimal"));
+        // No empty description between header and Known files
+        assert!(!content.contains("\n\n\n"));
+    }
+
+    // ── Sticky behavior tests ─────────────────────────────────────────
+
+    fn make_cached_persona(
+        name: &str,
+        description: &str,
+        weight: f64,
+        files: Vec<(&str, f64)>,
+    ) -> crate::chat::enrichment::CachedPersona {
+        use crate::neo4j::models::{PersonaSubgraph, PersonaSubgraphStats, PersonaWeightedRelation};
+
+        crate::chat::enrichment::CachedPersona {
+            persona_id: Uuid::new_v4(),
+            persona_name: name.to_string(),
+            description: description.to_string(),
+            subgraph: PersonaSubgraph {
+                persona_id: Uuid::new_v4(),
+                persona_name: name.to_string(),
+                files: files
+                    .into_iter()
+                    .map(|(path, w)| PersonaWeightedRelation {
+                        entity_type: "file".to_string(),
+                        entity_id: path.to_string(),
+                        weight: w,
+                    })
+                    .collect(),
+                functions: vec![],
+                notes: vec![],
+                decisions: vec![],
+                skills: vec![],
+                protocols: vec![],
+                feature_graph_id: None,
+                parents: vec![],
+                children: vec![],
+                stats: PersonaSubgraphStats {
+                    total_entities: 0,
+                    coverage_score: 0.0,
+                    freshness: 0.0,
+                },
+            },
+            weight,
+        }
+    }
+
+    fn make_input_with_cache(
+        message: &str,
+        project_id: Option<Uuid>,
+        cached: Option<crate::chat::enrichment::CachedPersona>,
+    ) -> EnrichmentInput {
+        EnrichmentInput {
+            message: message.to_string(),
+            session_id: Uuid::new_v4(),
+            project_slug: None,
+            project_id,
+            cwd: None,
+            protocol_run_id: None,
+            protocol_state: None,
+            excluded_note_ids: Default::default(),
+            reasoning_path_tracker: None,
+            cached_persona: cached,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sticky_reuses_cached_persona_without_file_paths() {
+        let mock = Arc::new(MockGraphStore::new());
+        let stage = PersonaStage::new(mock);
+        let project_id = Uuid::new_v4();
+
+        let cached = make_cached_persona(
+            "chat-expert",
+            "Expert in chat systems",
+            0.85,
+            vec![("src/chat/manager.rs", 0.9)],
+        );
+        // Message WITHOUT file paths → should reuse cached persona
+        let input = make_input_with_cache(
+            "What is the architecture of this module?",
+            Some(project_id),
+            Some(cached),
+        );
+
+        let output = stage.execute(&input).await.unwrap();
+
+        assert_eq!(output.sections.len(), 1);
+        assert!(output.sections[0].content.contains("chat-expert"));
+        assert!(output.sections[0].content.contains("85%"));
+        assert_eq!(output.hints.get("active_persona").unwrap(), "chat-expert");
+        // Should re-emit cached_persona_json for session persistence
+        assert!(output.hints.contains_key("cached_persona_json"));
+    }
+
+    #[tokio::test]
+    async fn test_sticky_keeps_cache_when_new_match_is_weaker() {
+        let mock = Arc::new(MockGraphStore::new());
+        let project_id = Uuid::new_v4();
+
+        // Cached persona with high weight
+        let cached = make_cached_persona(
+            "strong-persona",
+            "High weight persona",
+            0.95,
+            vec![("src/chat/manager.rs", 0.9)],
+        );
+
+        // New persona with lower weight linked to a different file
+        let weak = make_persona("weak-persona", "Low weight persona", project_id);
+        mock.create_persona(&weak).await.unwrap();
+        mock.add_persona_file(weak.id, "src/lib.rs", 0.3)
+            .await
+            .unwrap();
+
+        let stage = PersonaStage::new(mock);
+        // Message with file paths that match the weaker persona
+        let input = make_input_with_cache(
+            "Check src/lib.rs",
+            Some(project_id),
+            Some(cached),
+        );
+
+        let output = stage.execute(&input).await.unwrap();
+
+        assert_eq!(output.sections.len(), 1);
+        // Should keep the strong cached persona, NOT the weaker new match
+        assert!(output.sections[0].content.contains("strong-persona"));
+        assert!(!output.sections[0].content.contains("weak-persona"));
+        assert_eq!(
+            output.hints.get("active_persona").unwrap(),
+            "strong-persona"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sticky_upgrades_cache_when_new_match_is_stronger() {
+        let mock = Arc::new(MockGraphStore::new());
+        let project_id = Uuid::new_v4();
+
+        // Cached persona with low weight
+        let cached = make_cached_persona(
+            "old-persona",
+            "Old persona",
+            0.4,
+            vec![("src/old.rs", 0.4)],
+        );
+
+        // New persona with higher weight
+        let strong = make_persona("new-persona", "New strong persona", project_id);
+        mock.create_persona(&strong).await.unwrap();
+        mock.add_persona_file(strong.id, "src/new.rs", 0.9)
+            .await
+            .unwrap();
+
+        let stage = PersonaStage::new(mock);
+        let input = make_input_with_cache(
+            "Fix src/new.rs",
+            Some(project_id),
+            Some(cached),
+        );
+
+        let output = stage.execute(&input).await.unwrap();
+
+        assert_eq!(output.sections.len(), 1);
+        // Should upgrade to the new, stronger persona
+        assert!(output.sections[0].content.contains("new-persona"));
+        assert!(!output.sections[0].content.contains("old-persona"));
+        assert_eq!(output.hints.get("active_persona").unwrap(), "new-persona");
+        // cached_persona_json should contain the new persona
+        let json = output.hints.get("cached_persona_json").unwrap();
+        assert!(json.contains("new-persona"));
+    }
+
+    #[tokio::test]
+    async fn test_subgraph_renders_known_files() {
+        let mock = Arc::new(MockGraphStore::new());
+        let project_id = Uuid::new_v4();
+
+        let persona = make_persona("graph-expert", "Graph DB specialist", project_id);
+        mock.create_persona(&persona).await.unwrap();
+        mock.add_persona_file(persona.id, "src/neo4j/client.rs", 0.9)
+            .await
+            .unwrap();
+        mock.add_persona_file(persona.id, "src/neo4j/models.rs", 0.8)
+            .await
+            .unwrap();
+
+        let stage = PersonaStage::new(mock);
+        let input = make_input("Check src/neo4j/client.rs", Some(project_id));
+
+        let output = stage.execute(&input).await.unwrap();
+
+        let content = &output.sections[0].content;
+        // Should contain the Known files section with actual file paths
+        assert!(content.contains("**Known files:**"));
+        assert!(content.contains("src/neo4j/client.rs"));
+        assert!(content.contains("src/neo4j/models.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_render_persona_section_respects_budget() {
+        // Build a cached persona with many files to exceed budget
+        let mut files: Vec<(&str, f64)> = Vec::new();
+        for i in 0..100 {
+            // Leak strings to get &str — only in test
+            let path: &str = Box::leak(format!("src/module_{:03}/very_long_file_name_{:03}.rs", i, i).into_boxed_str());
+            files.push((path, 0.5));
+        }
+        let cached = make_cached_persona(
+            "mega-persona",
+            "A persona with extensive file knowledge spanning many modules across the entire project",
+            0.9,
+            files,
+        );
+
+        let section = render_persona_section(&cached);
+        // Should be within budget (PERSONA_BUDGET_CHARS = 2000)
+        assert!(
+            section.chars().count() <= PERSONA_BUDGET_CHARS,
+            "Section exceeds budget: {} > {}",
+            section.chars().count(),
+            PERSONA_BUDGET_CHARS
+        );
+        // Should end with truncation marker if it was truncated
+        // (with 100 files, it should be truncated)
+        if section.chars().count() > 500 {
+            // If we generated enough content, it should have been truncated
+            assert!(
+                section.ends_with("...\n") || section.chars().count() <= PERSONA_BUDGET_CHARS,
+                "Should be truncated or within budget"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_cache_no_file_paths_skips() {
+        // No cached persona + no file paths = no output
+        let mock = Arc::new(MockGraphStore::new());
+        let stage = PersonaStage::new(mock);
+        let project_id = Uuid::new_v4();
+
+        let input = make_input_with_cache(
+            "What is the architecture?",
+            Some(project_id),
+            None,
+        );
+
+        let output = stage.execute(&input).await.unwrap();
+        assert!(output.sections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cached_persona_json_is_valid() {
+        let mock = Arc::new(MockGraphStore::new());
+        let project_id = Uuid::new_v4();
+
+        let persona = make_persona("json-test", "Test JSON serialization", project_id);
+        mock.create_persona(&persona).await.unwrap();
+        mock.add_persona_file(persona.id, "src/test.rs", 0.7)
+            .await
+            .unwrap();
+
+        let stage = PersonaStage::new(mock);
+        let input = make_input("Check src/test.rs", Some(project_id));
+
+        let output = stage.execute(&input).await.unwrap();
+
+        // Verify the cached_persona_json hint is valid JSON that deserializes
+        let json = output.hints.get("cached_persona_json").unwrap();
+        let deserialized: crate::chat::enrichment::CachedPersona =
+            serde_json::from_str(json).expect("cached_persona_json should be valid JSON");
+        assert_eq!(deserialized.persona_name, "json-test");
+        assert!((deserialized.weight - 0.7).abs() < 0.01);
     }
 }

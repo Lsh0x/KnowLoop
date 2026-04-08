@@ -4,6 +4,10 @@
 //! This trait mirrors all public async methods of `Neo4jClient`,
 //! enabling testing with mock implementations and future backend swaps.
 
+use crate::blueprint::{
+    BlueprintNode, BlueprintRelationType, BlueprintResponse, CreateBlueprintRequest,
+    ListBlueprintsQuery, UpdateBlueprintRequest,
+};
 use crate::events::trigger::EventTrigger;
 use crate::graph::models::{
     AnalysisProfile, FabricFileAnalyticsUpdate, FileAnalyticsUpdate, FunctionAnalyticsUpdate,
@@ -1798,6 +1802,7 @@ pub trait GraphStore: Send + Sync {
         limit: usize,
         offset: usize,
         include_detached: bool,
+        include_archived: bool,
     ) -> Result<(Vec<ChatSessionNode>, usize)>;
 
     /// Get child sessions spawned by a parent session
@@ -1825,7 +1830,7 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<()>;
 
     /// Get direct fork children of a session.
-    async fn get_fork_children(&self, session_id: &str) -> Result<Vec<ChatSessionNode>>;
+    async fn get_fork_children(&self, session_id: &str, include_archived: bool) -> Result<Vec<ChatSessionNode>>;
 
     /// Get the full fork tree (max depth levels via FORKED_FROM).
     async fn get_fork_tree(&self, session_id: &str, max_depth: u32)
@@ -1836,6 +1841,20 @@ pub trait GraphStore: Send + Sync {
 
     /// Update fork_status for a single session.
     async fn update_fork_status(&self, session_id: &str, status: &str) -> Result<()>;
+
+    /// Create a SUMMARIZED_BY relation from a fork session to a Note.
+    /// Indicates that `note_id` contains a summary of the fork conversation.
+    async fn create_summarized_by_relation(
+        &self,
+        session_id: &str,
+        note_id: uuid::Uuid,
+    ) -> Result<()>;
+
+    /// Archive a session (set archived = true).
+    async fn archive_session(&self, session_id: &str) -> Result<()>;
+
+    /// Get notes linked to a session via SUMMARIZED_BY relations.
+    async fn get_session_notes(&self, session_id: &str) -> Result<Vec<crate::notes::models::Note>>;
 
     /// Get the full session tree rooted at a session (recursive SPAWNED_BY traversal, max 10 levels)
     async fn get_session_tree(&self, session_id: &str) -> Result<Vec<SessionTreeNode>>;
@@ -1858,6 +1877,9 @@ pub trait GraphStore: Send + Sync {
         conversation_id: Option<String>,
         preview: Option<String>,
     ) -> Result<Option<ChatSessionNode>>;
+
+    /// Update the model field on a chat session node (mid-session model switch)
+    async fn update_chat_session_model(&self, id: Uuid, model: &str) -> Result<()>;
 
     /// Update the permission_mode field on a chat session node
     async fn update_chat_session_permission_mode(&self, id: Uuid, mode: &str) -> Result<()>;
@@ -2609,6 +2631,90 @@ pub trait GraphStore: Send + Sync {
         &self,
         project_id: Uuid,
     ) -> Result<crate::neo4j::analytics::LearningHealthReport>;
+
+    // ========================================================================
+    // Blueprint operations
+    // ========================================================================
+
+    /// Create a new blueprint node.
+    async fn create_blueprint(&self, req: &CreateBlueprintRequest) -> Result<BlueprintNode>;
+
+    /// Get a blueprint by UUID.
+    async fn get_blueprint(&self, id: &str) -> Result<Option<BlueprintNode>>;
+
+    /// Get a blueprint by slug.
+    async fn get_blueprint_by_slug(&self, slug: &str) -> Result<Option<BlueprintNode>>;
+
+    /// Update a blueprint.
+    async fn update_blueprint(
+        &self,
+        id: &str,
+        req: &UpdateBlueprintRequest,
+    ) -> Result<BlueprintNode>;
+
+    /// Delete a blueprint and all its relations.
+    async fn delete_blueprint(&self, id: &str) -> Result<()>;
+
+    /// List blueprints with filters and pagination.
+    async fn list_blueprints(
+        &self,
+        query: &ListBlueprintsQuery,
+    ) -> Result<Vec<BlueprintResponse>>;
+
+    /// Add a typed relation between two blueprints.
+    async fn add_blueprint_relation(
+        &self,
+        from_slug: &str,
+        to_slug: &str,
+        relation_type: BlueprintRelationType,
+    ) -> Result<()>;
+
+    /// Remove a relation between two blueprints.
+    async fn remove_blueprint_relation(
+        &self,
+        from_slug: &str,
+        to_slug: &str,
+        relation_type: BlueprintRelationType,
+    ) -> Result<()>;
+
+    /// Get transitive dependencies (forward DEPENDS_ON).
+    async fn get_blueprint_dependencies(
+        &self,
+        slug: &str,
+    ) -> Result<Vec<BlueprintResponse>>;
+
+    /// Get transitive dependents (reverse DEPENDS_ON).
+    async fn get_blueprint_dependents(
+        &self,
+        slug: &str,
+    ) -> Result<Vec<BlueprintResponse>>;
+
+    /// Get paired blueprints (bidirectional PAIRS_WITH).
+    async fn get_blueprint_pairs(
+        &self,
+        slug: &str,
+    ) -> Result<Vec<BlueprintResponse>>;
+
+    /// Link a blueprint to a project (APPLIES_TO).
+    async fn link_blueprint_to_project(
+        &self,
+        slug: &str,
+        project_id: &str,
+        relevance: f64,
+    ) -> Result<()>;
+
+    /// Unlink a blueprint from a project.
+    async fn unlink_blueprint_from_project(
+        &self,
+        slug: &str,
+        project_id: &str,
+    ) -> Result<()>;
+
+    /// Get blueprints linked to a project.
+    async fn get_project_blueprints(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<BlueprintResponse>>;
 
     // ========================================================================
     // Analysis Profile operations

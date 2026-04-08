@@ -279,6 +279,7 @@ mod tests {
             protocol_state: None,
             excluded_note_ids: Default::default(),
             reasoning_path_tracker: None,
+            cached_persona: None,
         }
     }
 

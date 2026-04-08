@@ -1753,10 +1753,23 @@ pub static TOOL_GROUPS: &[ToolGroup] = &[
             description: "Task retrospective learning (get/get_for_task/list/insights/trigger) — analyze completed tasks for patterns and risk signals",
         }],
     },
+    // ── Blueprint ───────────────────────────────────────────────────────
+    ToolGroup {
+        name: "blueprint",
+        description: "Manage reusable blueprints: templates, resolution, project linking, relations",
+        keywords: &[
+            "blueprint", "template", "scaffold", "boilerplate", "pattern",
+            "reusable", "archetype", "starter",
+        ],
+        tools: &[ToolRef {
+            name: "blueprint",
+            description: "Manage blueprints (list/create/get/update/delete/resolve/link_to_project/unlink_from_project/add_relation/remove_relation/get_relations)",
+        }],
+    },
 ];
 
 /// Total number of unique tools across all groups.
-/// Must match the MCP tools.rs count (currently 29 mega-tools).
+/// Must match the MCP tools.rs count (currently 31 mega-tools).
 pub fn tool_catalog_tool_count() -> usize {
     let mut names: Vec<&str> = TOOL_GROUPS
         .iter()
@@ -3051,8 +3064,8 @@ mod tests {
     fn test_tool_groups_cover_all_29_mega_tools() {
         let count = tool_catalog_tool_count();
         assert_eq!(
-            count, 30,
-            "TOOL_GROUPS must cover exactly 30 unique mega-tools (got {}). \
+            count, 31,
+            "TOOL_GROUPS must cover exactly 31 unique mega-tools (got {}). \
              Update the catalog when adding/removing MCP tools.",
             count
         );
@@ -3102,7 +3115,7 @@ mod tests {
 
     #[test]
     fn test_tool_groups_count() {
-        assert_eq!(TOOL_GROUPS.len(), 16, "Expected 16 tool groups");
+        assert_eq!(TOOL_GROUPS.len(), 17, "Expected 17 tool groups");
     }
 
     #[test]

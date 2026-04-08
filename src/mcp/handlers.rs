@@ -186,6 +186,7 @@ impl ToolHandler {
             "admin",
             "skill",
             "analysis_profile",
+            "blueprint",
             "protocol",
             "episode",
             "persona",
@@ -414,6 +415,9 @@ impl ToolHandler {
             ("chat", "get_session_entities") => "get_session_entities",
             ("chat", "get_session_tree") => "get_session_tree",
             ("chat", "get_run_sessions") => "get_run_sessions",
+            ("chat", "fork") => "fork_session",
+            ("chat", "list_forks") => "list_forks",
+            ("chat", "close_fork") => "close_fork",
 
             // Feature Graph
             ("feature_graph", "create") => "create_feature_graph",
@@ -594,6 +598,19 @@ impl ToolHandler {
             ("episode", "list") => "list_episodes",
             ("episode", "anonymize") => "anonymize_episode",
             ("episode", "export_artifact") => "export_artifact",
+
+            // Blueprint
+            ("blueprint", "list") => "list_blueprints",
+            ("blueprint", "create") => "create_blueprint",
+            ("blueprint", "get") => "get_blueprint",
+            ("blueprint", "update") => "update_blueprint",
+            ("blueprint", "delete") => "delete_blueprint",
+            ("blueprint", "add_relation") => "add_blueprint_relation",
+            ("blueprint", "remove_relation") => "remove_blueprint_relation",
+            ("blueprint", "get_relations") => "get_blueprint_relations",
+            ("blueprint", "link_to_project") => "link_blueprint_to_project",
+            ("blueprint", "unlink_from_project") => "unlink_blueprint_from_project",
+            ("blueprint", "get_project_blueprints") => "get_project_blueprints",
 
             // Analysis Profile
             ("analysis_profile", "list") => "list_analysis_profiles",
@@ -4033,6 +4050,60 @@ impl ToolHandler {
                 Ok(Some(result))
             }
 
+            "fork_session" => {
+                let id = extract_id(args, "session_id")?;
+                let mut body = serde_json::Map::new();
+                // fork_type is required: "agent" or "user"
+                body.insert(
+                    "fork_type".to_string(),
+                    json!(extract_string(args, "fork_type").unwrap_or_else(|_| "agent".to_string())),
+                );
+                if let Some(v) = args.get("task_id").and_then(|v| v.as_str()) {
+                    body.insert("task_id".to_string(), json!(v));
+                }
+                if let Some(v) = args.get("persona").and_then(|v| v.as_str()) {
+                    body.insert("persona".to_string(), json!(v));
+                }
+                if let Some(v) = args.get("initial_message").and_then(|v| v.as_str()) {
+                    body.insert("initial_message".to_string(), json!(v));
+                }
+                if let Some(v) = args.get("max_depth").and_then(|v| v.as_u64()) {
+                    body.insert("max_depth".to_string(), json!(v));
+                }
+                let result = http
+                    .post(
+                        &format!("/api/chat/sessions/{}/fork", id),
+                        &Value::Object(body),
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "list_forks" => {
+                let id = extract_id(args, "session_id")?;
+                let result = http
+                    .get(&format!("/api/chat/sessions/{}/forks", id))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "close_fork" => {
+                let session_id = extract_id(args, "session_id")?;
+                let fork_id = extract_id(args, "fork_id")?;
+                let cancel = args
+                    .get("cancel")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let body = json!({ "cancel": cancel });
+                let result = http
+                    .delete_with_body(
+                        &format!("/api/chat/sessions/{}/forks/{}", session_id, fork_id),
+                        &body,
+                    )
+                    .await?;
+                Ok(Some(result))
+            }
+
             "get_chat_session" => {
                 let id = extract_id(args, "session_id")?;
                 let result = http.get(&format!("/api/chat/sessions/{}", id)).await?;
@@ -4707,6 +4778,117 @@ impl ToolHandler {
             "migrate_calls_confidence" => {
                 let result = http
                     .post("/api/admin/migrate-calls-confidence", &json!({}))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            // ── Blueprints (11 tools) ────────────────────────────────────
+            "list_blueprints" => {
+                let mut query = Vec::new();
+                if let Some(scope) = extract_optional_string(args, "scope") {
+                    query.push(("scope".to_string(), scope));
+                }
+                if let Some(category) = extract_optional_string(args, "category") {
+                    query.push(("category".to_string(), category));
+                }
+                if let Some(status) = extract_optional_string(args, "status") {
+                    query.push(("status".to_string(), status));
+                }
+                if let Some(stack) = extract_optional_string(args, "stack") {
+                    query.push(("stack".to_string(), stack));
+                }
+                if let Some(search) = extract_optional_string(args, "search") {
+                    query.push(("search".to_string(), search));
+                }
+                if let Some(limit) = args.get("limit").and_then(|v| v.as_i64()) {
+                    query.push(("limit".to_string(), limit.to_string()));
+                }
+                if let Some(offset) = args.get("offset").and_then(|v| v.as_i64()) {
+                    query.push(("offset".to_string(), offset.to_string()));
+                }
+                let result = if query.is_empty() {
+                    http.get("/api/blueprints").await?
+                } else {
+                    http.get_with_query("/api/blueprints", &query).await?
+                };
+                Ok(Some(result))
+            }
+
+            "create_blueprint" => {
+                let result = http.post("/api/blueprints", args).await?;
+                Ok(Some(result))
+            }
+
+            "get_blueprint" => {
+                let id_or_slug =
+                    extract_string(args, "id").or_else(|_| extract_string(args, "slug"))?;
+                let mut url = format!("/api/blueprints/{}", id_or_slug);
+                if let Some(tier) = args.get("tier").and_then(|v| v.as_u64()) {
+                    url = format!("{}?tier={}", url, tier);
+                }
+                let result = http.get(&url).await?;
+                Ok(Some(result))
+            }
+
+            "update_blueprint" => {
+                let id =
+                    extract_string(args, "id").or_else(|_| extract_string(args, "blueprint_id"))?;
+                let result = http.patch(&format!("/api/blueprints/{}", id), args).await?;
+                Ok(Some(result))
+            }
+
+            "delete_blueprint" => {
+                let id =
+                    extract_string(args, "id").or_else(|_| extract_string(args, "blueprint_id"))?;
+                let result = http.delete(&format!("/api/blueprints/{}", id)).await?;
+                Ok(Some(if result.is_null() {
+                    json!({"deleted": true})
+                } else {
+                    result
+                }))
+            }
+
+            "add_blueprint_relation" => {
+                let _result = http.post("/api/blueprints/relations", args).await?;
+                Ok(Some(json!({"created": true})))
+            }
+
+            "remove_blueprint_relation" => {
+                let _result = http
+                    .delete_with_body("/api/blueprints/relations", args)
+                    .await?;
+                Ok(Some(json!({"deleted": true})))
+            }
+
+            "get_blueprint_relations" => {
+                let slug = extract_string(args, "slug")?;
+                let result = http
+                    .get(&format!("/api/blueprints/{}/relations", slug))
+                    .await?;
+                Ok(Some(result))
+            }
+
+            "link_blueprint_to_project" => {
+                let slug = extract_string(args, "slug")?;
+                let _result = http
+                    .post(&format!("/api/blueprints/{}/projects", slug), args)
+                    .await?;
+                Ok(Some(json!({"linked": true})))
+            }
+
+            "unlink_blueprint_from_project" => {
+                let slug = extract_string(args, "slug")?;
+                let project_id = extract_id(args, "project_id")?;
+                let _result = http
+                    .delete(&format!("/api/blueprints/{}/projects/{}", slug, project_id))
+                    .await?;
+                Ok(Some(json!({"unlinked": true})))
+            }
+
+            "get_project_blueprints" => {
+                let project_id = extract_id(args, "project_id")?;
+                let result = http
+                    .get(&format!("/api/projects/{}/blueprints", project_id))
                     .await?;
                 Ok(Some(result))
             }
@@ -6364,6 +6546,7 @@ mod tests {
             ("admin", "meilisearch_stats"),
             ("skill", "list"),
             ("analysis_profile", "list"),
+            ("blueprint", "list"),
             ("protocol", "list"),
             ("persona", "list"),
         ];

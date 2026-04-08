@@ -610,6 +610,73 @@ impl PostStreamHandler {
             }
         }
     }
+
+    // ── Auto-close for Job forks (RFC: Subchat Lifecycle Intelligence) ───
+
+    /// Check if this session is a Job fork and the agent signaled completion.
+    /// If so, auto-close the fork by setting status to "completed".
+    pub async fn handle_job_auto_close(&self, assistant_text_parts: &[String]) {
+        let Some(uuid) = self.session_uuid else {
+            return;
+        };
+
+        // 1. Check if this session is a Job fork
+        let session = match self.graph.get_chat_session(uuid).await {
+            Ok(Some(s)) => s,
+            _ => return,
+        };
+
+        if session.fork_intent.as_deref() != Some("job") {
+            return;
+        }
+        if session.fork_status.as_deref() != Some("active") {
+            return; // Already closed
+        }
+
+        // 2. Detect completion signal in assistant text
+        let text = assistant_text_parts.join("");
+        let text_lower = text.to_lowercase();
+
+        let completion_signals = [
+            "task completed",
+            "task is completed",
+            "job done",
+            "job is done",
+            "work is done",
+            "i've completed",
+            "i have completed",
+            "all done",
+            "finished the task",
+            "task is finished",
+            "implementation is complete",
+            "changes are complete",
+        ];
+
+        let has_completion_signal = completion_signals
+            .iter()
+            .any(|signal| text_lower.contains(signal));
+
+        if !has_completion_signal {
+            return;
+        }
+
+        // 3. Auto-close: update status to completed
+        info!(
+            session_id = %self.session_id,
+            "Auto-closing Job fork — agent signaled completion"
+        );
+
+        if let Err(e) = self
+            .graph
+            .update_fork_status(&self.session_id, "completed")
+            .await
+        {
+            warn!(
+                session_id = %self.session_id,
+                "Failed to auto-close Job fork: {}", e
+            );
+        }
+    }
 }
 
 // ── Pure logic for objective tracking (testable without Graph) ─────────
@@ -1166,6 +1233,7 @@ mod integration_tests {
                 objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
                 reasoning_path_tracker: crate::chat::feedback::ReasoningPathTracker::new(),
                 work_log: Arc::new(Mutex::new(crate::chat::types::SessionWorkLog::default())),
+                persona_cache: Arc::new(Mutex::new(None)),
             };
             active_sessions
                 .write()

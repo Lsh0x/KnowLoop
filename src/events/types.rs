@@ -72,6 +72,8 @@ pub enum EntityType {
     LifecycleHook,
     /// Learning system — emitters: reactions.rs (PatternsDetected after episode analysis)
     Learning,
+    /// Reusable pattern template — emitters: blueprint_handlers.rs (CRUD + relations)
+    Blueprint,
 }
 
 /// The CRUD action performed on an entity.
@@ -372,6 +374,7 @@ mod tests {
             EntityType::TopologyRule,
             EntityType::LifecycleHook,
             EntityType::Learning,
+            EntityType::Blueprint,
         ];
 
         for variant in &variants {
@@ -482,7 +485,7 @@ mod tests {
     #[test]
     fn test_entity_type_has_26_variants() {
         // Ensure we don't accidentally add/remove variants
-        let all: [EntityType; 28] = [
+        let all: [EntityType; 29] = [
             EntityType::Project,
             EntityType::Plan,
             EntityType::Task,
@@ -511,8 +514,9 @@ mod tests {
             EntityType::TopologyRule,
             EntityType::LifecycleHook,
             EntityType::Learning,
+            EntityType::Blueprint,
         ];
-        assert_eq!(all.len(), 28);
+        assert_eq!(all.len(), 29);
     }
 
     // ================================================================

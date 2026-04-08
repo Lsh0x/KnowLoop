@@ -36,6 +36,7 @@ impl Neo4jClient {
                     fork_depth: $fork_depth,
                     fork_type: $fork_type,
                     fork_status: $fork_status,
+                    fork_intent: $fork_intent,
                     fork_context_snapshot: $fork_context_snapshot
                 })
                 WITH s
@@ -68,6 +69,7 @@ impl Neo4jClient {
                     fork_depth: $fork_depth,
                     fork_type: $fork_type,
                     fork_status: $fork_status,
+                    fork_intent: $fork_intent,
                     fork_context_snapshot: $fork_context_snapshot
                 })
                 "#,
@@ -118,6 +120,10 @@ impl Neo4jClient {
                         session.fork_status.clone().unwrap_or_default(),
                     )
                     .param(
+                        "fork_intent",
+                        session.fork_intent.clone().unwrap_or_default(),
+                    )
+                    .param(
                         "fork_context_snapshot",
                         session.fork_context_snapshot.clone().unwrap_or_default(),
                     ),
@@ -149,6 +155,7 @@ impl Neo4jClient {
         limit: usize,
         offset: usize,
         include_detached: bool,
+        include_archived: bool,
     ) -> Result<(Vec<ChatSessionNode>, usize)> {
         // Filter clause to exclude detached (spawned) sessions unless explicitly requested
         let detached_filter = if include_detached {
@@ -157,12 +164,19 @@ impl Neo4jClient {
             " AND (s.spawned_by IS NULL OR s.spawned_by = '')"
         };
 
+        // Filter clause to exclude archived sessions unless explicitly requested
+        let archived_filter = if include_archived {
+            ""
+        } else {
+            " AND NOT coalesce(s.archived, false)"
+        };
+
         let (data_query, count_query) = if let Some(slug) = project_slug {
             (
                 query(&format!(
                     r#"
                     MATCH (s:ChatSession {{project_slug: $slug}})
-                    WHERE true{detached_filter}
+                    WHERE true{detached_filter}{archived_filter}
                     RETURN s ORDER BY s.updated_at DESC
                     SKIP $offset LIMIT $limit
                     "#,
@@ -171,7 +185,7 @@ impl Neo4jClient {
                 .param("offset", offset as i64)
                 .param("limit", limit as i64),
                 query(&format!(
-                    "MATCH (s:ChatSession {{project_slug: $slug}}) WHERE true{detached_filter} RETURN count(s) AS total",
+                    "MATCH (s:ChatSession {{project_slug: $slug}}) WHERE true{detached_filter}{archived_filter} RETURN count(s) AS total",
                 ))
                     .param("slug", slug.to_string()),
             )
@@ -185,7 +199,7 @@ impl Neo4jClient {
                     WITH collect(proj.slug) AS ws_project_slugs
                     MATCH (s:ChatSession)
                     WHERE (s.workspace_slug = $ws
-                       OR (s.project_slug IS NOT NULL AND s.project_slug IN ws_project_slugs)){detached_filter}
+                       OR (s.project_slug IS NOT NULL AND s.project_slug IN ws_project_slugs)){detached_filter}{archived_filter}
                     RETURN s ORDER BY s.updated_at DESC
                     SKIP $offset LIMIT $limit
                     "#,
@@ -199,7 +213,7 @@ impl Neo4jClient {
                     WITH collect(proj.slug) AS ws_project_slugs
                     MATCH (s:ChatSession)
                     WHERE (s.workspace_slug = $ws
-                       OR (s.project_slug IS NOT NULL AND s.project_slug IN ws_project_slugs)){detached_filter}
+                       OR (s.project_slug IS NOT NULL AND s.project_slug IN ws_project_slugs)){detached_filter}{archived_filter}
                     RETURN count(s) AS total
                     "#,
                 ))
@@ -210,7 +224,7 @@ impl Neo4jClient {
                 query(&format!(
                     r#"
                     MATCH (s:ChatSession)
-                    WHERE true{detached_filter}
+                    WHERE true{detached_filter}{archived_filter}
                     RETURN s ORDER BY s.updated_at DESC
                     SKIP $offset LIMIT $limit
                     "#,
@@ -218,7 +232,7 @@ impl Neo4jClient {
                 .param("offset", offset as i64)
                 .param("limit", limit as i64),
                 query(&format!(
-                    "MATCH (s:ChatSession) WHERE true{detached_filter} RETURN count(s) AS total",
+                    "MATCH (s:ChatSession) WHERE true{detached_filter}{archived_filter} RETURN count(s) AS total",
                 )),
             )
         };
@@ -287,6 +301,16 @@ impl Neo4jClient {
         } else {
             Ok(None)
         }
+    }
+
+    /// Update the model field on a chat session node (mid-session model switch)
+    pub async fn update_chat_session_model(&self, id: Uuid, model: &str) -> Result<()> {
+        let cypher = "MATCH (s:ChatSession {id: $id}) SET s.model = $model, s.updated_at = datetime()";
+        let q = query(cypher)
+            .param("id", id.to_string())
+            .param("model", model.to_string());
+        self.graph.run(q).await?;
+        Ok(())
     }
 
     /// Update the permission_mode field on a chat session node
@@ -519,14 +543,20 @@ impl Neo4jClient {
     }
 
     /// Get direct fork children of a session.
-    pub async fn get_fork_children(&self, session_id: &str) -> Result<Vec<ChatSessionNode>> {
-        let q = query(
+    pub async fn get_fork_children(&self, session_id: &str, include_archived: bool) -> Result<Vec<ChatSessionNode>> {
+        let archived_filter = if include_archived {
+            ""
+        } else {
+            "WHERE NOT coalesce(child.archived, false)"
+        };
+        let q = query(&format!(
             r#"
-            MATCH (child:ChatSession)-[:FORKED_FROM]->(parent:ChatSession {id: $id})
+            MATCH (child:ChatSession)-[:FORKED_FROM]->(parent:ChatSession {{id: $id}})
+            {archived_filter}
             RETURN child
             ORDER BY child.created_at ASC
             "#,
-        )
+        ))
         .param("id", session_id.to_string());
 
         let mut result = self.graph.execute(q).await?;
@@ -599,6 +629,69 @@ impl Neo4jClient {
 
         self.graph.run(q).await?;
         Ok(())
+    }
+
+    /// Create a SUMMARIZED_BY relation from a ChatSession to a Note.
+    /// The note contains a summary of the fork conversation.
+    pub async fn create_summarized_by_relation(
+        &self,
+        session_id: &str,
+        note_id: uuid::Uuid,
+    ) -> Result<()> {
+        let q = query(
+            r#"
+            MATCH (s:ChatSession {id: $session_id})
+            MATCH (n:Note {id: $note_id})
+            MERGE (s)-[:SUMMARIZED_BY {created_at: datetime()}]->(n)
+            "#,
+        )
+        .param("session_id", session_id.to_string())
+        .param("note_id", note_id.to_string());
+
+        self.graph.run(q).await?;
+        Ok(())
+    }
+
+    /// Archive a session by setting `archived = true`.
+    pub async fn archive_session(&self, session_id: &str) -> Result<()> {
+        let q = query(
+            r#"
+            MATCH (s:ChatSession {id: $id})
+            SET s.archived = true, s.updated_at = datetime()
+            "#,
+        )
+        .param("id", session_id.to_string());
+
+        self.graph.run(q).await?;
+        Ok(())
+    }
+
+    /// Get notes linked to a session via SUMMARIZED_BY or DISCUSSED→LINKED_TO paths.
+    /// Returns notes directly associated with the session (summaries, decisions, etc.).
+    pub async fn get_session_notes(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::notes::models::Note>> {
+        let q = query(
+            r#"
+            MATCH (s:ChatSession {id: $id})-[:SUMMARIZED_BY]->(n:Note)
+            WHERE n.status <> 'archived'
+            RETURN n
+            ORDER BY n.created_at DESC
+            LIMIT 50
+            "#,
+        )
+        .param("id", session_id.to_string());
+
+        let mut result = self.graph.execute(q).await?;
+        let mut notes = Vec::new();
+        while let Some(row) = result.next().await? {
+            let node: neo4rs::Node = row.get("n")?;
+            if let Ok(note) = self.node_to_note(&node) {
+                notes.push(note);
+            }
+        }
+        Ok(notes)
     }
 
     /// Get the full session tree rooted at `session_id` (recursive traversal via SPAWNED_BY).
@@ -884,6 +977,15 @@ impl Neo4jClient {
                     Some(v)
                 }
             },
+            fork_intent: {
+                let v: String = node.get("fork_intent").unwrap_or_default();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            },
+            archived: node.get::<bool>("archived").unwrap_or(false),
             fork_context_snapshot: {
                 let v: String = node.get("fork_context_snapshot").unwrap_or_default();
                 if v.is_empty() {

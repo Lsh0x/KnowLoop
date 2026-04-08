@@ -14,7 +14,8 @@ use super::post_tool_hook;
 use super::skill_hook;
 use super::types::{
     classify_api_error, truncate_snippet, ChatEvent, ChatEventPage, ChatRequest,
-    CreateSessionResponse, MessageSearchHit, MessageSearchResult, PendingMessage, SessionWorkLog,
+    CreateSessionResponse, ForkConfig, ForkInfo, ForkIntent, ForkResponse, ForkStatus, ForkType,
+    MessageSearchHit, MessageSearchResult, PendingMessage, SessionWorkLog, SpawnedBy,
 };
 use crate::meilisearch::SearchStore;
 use crate::neo4j::models::ChatEventRecord;
@@ -142,6 +143,10 @@ pub struct ActiveSession {
     /// steps completed, last tool used. Source of truth for resumption after
     /// compaction or max_turns.
     pub work_log: Arc<Mutex<SessionWorkLog>>,
+    /// Cached persona for session-level stickiness.
+    /// Persists across messages — PersonaStage reuses this instead of re-detecting.
+    /// Updated when a strictly better match (higher weight) is found.
+    pub persona_cache: Arc<Mutex<Option<super::enrichment::CachedPersona>>>,
 }
 
 /// Runtime-mutable environment config for Claude CLI subprocess.
@@ -508,6 +513,11 @@ impl ChatManager {
             super::stages::StatusInjectionConfig::default(),
         )));
         pipeline.add_parallel_stage(Box::new(super::stages::FileContextStage::new(
+            graph.clone(),
+        )));
+        // Fork context stage: injects fork tree awareness (sibling summaries, parent scope).
+        // Controlled by ENRICHMENT_FORK_CONTEXT env var (default: true).
+        pipeline.add_parallel_stage(Box::new(super::stages::ForkContextStage::new(
             graph.clone(),
         )));
         // Reflex stage: injects scar warnings, episode recall, co-change reminders
@@ -2374,7 +2384,9 @@ impl ChatManager {
             fork_depth: 0,
             fork_type: None,
             fork_status: None,
+            fork_intent: None,
             fork_context_snapshot: None,
+            archived: false,
         };
         self.graph
             .create_chat_session(&session_node)
@@ -2629,6 +2641,7 @@ impl ChatManager {
                     objective_tracking: true,
                     objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
                     work_log: work_log.clone(),
+                    persona_cache: Arc::new(Mutex::new(None)),
                 },
             );
             interrupt_flag
@@ -2881,18 +2894,19 @@ impl ChatManager {
                 match graph.get_chat_session(uuid).await {
                     Ok(Some(node)) => {
                         // Read protocol context from the active session (if any)
-                        let (proto_run_id, proto_state, reasoning_tracker) = {
+                        let (proto_run_id, proto_state, reasoning_tracker, persona_cached) = {
                             let sessions = active_sessions.read().await;
-                            sessions
-                                .get(&uuid.to_string())
-                                .map(|s| {
-                                    (
-                                        s.protocol_run_id,
-                                        s.protocol_state.clone(),
-                                        Some(s.reasoning_path_tracker.clone()),
-                                    )
-                                })
-                                .unwrap_or((None, None, None))
+                            if let Some(s) = sessions.get(&uuid.to_string()) {
+                                let pc = s.persona_cache.lock().await.clone();
+                                (
+                                    s.protocol_run_id,
+                                    s.protocol_state.clone(),
+                                    Some(s.reasoning_path_tracker.clone()),
+                                    pc,
+                                )
+                            } else {
+                                (None, None, None, None)
+                            }
                         };
                         Some(super::enrichment::EnrichmentInput {
                             message: prompt.clone(),
@@ -2904,6 +2918,7 @@ impl ChatManager {
                             protocol_state: proto_state,
                             excluded_note_ids: Default::default(), // no dedup in send_message path
                             reasoning_path_tracker: reasoning_tracker,
+                            cached_persona: persona_cached,
                         })
                     }
                     _ => None,
@@ -2914,6 +2929,25 @@ impl ChatManager {
 
             if let Some(input) = enrichment_input {
                 let ctx = enrichment_pipeline.execute(&input).await;
+
+                // ── Persona cache writeback ──────────────────────────────
+                // If the PersonaStage produced a new CachedPersona (stored in
+                // ctx.hints), persist it back to ActiveSession so it sticks
+                // across subsequent messages.
+                if let Some(persona_json) = ctx.hints.get("cached_persona_json") {
+                    if let Ok(new_cached) =
+                        serde_json::from_str::<super::enrichment::CachedPersona>(persona_json)
+                    {
+                        if let Some(uuid) = session_uuid {
+                            let sessions = active_sessions.read().await;
+                            if let Some(session) = sessions.get(&uuid.to_string()) {
+                                let mut guard = session.persona_cache.lock().await;
+                                *guard = Some(new_cached);
+                            }
+                        }
+                    }
+                }
+
                 if ctx.has_content() {
                     debug!(
                         "[enrichment] Prompt enriched: {} sections, {}ms (hints: {:?})",
@@ -3754,6 +3788,11 @@ impl ChatManager {
             .handle_feedback(&assistant_text_parts, &memory_manager, &context_injector)
             .await;
 
+        // 7b. Auto-close Job forks if agent signaled completion
+        post_handler
+            .handle_job_auto_close(&assistant_text_parts)
+            .await;
+
         // 8. Drain pending messages queue
         super::drain::drain_pending_messages(
             has_pending,
@@ -3912,9 +3951,25 @@ impl ChatManager {
 
         // No stream in progress — persist and broadcast immediately
 
-        // Update message count in Neo4j
+        // Update message count in Neo4j + auto-reactivate completed forks
         if let Ok(uuid) = Uuid::parse_str(session_id) {
             if let Ok(Some(node)) = self.graph.get_chat_session(uuid).await {
+                // Auto-reactivate: if a user sends a message to a completed/cancelled fork,
+                // reactivate it automatically (RFC: Subchat Lifecycle Intelligence)
+                if node.fork_status.as_deref() == Some("completed")
+                    || node.fork_status.as_deref() == Some("cancelled")
+                {
+                    info!(
+                        "Auto-reactivating fork session {} (was {})",
+                        session_id,
+                        node.fork_status.as_deref().unwrap_or("unknown")
+                    );
+                    let _ = self
+                        .graph
+                        .update_fork_status(session_id, "active")
+                        .await;
+                }
+
                 let _ = self
                     .graph
                     .update_chat_session(
@@ -4330,6 +4385,18 @@ impl ChatManager {
             "Model changed for session (via stdin_tx, lock-free)"
         );
 
+        // Persist model change to Neo4j (so resume_session uses the correct model)
+        if let Ok(uuid) = Uuid::parse_str(session_id) {
+            if let Err(e) = self.graph.update_chat_session_model(uuid, model).await {
+                warn!(
+                    session_id = %session_id,
+                    model = %model,
+                    "Failed to persist model change to Neo4j (non-fatal): {}",
+                    e
+                );
+            }
+        }
+
         // Broadcast event to WebSocket clients
         let _ = events_tx.send(ChatEvent::ModelChanged {
             model: model.to_string(),
@@ -4666,6 +4733,7 @@ impl ChatManager {
                     objective_tracking: true,
                     objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
                     work_log: work_log.clone(),
+                    persona_cache: Arc::new(Mutex::new(None)),
                 },
             );
             interrupt_flag
@@ -4891,7 +4959,7 @@ impl ChatManager {
         // Get all sessions without title
         let sessions = self
             .graph
-            .list_chat_sessions(None, None, 200, 0, true)
+            .list_chat_sessions(None, None, 200, 0, true, false)
             .await
             .context("Failed to list sessions")?;
 
@@ -5009,7 +5077,7 @@ impl ChatManager {
         // Resolve conversation_id → session metadata from Neo4j
         let (all_sessions, _) = self
             .graph
-            .list_chat_sessions(None, None, 200, 0, true)
+            .list_chat_sessions(None, None, 200, 0, true, false)
             .await?;
         let session_lookup: StdHashMap<String, &crate::neo4j::models::ChatSessionNode> =
             all_sessions
@@ -5240,6 +5308,579 @@ impl ChatManager {
             stack.extend(get_children(child));
         }
         result
+    }
+
+    // ========================================================================
+    // Fork / Sub-conversation management
+    // ========================================================================
+
+    /// Fork a session into a child sub-conversation.
+    ///
+    /// Creates a new `InteractiveClient` subprocess with isolated context.
+    /// The child session is linked to the parent via `FORKED_FROM` in Neo4j.
+    ///
+    /// **Mode agent**: context is built from task + entities + persona (structured).
+    /// **Mode user**: context is the parent's system prompt (LLM summary deferred to T3).
+    pub async fn fork_session(
+        &self,
+        parent_session_id: &str,
+        config: &ForkConfig,
+    ) -> Result<ForkResponse> {
+        // 1. Validate parent session exists and get its metadata
+        let parent_uuid = Uuid::parse_str(parent_session_id)
+            .map_err(|_| anyhow!("Invalid parent session UUID: {}", parent_session_id))?;
+        let parent_node = self
+            .graph
+            .get_chat_session(parent_uuid)
+            .await?
+            .ok_or_else(|| anyhow!("Parent session {} not found", parent_session_id))?;
+
+        // 2. Validate fork depth
+        let child_depth = parent_node.fork_depth + 1;
+        if child_depth > config.max_depth {
+            bail!(
+                "Fork depth limit reached: parent depth={}, max_depth={}",
+                parent_node.fork_depth,
+                config.max_depth
+            );
+        }
+
+        // 3. Check max sessions
+        {
+            let sessions = self.active_sessions.read().await;
+            if sessions.len() >= self.config.max_sessions {
+                return Err(anyhow!(
+                    "Maximum number of active sessions reached ({})",
+                    self.config.max_sessions
+                ));
+            }
+        }
+
+        let child_session_id = Uuid::new_v4();
+        let model = self.resolve_model(config.model.as_deref());
+
+        // 4. Build system prompt based on fork type
+        let system_prompt = match config.fork_type {
+            ForkType::Agent => {
+                // Agent mode: build structured context from task + project
+                let routing_msg = config
+                    .initial_message
+                    .as_deref()
+                    .unwrap_or("Continue working on the task");
+                let (prompt, _ids) = self
+                    .build_system_prompt(
+                        parent_node.project_slug.as_deref(),
+                        routing_msg,
+                        Some(&model),
+                        Some(&child_session_id.to_string()),
+                        None,
+                    )
+                    .await;
+                prompt
+            }
+            ForkType::User => {
+                // User mode: reuse parent's project context for now.
+                // T3 will add LLM summary of recent messages as additional context.
+                let routing_msg = config
+                    .initial_message
+                    .as_deref()
+                    .unwrap_or("Continue the conversation");
+                let (prompt, _ids) = self
+                    .build_system_prompt(
+                        parent_node.project_slug.as_deref(),
+                        routing_msg,
+                        Some(&model),
+                        Some(&child_session_id.to_string()),
+                        None,
+                    )
+                    .await;
+                prompt
+            }
+        };
+
+        // 5. Detect fork intent (RFC: Subchat Lifecycle Intelligence)
+        let fork_intent = config.intent.unwrap_or_else(|| {
+            if config.persona.is_some() && config.task_id.is_none() {
+                ForkIntent::Role
+            } else if config.task_id.is_some() {
+                // TODO: distinguish Job vs Scope by checking if task belongs to a multi-task plan
+                ForkIntent::Job
+            } else {
+                ForkIntent::Unknown
+            }
+        });
+
+        // 6. Build context snapshot (JSON metadata about what seeded this fork)
+        let context_snapshot = serde_json::json!({
+            "parent_session_id": parent_session_id,
+            "fork_type": config.fork_type.to_string(),
+            "fork_intent": fork_intent.to_string(),
+            "task_id": config.task_id,
+            "persona": config.persona,
+            "initial_message": config.initial_message,
+        });
+
+        // 6. Persist child session in Neo4j
+        let cwd = parent_node.cwd.clone();
+        let session_node = ChatSessionNode {
+            id: child_session_id,
+            cli_session_id: None,
+            project_slug: parent_node.project_slug.clone(),
+            workspace_slug: parent_node.workspace_slug.clone(),
+            cwd: cwd.clone(),
+            title: config.initial_message.as_ref().map(|m| {
+                let truncated: String = m.chars().take(80).collect();
+                format!("[Fork] {}", truncated)
+            }),
+            model: model.clone(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            message_count: 0,
+            total_cost_usd: None,
+            conversation_id: None,
+            preview: None,
+            permission_mode: parent_node.permission_mode.clone(),
+            add_dirs: parent_node.add_dirs.clone(),
+            spawned_by: Some(
+                SpawnedBy::Conversation {
+                    parent_session_id: Uuid::parse_str(parent_session_id)
+                        .unwrap_or_else(|_| Uuid::nil()),
+                    tool_use_id: None,
+                }
+                .to_json_string(),
+            ),
+            fork_depth: child_depth,
+            fork_type: Some(config.fork_type.to_string()),
+            fork_status: Some(ForkStatus::Active.to_string()),
+            fork_intent: Some(fork_intent.to_string()),
+            fork_context_snapshot: Some(context_snapshot.to_string()),
+            archived: false,
+        };
+        self.graph
+            .create_chat_session(&session_node)
+            .await
+            .context("Failed to persist fork child session")?;
+
+        // 7. Create FORKED_FROM relation in Neo4j
+        self.graph
+            .create_fork_relation(
+                &child_session_id.to_string(),
+                parent_session_id,
+                &config.fork_type.to_string(),
+                config.max_depth,
+            )
+            .await
+            .context("Failed to create FORKED_FROM relation")?;
+
+        // 8. Spawn InteractiveClient subprocess
+        let (events_tx, _) = broadcast::channel(BROADCAST_BUFFER);
+        let work_log = Arc::new(Mutex::new(SessionWorkLog::default()));
+
+        // Build hooks (PreCompact only — forks are lightweight, no skill hooks)
+        let session_hooks = {
+            let mut hooks = std::collections::HashMap::new();
+            let context_source = match parent_node.project_slug.as_deref() {
+                Some(slug) => CompactionContextSource::Session(slug.to_string()),
+                None => CompactionContextSource::None,
+            };
+            let notifier = CompactionNotifier::new(
+                events_tx.clone(),
+                self.nats.clone(),
+                child_session_id.to_string(),
+            )
+            .with_context(self.graph.clone(), context_source)
+            .with_work_log(work_log.clone());
+            hooks.insert(
+                "PreCompact".to_string(),
+                vec![nexus_claude::HookMatcher {
+                    matcher: None,
+                    hooks: vec![std::sync::Arc::new(notifier)],
+                }],
+            );
+            hooks
+        };
+
+        let resolved_add_dirs = parent_node
+            .add_dirs
+            .clone()
+            .unwrap_or_default();
+
+        let options = self
+            .build_options(
+                &cwd,
+                &model,
+                &system_prompt,
+                None,
+                parent_node.permission_mode.as_deref(),
+                Some(session_hooks),
+                &resolved_add_dirs,
+                None, // No user claims for forks (inherits parent's auth context)
+            )
+            .await;
+        let mut client = InteractiveClient::new(options)
+            .map_err(|e| anyhow!("Failed to create InteractiveClient for fork: {}", e))?;
+
+        client
+            .connect()
+            .await
+            .map_err(|e| anyhow!("Failed to connect fork InteractiveClient: {}", e))?;
+
+        if let Err(e) = client.initialize_hooks().await {
+            warn!(
+                session_id = %child_session_id,
+                "Failed to initialize hooks for fork (non-fatal): {}", e
+            );
+        }
+
+        let sdk_control_rx = client.take_sdk_control_receiver().await;
+        let sdk_control_rx = Arc::new(tokio::sync::Mutex::new(sdk_control_rx));
+        let stdin_tx = client.clone_stdin_sender().await;
+        let client = Arc::new(Mutex::new(client));
+
+        // 9. Register ActiveSession
+        let next_seq = Arc::new(AtomicI64::new(1));
+        let pending_messages = Arc::new(Mutex::new(VecDeque::<PendingMessage>::new()));
+        let is_streaming = Arc::new(AtomicBool::new(false));
+        let streaming_text = Arc::new(Mutex::new(String::new()));
+        let streaming_events = Arc::new(Mutex::new(Vec::new()));
+        let nats_cancel = CancellationToken::new();
+        let interrupt_token = CancellationToken::new();
+        // Forks always auto-continue (they are autonomous agents)
+        let auto_continue = Arc::new(AtomicBool::new(true));
+        let auto_continue_count = Arc::new(AtomicU32::new(0));
+
+        let interrupt_flag = {
+            let mut sessions = self.active_sessions.write().await;
+            let interrupt_flag = Arc::new(AtomicBool::new(false));
+            sessions.insert(
+                child_session_id.to_string(),
+                ActiveSession {
+                    events_tx: events_tx.clone(),
+                    last_activity: Instant::now(),
+                    cli_session_id: None,
+                    client: client.clone(),
+                    interrupt_flag: interrupt_flag.clone(),
+                    memory_manager: None, // Forks don't need separate memory managers
+                    next_seq: next_seq.clone(),
+                    pending_messages: pending_messages.clone(),
+                    is_streaming: is_streaming.clone(),
+                    streaming_text: streaming_text.clone(),
+                    streaming_events: streaming_events.clone(),
+                    permission_mode: parent_node.permission_mode.clone(),
+                    model: Some(model.clone()),
+                    sdk_control_rx: sdk_control_rx.clone(),
+                    stdin_tx,
+                    child_pid: None,
+                    nats_cancel: nats_cancel.clone(),
+                    interrupt_token: interrupt_token.clone(),
+                    pending_permission_inputs: Arc::new(tokio::sync::Mutex::new(
+                        std::collections::HashMap::new(),
+                    )),
+                    auto_continue,
+                    auto_continue_count,
+                    max_auto_continues: 5, // Forks limited like runner sessions
+                    rfc_accumulator: Arc::new(Mutex::new(
+                        super::observation_detector::RfcAccumulator::new(),
+                    )),
+                    protocol_run_id: None,
+                    protocol_state: None,
+                    reasoning_path_tracker: super::feedback::ReasoningPathTracker::new(),
+                    objective_tracking: false, // Forks don't track objectives
+                    objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
+                    work_log: work_log.clone(),
+                    persona_cache: Arc::new(Mutex::new(None)),
+                },
+            );
+            interrupt_flag
+        };
+
+        // 10. Spawn NATS listeners for cross-instance support
+        self.spawn_nats_interrupt_listener(
+            &child_session_id.to_string(),
+            interrupt_flag,
+            self.active_sessions.clone(),
+            nats_cancel.clone(),
+        );
+        self.spawn_nats_snapshot_responder(
+            &child_session_id.to_string(),
+            self.active_sessions.clone(),
+            nats_cancel.clone(),
+        );
+        self.spawn_nats_rpc_listener(
+            &child_session_id.to_string(),
+            self.active_sessions.clone(),
+            nats_cancel,
+        );
+
+        info!(
+            parent = %parent_session_id,
+            child = %child_session_id,
+            depth = child_depth,
+            fork_type = %config.fork_type,
+            "Forked session successfully"
+        );
+
+        Ok(ForkResponse {
+            session_id: child_session_id,
+            fork_depth: child_depth,
+            fork_type: config.fork_type,
+            fork_status: ForkStatus::Active,
+            fork_intent,
+        })
+    }
+
+    /// List active fork children for a given parent session.
+    pub async fn list_forks(&self, parent_session_id: &str) -> Result<Vec<ForkInfo>> {
+        let children = self.graph.get_fork_children(parent_session_id, false).await?;
+        Ok(children
+            .into_iter()
+            .map(|node| ForkInfo {
+                session_id: node.id,
+                fork_depth: node.fork_depth,
+                fork_type: node.fork_type,
+                fork_status: node.fork_status,
+                fork_intent: node.fork_intent,
+                title: node.title,
+                model: Some(node.model),
+                created_at: node.created_at,
+                message_count: node.message_count,
+            })
+            .collect())
+    }
+
+    /// Summarize a fork conversation and create a Note with the summary.
+    ///
+    /// Fetches all chat events from the fork, extracts a conversation transcript,
+    /// creates a Note (type: context) with the summary, links it to the parent
+    /// session via SUMMARIZED_BY, and optionally links to the task.
+    ///
+    /// Returns the created Note's UUID (or None if the fork had no messages).
+    async fn summarize_fork_conversation(&self, fork_session_id: &str) -> Result<Option<Uuid>> {
+        // 1. Get fork session metadata
+        let fork_uuid = Uuid::parse_str(fork_session_id)
+            .map_err(|_| anyhow!("Invalid fork session UUID: {}", fork_session_id))?;
+        let fork_node = match self.graph.get_chat_session(fork_uuid).await? {
+            Some(node) => node,
+            None => {
+                warn!("Fork session {} not found for summarization", fork_session_id);
+                return Ok(None);
+            }
+        };
+
+        // 2. Extract parent_session_id and task_id from fork_context_snapshot
+        let (parent_session_id, task_id) = if let Some(ref snapshot) = fork_node.fork_context_snapshot {
+            let v: serde_json::Value = serde_json::from_str(snapshot).unwrap_or_default();
+            (
+                v.get("parent_session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                v.get("task_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok()),
+            )
+        } else {
+            (None, None)
+        };
+
+        // 3. Fetch chat events (all messages, up to 500)
+        let events = self
+            .graph
+            .get_chat_events(fork_uuid, 0, 500)
+            .await
+            .unwrap_or_default();
+
+        if events.is_empty() {
+            debug!("Fork {} has no events, skipping summarization", fork_session_id);
+            return Ok(None);
+        }
+
+        // 4. Build transcript from events
+        let mut transcript = String::new();
+        for event in &events {
+            if let Ok(chat_event) = serde_json::from_str::<ChatEvent>(&event.data) {
+                match &chat_event {
+                    ChatEvent::UserMessage { content, .. } => {
+                        transcript.push_str(&format!("**User**: {}\n\n", content));
+                    }
+                    ChatEvent::AssistantText { content, .. } => {
+                        transcript.push_str(&format!("**Assistant**: {}\n\n", content));
+                    }
+                    _ => {} // Skip tool_use, thinking, etc. for summary
+                }
+            }
+        }
+
+        if transcript.is_empty() {
+            return Ok(None);
+        }
+
+        // 5. Build summary content (truncate if too long — LLM summarization is future work)
+        let fork_type = fork_node.fork_type.as_deref().unwrap_or("unknown");
+        let title = fork_node.title.as_deref().unwrap_or("Untitled fork");
+        let msg_count = events.len();
+
+        // Truncate transcript to ~2000 chars for the note content
+        let truncated_transcript: String = transcript.chars().take(2000).collect();
+        let was_truncated = transcript.len() > 2000;
+
+        let summary_content = format!(
+            "## Fork Summary — {}\n\n\
+             **Type**: {} | **Messages**: {} | **Session**: {}\n\n\
+             ### Conversation\n\n\
+             {}{}\n",
+            title,
+            fork_type,
+            msg_count,
+            fork_session_id,
+            truncated_transcript,
+            if was_truncated { "\n\n*[truncated]*" } else { "" },
+        );
+
+        // 6. Create Note
+        let project_id = if let Some(ref slug) = fork_node.project_slug {
+            self.graph
+                .get_project_by_slug(slug)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.id)
+        } else {
+            None
+        };
+
+        let mut note = crate::notes::models::Note::new(
+            project_id,
+            crate::notes::models::NoteType::Context,
+            summary_content,
+            "fork_summarizer".to_string(),
+        );
+        note.importance = crate::notes::models::NoteImportance::Medium;
+        note.tags = vec![
+            "fork-summary".to_string(),
+            format!("fork-type:{}", fork_type),
+        ];
+
+        let note_id = note.id;
+        self.graph
+            .create_note(&note)
+            .await
+            .context("Failed to create fork summary note")?;
+
+        // 7. Create SUMMARIZED_BY relation (fork session → note)
+        self.graph
+            .create_summarized_by_relation(fork_session_id, note_id)
+            .await
+            .context("Failed to create SUMMARIZED_BY relation")?;
+
+        // 8. Link note to parent session via SUMMARIZED_BY too
+        if let Some(ref parent_id) = parent_session_id {
+            // Also link from parent so the parent's enrichment can pick it up
+            if let Err(e) = self
+                .graph
+                .create_summarized_by_relation(parent_id, note_id)
+                .await
+            {
+                warn!("Failed to link summary to parent session: {}", e);
+            }
+        }
+
+        // 9. Link note to task if applicable
+        if let Some(tid) = task_id {
+            if let Err(e) = self
+                .graph
+                .link_note_to_entity(
+                    note_id,
+                    &crate::notes::models::EntityType::Task,
+                    &tid.to_string(),
+                    None,
+                    None,
+                )
+                .await
+            {
+                warn!("Failed to link fork summary to task {}: {}", tid, e);
+            }
+        }
+
+        info!(
+            fork = %fork_session_id,
+            note_id = %note_id,
+            messages = msg_count,
+            "Created fork summary note"
+        );
+
+        Ok(Some(note_id))
+    }
+
+    /// Close a specific fork child session.
+    ///
+    /// Generates an auto-summary note before closing, then updates fork_status
+    /// in Neo4j and delegates to `close_session` for subprocess cleanup.
+    pub async fn close_fork(&self, fork_session_id: &str, cancel: bool) -> Result<()> {
+        let status = if cancel { "cancelled" } else { "completed" };
+
+        // Auto-summarize the fork conversation (best-effort, don't block close)
+        if !cancel {
+            match self.summarize_fork_conversation(fork_session_id).await {
+                Ok(Some(note_id)) => {
+                    info!(
+                        fork = %fork_session_id,
+                        note_id = %note_id,
+                        "Fork summary created before closing"
+                    );
+                }
+                Ok(None) => {
+                    debug!("No summary needed for fork {}", fork_session_id);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to summarize fork {} (non-fatal): {}",
+                        fork_session_id, e
+                    );
+                }
+            }
+        }
+
+        // Update fork_status in Neo4j
+        self.graph
+            .update_fork_status(fork_session_id, status)
+            .await
+            .context("Failed to update fork_status")?;
+
+        // Delegate to standard close_session for subprocess cleanup
+        self.close_session(fork_session_id).await
+    }
+
+    /// Close all active fork children of a parent session (recursively).
+    ///
+    /// Uses `Box::pin` to handle async recursion (Rust requires boxing for
+    /// recursive async fns to avoid infinitely-sized futures).
+    pub fn close_all_forks<'a>(
+        &'a self,
+        parent_session_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32>> + Send + 'a>> {
+        Box::pin(async move {
+            let children = self.graph.get_fork_children(parent_session_id, false).await?;
+            let mut closed = 0u32;
+
+            for child in &children {
+                let child_id = child.id.to_string();
+                // Recursively close grandchildren first
+                if let Ok(n) = self.close_all_forks(&child_id).await {
+                    closed += n;
+                }
+                // Close this child
+                if self.close_fork(&child_id, true).await.is_ok() {
+                    closed += 1;
+                }
+            }
+
+            // Also cancel in Neo4j (catches any that weren't in active_sessions)
+            if let Err(e) = self.graph.close_fork_children(parent_session_id).await {
+                warn!("Failed to close_fork_children in Neo4j: {}", e);
+            }
+
+            Ok(closed)
+        })
     }
 
     /// Close an active session: interrupt first, then disconnect and remove.
@@ -6680,7 +7321,7 @@ mod tests {
 
         // All sessions
         let (all, total) = graph
-            .list_chat_sessions(None, None, 50, 0, false)
+            .list_chat_sessions(None, None, 50, 0, false, false)
             .await
             .unwrap();
         assert_eq!(total, 4);
@@ -6688,7 +7329,7 @@ mod tests {
 
         // Filter by project-a
         let (filtered, total) = graph
-            .list_chat_sessions(Some("project-a"), None, 50, 0, false)
+            .list_chat_sessions(Some("project-a"), None, 50, 0, false, false)
             .await
             .unwrap();
         assert_eq!(total, 2);
@@ -6696,7 +7337,7 @@ mod tests {
 
         // Pagination
         let (page, total) = graph
-            .list_chat_sessions(Some("project-a"), None, 1, 0, false)
+            .list_chat_sessions(Some("project-a"), None, 1, 0, false, false)
             .await
             .unwrap();
         assert_eq!(total, 2);
@@ -6776,6 +7417,8 @@ mod tests {
             fork_depth: 0,
             fork_type: None,
             fork_status: None,
+            fork_intent: None,
+            archived: false,
             fork_context_snapshot: None,
         };
 
@@ -7139,6 +7782,8 @@ mod tests {
             fork_depth: 0,
             fork_type: None,
             fork_status: None,
+            fork_intent: None,
+            archived: false,
             fork_context_snapshot: None,
         };
 
@@ -7174,6 +7819,8 @@ mod tests {
             fork_depth: 0,
             fork_type: None,
             fork_status: None,
+            fork_intent: None,
+            archived: false,
             fork_context_snapshot: None,
         };
 
@@ -7252,6 +7899,7 @@ mod tests {
             objective_tracking: false,
             objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
             work_log: Arc::new(Mutex::new(SessionWorkLog::default())),
+            persona_cache: Arc::new(Mutex::new(None)),
         };
 
         Some((session, pending_messages))
@@ -8145,6 +8793,7 @@ mod tests {
             objective_tracking: false,
             objective_reminder_turns_since: Arc::new(AtomicU32::new(0)),
             work_log: Arc::new(Mutex::new(SessionWorkLog::default())),
+            persona_cache: Arc::new(Mutex::new(None)),
         };
 
         (session, handle)
@@ -8886,6 +9535,46 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("not found"),
             "Error should mention session not found"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_session_model_persists_to_neo4j() {
+        let state = mock_app_state();
+        let graph = state.neo4j.clone();
+        let manager = ChatManager::new_without_memory(state.neo4j, state.meili, test_config());
+
+        // Create a chat session in the mock Neo4j with a real UUID
+        let mut session_node = test_chat_session(None);
+        session_node.model = "claude-sonnet-4-6".to_string();
+        graph.create_chat_session(&session_node).await.unwrap();
+        let session_id = session_node.id.to_string();
+
+        // Create an active session with stdin_tx
+        let (mut active_session, _handle) = mock_active_session(false);
+        let (stdin_tx, mut _stdin_rx) = tokio::sync::mpsc::channel::<String>(16);
+        active_session.stdin_tx = Some(stdin_tx);
+        manager
+            .active_sessions
+            .write()
+            .await
+            .insert(session_id.clone(), active_session);
+
+        // Change model
+        manager
+            .set_session_model(&session_id, "claude-opus-4-20250514")
+            .await
+            .unwrap();
+
+        // Verify Neo4j was updated
+        let updated_node = graph
+            .get_chat_session(session_node.id)
+            .await
+            .unwrap()
+            .expect("session should exist in Neo4j");
+        assert_eq!(
+            updated_node.model, "claude-opus-4-20250514",
+            "Model should be persisted to Neo4j"
         );
     }
 

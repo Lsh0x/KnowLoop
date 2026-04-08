@@ -2216,3 +2216,114 @@ class Documented {
     let do_stuff = parsed.functions.iter().find(|f| f.name == "doStuff");
     assert!(do_stuff.is_some(), "Should find doStuff method");
 }
+
+/// Regression test: parse real-world Dart file with imports, extends, const
+/// constructors, nested widget trees — the full combo that broke tree-sitter-dart.
+#[test]
+fn test_parse_dart_real_world_flutter() {
+    let mut parser = CodeParser::new().unwrap();
+
+    let code = r#"
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+/// The root application widget.
+class MyApp extends ConsumerWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return MaterialApp(
+      title: 'Test',
+      home: const _HomeScreen(),
+    );
+  }
+}
+
+class _HomeScreen extends StatelessWidget {
+  const _HomeScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Home')),
+      body: ListView.builder(
+        itemCount: 10,
+        itemBuilder: (context, index) {
+          return ListTile(
+            title: Text('Item $index'),
+          );
+        },
+      ),
+    );
+  }
+}
+
+enum AppTab { home, settings, profile }
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const MyApp());
+}
+"#;
+
+    let path = Path::new("app.dart");
+    let parsed = parser.parse_file(path, code).unwrap();
+
+    // Imports
+    assert_eq!(parsed.imports.len(), 3, "Should find 3 imports");
+    assert!(parsed.imports.iter().any(|i| i.path == "dart:io"));
+    assert!(parsed
+        .imports
+        .iter()
+        .any(|i| i.path == "package:flutter/material.dart"));
+
+    // Classes
+    assert!(
+        parsed.structs.iter().any(|s| s.name == "MyApp"),
+        "Should find MyApp, got: {:?}",
+        parsed.structs.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    let my_app = parsed.structs.iter().find(|s| s.name == "MyApp").unwrap();
+    assert_eq!(
+        my_app.parent_class.as_deref(),
+        Some("ConsumerWidget"),
+        "MyApp should extend ConsumerWidget"
+    );
+
+    assert!(
+        parsed.structs.iter().any(|s| s.name == "_HomeScreen"),
+        "Should find _HomeScreen"
+    );
+    let home = parsed
+        .structs
+        .iter()
+        .find(|s| s.name == "_HomeScreen")
+        .unwrap();
+    assert!(
+        home.name.starts_with('_'),
+        "_HomeScreen should be private (starts with _)"
+    );
+
+    // Enum
+    assert!(
+        parsed.enums.iter().any(|e| e.name == "AppTab"),
+        "Should find AppTab enum"
+    );
+    let app_tab = parsed.enums.iter().find(|e| e.name == "AppTab").unwrap();
+    assert_eq!(app_tab.variants.len(), 3, "AppTab should have 3 variants");
+
+    // Functions
+    assert!(
+        parsed.functions.iter().any(|f| f.name == "main"),
+        "Should find main()"
+    );
+    let main_fn = parsed.functions.iter().find(|f| f.name == "main").unwrap();
+    assert!(main_fn.is_async, "main should be async");
+
+    assert!(
+        parsed.functions.iter().any(|f| f.name == "build"),
+        "Should find build() method"
+    );
+}

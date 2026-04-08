@@ -4,6 +4,7 @@
 //! The `require_auth` middleware is applied only to protected routes.
 
 use super::auth_handlers;
+use super::blueprint_handlers;
 use super::chat_handlers;
 use super::code_handlers;
 use super::episode_handlers;
@@ -1048,6 +1049,41 @@ fn protected_routes() -> Router<OrchestratorState> {
             get(note_handlers::get_entity_notes),
         )
         // ================================================================
+        // Blueprints
+        // ================================================================
+        .route(
+            "/api/blueprints",
+            get(blueprint_handlers::list_blueprints)
+                .post(blueprint_handlers::create_blueprint),
+        )
+        .route(
+            "/api/blueprints/relations",
+            post(blueprint_handlers::add_blueprint_relation)
+                .delete(blueprint_handlers::remove_blueprint_relation),
+        )
+        .route(
+            "/api/blueprints/{id_or_slug}",
+            get(blueprint_handlers::get_blueprint)
+                .patch(blueprint_handlers::update_blueprint)
+                .delete(blueprint_handlers::delete_blueprint),
+        )
+        .route(
+            "/api/blueprints/{slug}/relations",
+            get(blueprint_handlers::get_blueprint_relations),
+        )
+        .route(
+            "/api/blueprints/{slug}/projects",
+            post(blueprint_handlers::link_blueprint_to_project),
+        )
+        .route(
+            "/api/blueprints/{slug}/projects/{project_id}",
+            delete(blueprint_handlers::unlink_blueprint_from_project),
+        )
+        .route(
+            "/api/projects/{project_id}/blueprints",
+            get(blueprint_handlers::get_project_blueprints),
+        )
+        // ================================================================
         // Analysis Profiles
         // ================================================================
         .route(
@@ -1650,6 +1686,14 @@ fn protected_routes() -> Router<OrchestratorState> {
                 .delete(chat_handlers::delete_session),
         )
         .route(
+            "/api/chat/sessions/{id}/model",
+            axum::routing::put(chat_handlers::switch_model),
+        )
+        .route(
+            "/api/chat/sessions/{id}/archive",
+            axum::routing::post(chat_handlers::archive_session),
+        )
+        .route(
             "/api/chat/sessions/{id}/messages",
             get(chat_handlers::list_messages),
         )
@@ -1660,6 +1704,19 @@ fn protected_routes() -> Router<OrchestratorState> {
         .route(
             "/api/chat/sessions/{id}/tree",
             get(chat_handlers::get_session_tree),
+        )
+        // Fork management
+        .route(
+            "/api/chat/sessions/{id}/fork",
+            post(chat_handlers::fork_session),
+        )
+        .route(
+            "/api/chat/sessions/{id}/forks",
+            get(chat_handlers::list_forks),
+        )
+        .route(
+            "/api/chat/sessions/{id}/forks/{fork_id}",
+            delete(chat_handlers::close_fork),
         )
         .route(
             "/api/chat/runs/{run_id}/sessions",

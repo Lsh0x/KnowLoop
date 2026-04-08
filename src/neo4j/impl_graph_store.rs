@@ -2149,6 +2149,7 @@ impl GraphStore for Neo4jClient {
         limit: usize,
         offset: usize,
         include_detached: bool,
+        include_archived: bool,
     ) -> anyhow::Result<(Vec<ChatSessionNode>, usize)> {
         self.list_chat_sessions(
             project_slug,
@@ -2156,6 +2157,7 @@ impl GraphStore for Neo4jClient {
             limit,
             offset,
             include_detached,
+            include_archived,
         )
         .await
     }
@@ -2193,8 +2195,8 @@ impl GraphStore for Neo4jClient {
             .await
     }
 
-    async fn get_fork_children(&self, session_id: &str) -> anyhow::Result<Vec<ChatSessionNode>> {
-        self.get_fork_children(session_id).await
+    async fn get_fork_children(&self, session_id: &str, include_archived: bool) -> anyhow::Result<Vec<ChatSessionNode>> {
+        self.get_fork_children(session_id, include_archived).await
     }
 
     async fn get_fork_tree(
@@ -2211,6 +2213,23 @@ impl GraphStore for Neo4jClient {
 
     async fn update_fork_status(&self, session_id: &str, status: &str) -> anyhow::Result<()> {
         self.update_fork_status(session_id, status).await
+    }
+
+    async fn create_summarized_by_relation(
+        &self,
+        session_id: &str,
+        note_id: uuid::Uuid,
+    ) -> anyhow::Result<()> {
+        self.create_summarized_by_relation(session_id, note_id)
+            .await
+    }
+
+    async fn archive_session(&self, session_id: &str) -> anyhow::Result<()> {
+        self.archive_session(session_id).await
+    }
+
+    async fn get_session_notes(&self, session_id: &str) -> anyhow::Result<Vec<crate::notes::models::Note>> {
+        self.get_session_notes(session_id).await
     }
 
     async fn get_session_tree(&self, session_id: &str) -> anyhow::Result<Vec<SessionTreeNode>> {
@@ -2246,6 +2265,14 @@ impl GraphStore for Neo4jClient {
             preview,
         )
         .await
+    }
+
+    async fn update_chat_session_model(
+        &self,
+        id: Uuid,
+        model: &str,
+    ) -> anyhow::Result<()> {
+        self.update_chat_session_model(id, model).await
     }
 
     async fn update_chat_session_permission_mode(
@@ -3024,6 +3051,113 @@ impl GraphStore for Neo4jClient {
         project_id: Uuid,
     ) -> anyhow::Result<crate::neo4j::analytics::LearningHealthReport> {
         self.get_learning_health(project_id).await
+    }
+
+    // ========================================================================
+    // Blueprint operations (delegates to neo4j/blueprint.rs)
+    // ========================================================================
+
+    async fn create_blueprint(
+        &self,
+        req: &crate::blueprint::CreateBlueprintRequest,
+    ) -> anyhow::Result<crate::blueprint::BlueprintNode> {
+        self.create_blueprint(req).await
+    }
+
+    async fn get_blueprint(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::blueprint::BlueprintNode>> {
+        self.get_blueprint(id).await
+    }
+
+    async fn get_blueprint_by_slug(
+        &self,
+        slug: &str,
+    ) -> anyhow::Result<Option<crate::blueprint::BlueprintNode>> {
+        self.get_blueprint_by_slug(slug).await
+    }
+
+    async fn update_blueprint(
+        &self,
+        id: &str,
+        req: &crate::blueprint::UpdateBlueprintRequest,
+    ) -> anyhow::Result<crate::blueprint::BlueprintNode> {
+        self.update_blueprint(id, req).await
+    }
+
+    async fn delete_blueprint(&self, id: &str) -> anyhow::Result<()> {
+        self.delete_blueprint(id).await
+    }
+
+    async fn list_blueprints(
+        &self,
+        query: &crate::blueprint::ListBlueprintsQuery,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        self.list_blueprints(query).await
+    }
+
+    async fn add_blueprint_relation(
+        &self,
+        from_slug: &str,
+        to_slug: &str,
+        relation_type: crate::blueprint::BlueprintRelationType,
+    ) -> anyhow::Result<()> {
+        self.add_blueprint_relation(from_slug, to_slug, relation_type).await
+    }
+
+    async fn remove_blueprint_relation(
+        &self,
+        from_slug: &str,
+        to_slug: &str,
+        relation_type: crate::blueprint::BlueprintRelationType,
+    ) -> anyhow::Result<()> {
+        self.remove_blueprint_relation(from_slug, to_slug, relation_type).await
+    }
+
+    async fn get_blueprint_dependencies(
+        &self,
+        slug: &str,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        self.get_blueprint_dependencies(slug).await
+    }
+
+    async fn get_blueprint_dependents(
+        &self,
+        slug: &str,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        self.get_blueprint_dependents(slug).await
+    }
+
+    async fn get_blueprint_pairs(
+        &self,
+        slug: &str,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        self.get_blueprint_pairs(slug).await
+    }
+
+    async fn link_blueprint_to_project(
+        &self,
+        slug: &str,
+        project_id: &str,
+        relevance: f64,
+    ) -> anyhow::Result<()> {
+        self.link_blueprint_to_project(slug, project_id, relevance).await
+    }
+
+    async fn unlink_blueprint_from_project(
+        &self,
+        slug: &str,
+        project_id: &str,
+    ) -> anyhow::Result<()> {
+        self.unlink_blueprint_from_project(slug, project_id).await
+    }
+
+    async fn get_project_blueprints(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<crate::blueprint::BlueprintResponse>> {
+        self.get_project_blueprints(project_id).await
     }
 
     // ========================================================================

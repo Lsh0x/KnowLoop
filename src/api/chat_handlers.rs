@@ -173,6 +173,7 @@ pub async fn list_sessions(
             query.pagination.validated_limit(),
             query.pagination.offset,
             query.include_detached,
+            false,
         )
         .await
         .map_err(AppError::Internal)?;
@@ -294,6 +295,126 @@ pub async fn get_session_tree(
     Ok(Json(tree))
 }
 
+// ============================================================================
+// Fork management
+// ============================================================================
+
+/// POST /api/chat/sessions/{id}/fork — Fork a session into a child sub-conversation
+pub async fn fork_session(
+    State(state): State<OrchestratorState>,
+    Path(session_id): Path<Uuid>,
+    Json(config): Json<crate::chat::ForkConfig>,
+) -> Result<Json<crate::chat::ForkResponse>, AppError> {
+    let chat_manager = state
+        .chat_manager
+        .as_ref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Chat not configured")))?;
+
+    let response = chat_manager
+        .fork_session(&session_id.to_string(), &config)
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(response))
+}
+
+/// Query params for listing fork children.
+#[derive(Debug, Deserialize)]
+pub struct ListForksQuery {
+    /// Filter by fork status: "active", "completed", "cancelled"
+    pub status: Option<String>,
+    /// Search by title (case-insensitive contains)
+    pub search: Option<String>,
+    #[serde(flatten)]
+    pub pagination: crate::api::query::PaginationParams,
+}
+
+/// GET /api/chat/sessions/{id}/forks — List fork children of a session (paginated)
+pub async fn list_forks(
+    State(state): State<OrchestratorState>,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<ListForksQuery>,
+) -> Result<Json<crate::api::query::PaginatedResponse<crate::chat::ForkInfo>>, AppError> {
+    let chat_manager = state
+        .chat_manager
+        .as_ref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Chat not configured")))?;
+
+    let mut forks = chat_manager
+        .list_forks(&session_id.to_string())
+        .await
+        .map_err(AppError::Internal)?;
+
+    // Filter by status
+    if let Some(ref status) = query.status {
+        let statuses: Vec<&str> = status.split(',').map(|s| s.trim()).collect();
+        forks.retain(|f| {
+            f.fork_status
+                .as_deref()
+                .is_some_and(|s| statuses.contains(&s))
+        });
+    }
+
+    // Filter by search (title contains)
+    if let Some(ref search) = query.search {
+        let search_lower = search.to_lowercase();
+        forks.retain(|f| {
+            f.title
+                .as_deref()
+                .is_some_and(|t| t.to_lowercase().contains(&search_lower))
+        });
+    }
+
+    // Sort: active first, then by created_at desc
+    forks.sort_by(|a, b| {
+        let a_active = a.fork_status.as_deref() == Some("active");
+        let b_active = b.fork_status.as_deref() == Some("active");
+        b_active.cmp(&a_active).then(b.created_at.cmp(&a.created_at))
+    });
+
+    let total = forks.len();
+    let limit = query.pagination.validated_limit();
+    let offset = query.pagination.offset;
+    let page: Vec<_> = forks.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(crate::api::query::PaginatedResponse::new(
+        page, total, limit, offset,
+    )))
+}
+
+/// Request body for closing a fork.
+#[derive(Debug, Deserialize)]
+pub struct CloseForkRequest {
+    /// If true, cancel the fork instead of completing it (no summary generated).
+    #[serde(default)]
+    pub cancel: bool,
+}
+
+/// DELETE /api/chat/sessions/{id}/forks/{fork_id} — Close a fork child
+pub async fn close_fork(
+    State(state): State<OrchestratorState>,
+    Path((session_id, fork_id)): Path<(Uuid, Uuid)>,
+    body: Option<Json<CloseForkRequest>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _ = session_id; // Parent ID validated by route structure
+    let chat_manager = state
+        .chat_manager
+        .as_ref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Chat not configured")))?;
+
+    let cancel = body.map(|b| b.cancel).unwrap_or(false);
+    chat_manager
+        .close_fork(&fork_id.to_string(), cancel)
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(serde_json::json!({
+        "closed": true,
+        "fork_id": fork_id.to_string(),
+        "status": if cancel { "cancelled" } else { "completed" }
+    })))
+}
+
 /// GET /api/chat/runs/{run_id}/sessions — Get all sessions for a PlanRun
 pub async fn get_run_sessions(
     State(state): State<OrchestratorState>,
@@ -398,6 +519,90 @@ pub async fn update_session(
             .spawned_by
             .and_then(|sb| serde_json::from_str(&sb).ok()),
     }))
+}
+
+// ============================================================================
+// Switch model mid-session (REST endpoint)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct SwitchModelRequest {
+    pub model: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SwitchModelResponse {
+    pub model: String,
+    pub active: bool,
+}
+
+/// PUT /api/chat/sessions/{id}/model — Switch the LLM model for a session.
+///
+/// If the session is currently active (CLI subprocess running), sends a
+/// `set_model` control request to the subprocess AND persists to Neo4j.
+/// If the session is idle, only persists to Neo4j (the new model will be
+/// used when the session is next resumed).
+pub async fn switch_model(
+    State(state): State<OrchestratorState>,
+    Path(session_id): Path<Uuid>,
+    Json(request): Json<SwitchModelRequest>,
+) -> Result<Json<SwitchModelResponse>, AppError> {
+    let model = request.model.trim().to_string();
+    if model.is_empty() {
+        return Err(AppError::BadRequest("Model cannot be empty".to_string()));
+    }
+
+    let session_id_str = session_id.to_string();
+
+    // Try active session first (sends control request to CLI + persists)
+    if let Some(ref chat_manager) = state.chat_manager {
+        if chat_manager.is_session_active(&session_id_str).await {
+            chat_manager
+                .set_session_model(&session_id_str, &model)
+                .await
+                .map_err(AppError::Internal)?;
+
+            return Ok(Json(SwitchModelResponse {
+                model,
+                active: true,
+            }));
+        }
+    }
+
+    // Session not active — just persist to Neo4j (will apply on resume)
+    state
+        .orchestrator
+        .neo4j()
+        .update_chat_session_model(session_id, &model)
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(SwitchModelResponse {
+        model,
+        active: false,
+    }))
+}
+
+// ============================================================================
+// Archive a session
+// ============================================================================
+
+/// Archive a chat session — marks it as archived in Neo4j.
+pub async fn archive_session(
+    State(state): State<OrchestratorState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    state
+        .orchestrator
+        .neo4j()
+        .archive_session(&session_id.to_string())
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(serde_json::json!({
+        "archived": true,
+        "session_id": session_id.to_string()
+    })))
 }
 
 // ============================================================================

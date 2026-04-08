@@ -1327,6 +1327,7 @@ mod tests {
             protocol_state: None,
             excluded_note_ids: Default::default(),
             reasoning_path_tracker: None,
+            cached_persona: None,
         };
         let output = stage.execute(&input).await.unwrap();
         assert!(
@@ -1373,6 +1374,7 @@ mod tests {
             protocol_state: None,
             excluded_note_ids: Default::default(),
             reasoning_path_tracker: None,
+            cached_persona: None,
         };
 
         // With mocks, this should complete without errors (empty results)
@@ -1395,6 +1397,7 @@ mod tests {
             protocol_state: Some("implement".to_string()),
             excluded_note_ids: Default::default(),
             reasoning_path_tracker: None,
+            cached_persona: None,
         };
 
         // The stage should complete without errors; protocol context is passed through

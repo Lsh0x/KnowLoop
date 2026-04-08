@@ -182,6 +182,7 @@ mod tests {
             protocol_state: None,
             excluded_note_ids: HashSet::new(),
             reasoning_path_tracker: None,
+            cached_persona: None,
         }
     }
 

@@ -117,6 +117,12 @@ pub struct ChatSessionNode {
     /// Fork lifecycle status: "active", "completed", "cancelled". None for root sessions.
     #[serde(default)]
     pub fork_status: Option<String>,
+    /// Fork intent classification: "job", "role", "scope", "unknown". Determines lifecycle policy.
+    #[serde(default)]
+    pub fork_intent: Option<String>,
+    /// Whether this session has been archived (hidden from default list views).
+    #[serde(default)]
+    pub archived: bool,
     /// Snapshot of the context injected at fork creation (JSON). Includes entities,
     /// persona, task_id, and either agent-built context or LLM summary.
     #[serde(default)]
@@ -2566,6 +2572,8 @@ mod tests {
             fork_depth: 0,
             fork_type: None,
             fork_status: None,
+            fork_intent: None,
+            archived: false,
             fork_context_snapshot: None,
         };
 
@@ -2598,6 +2606,8 @@ mod tests {
             fork_depth: 0,
             fork_type: None,
             fork_status: None,
+            fork_intent: None,
+            archived: false,
             fork_context_snapshot: None,
         };
 

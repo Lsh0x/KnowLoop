@@ -11,6 +11,7 @@
 pub mod analytics;
 pub mod api;
 pub mod auth;
+pub mod blueprint;
 pub mod chat;
 pub mod embeddings;
 pub mod episodes;

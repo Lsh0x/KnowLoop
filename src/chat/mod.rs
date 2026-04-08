@@ -35,5 +35,6 @@ pub use entity_extractor::{
 };
 pub use manager::ChatManager;
 pub use types::{
-    ChatEvent, ChatRequest, ChatSession, ClientMessage, ForkConfig, ForkStatus, ForkType, SpawnedBy,
+    ChatEvent, ChatRequest, ChatSession, ClientMessage, ForkConfig, ForkInfo, ForkResponse,
+    ForkStatus, ForkType, SpawnedBy,
 };

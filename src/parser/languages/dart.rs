@@ -1,425 +1,768 @@
-//! Dart language extractor
+//! Dart language extractor — regex-first approach
 //!
-//! Extractor for Dart code including:
-//! - Classes (with inheritance, mixins, interfaces)
-//! - Functions and methods (including async/await, getters/setters)
-//! - Mixins
-//! - Enums
-//! - Extensions
-//! - Imports (via regex fallback — tree-sitter-dart parses them as ERROR nodes)
+//! The tree-sitter-dart grammar (nielsenko v0.1.0) is fundamentally broken:
+//! - Imports → ERROR nodes that corrupt the entire AST
+//! - `extends` + constructor calls in method bodies → complete parse failure
+//! - Doc comments break name extraction
 //!
-//! ## AST structure notes (tree-sitter-dart ABI 14):
-//! - Top-level functions: `function_signature` + `function_body` as **siblings** under `source_file`
-//! - Class methods: `class_body` → `class_member` → (`method_signature` | `declaration`) + `function_body`
-//! - Imports: parsed as ERROR nodes by this grammar version — extracted via regex fallback
+//! This extractor uses regex for reliable structure extraction (classes, functions,
+//! enums, mixins, imports) with brace-matching for scope detection.
+//!
+//! TODO: Upgrade to nielsenko/tree-sitter-dart latest (supports Dart 3.11) and
+//! switch back to AST-based extraction.
 
 use crate::neo4j::models::*;
 use crate::parser::helpers::*;
 use crate::parser::ParsedFile;
 use anyhow::Result;
+use regex::Regex;
+use std::sync::LazyLock;
 
-/// Extract Dart code structure
+// ─── Regex patterns ───────────────────────────────────────────────────────────
+
+static RE_CLASS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^[ \t]*(?:abstract\s+|sealed\s+|final\s+|base\s+|interface\s+|mixin\s+)*class\s+(\w+)(?:<[^>]*>)?\s*(?:extends\s+([\w<>, ]+?))?\s*(?:with\s+([\w<>, ]+?))?\s*(?:implements\s+([\w<>, ]+?))?\s*\{"
+    ).unwrap()
+});
+
+static RE_MIXIN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^[ \t]*mixin\s+(\w+)(?:<[^>]*>)?\s*(?:on\s+([\w<>, ]+?))?\s*\{"
+    ).unwrap()
+});
+
+static RE_ENUM: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*enum\s+(\w+)\s*\{").unwrap()
+});
+
+static RE_EXTENSION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*extension\s+(\w+)?(?:<[^>]*>)?\s+on\s+([\w<>, ]+?)\s*\{")
+        .unwrap()
+});
+
+/// extension type Foo(Type value) implements Bar { ... }
+static RE_EXTENSION_TYPE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^[ \t]*extension\s+type\s+(\w+)(?:<[^>]*>)?\s*\([^)]*\)\s*(?:implements\s+([\w<>, ]+?))?\s*\{"
+    ).unwrap()
+});
+
+/// Matches top-level and class-level function/method declarations.
+/// Captures: optional return type, name, parameters
+static RE_FUNCTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^[ \t]*(?:static\s+)?(?:abstract\s+)?(?:external\s+)?([\w<>?,\s]+?\s+)?(\w+)\s*\(([^)]*)\)\s*(?:async\s*\*?\s*)?(?:\{|=>|;)"
+    ).unwrap()
+});
+
+/// Matches getter declarations
+static RE_GETTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*(?:static\s+)?([\w<>?]+\s+)?get\s+(\w+)\s*(?:\{|=>)").unwrap()
+});
+
+/// Matches setter declarations
+static RE_SETTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*(?:static\s+)?set\s+(\w+)\s*\(").unwrap()
+});
+
+// ─── Dart keywords that should NOT be treated as function names ───────────────
+const DART_KEYWORDS: &[&str] = &[
+    "if", "else", "for", "while", "do", "switch", "case", "break", "continue",
+    "return", "try", "catch", "finally", "throw", "rethrow", "new", "const",
+    "var", "final", "late", "class", "enum", "mixin", "extension", "typedef",
+    "import", "export", "part", "library", "show", "hide", "as", "is", "in",
+    "await", "yield", "async", "sync", "super", "this", "true", "false", "null",
+    "void", "assert", "with", "implements", "extends", "abstract", "sealed",
+    "base", "interface", "required", "covariant", "factory", "operator",
+];
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+/// Extract Dart code structure using regex-first approach.
+/// This is the primary entry point — does NOT depend on tree-sitter AST.
 pub fn extract(
-    root: &tree_sitter::Node,
+    _root: &tree_sitter::Node,
     source: &str,
     file_path: &str,
     parsed: &mut ParsedFile,
 ) -> Result<()> {
-    // 1. Extract imports via regex (tree-sitter-dart parses them as ERROR)
-    extract_imports_regex(source, file_path, parsed);
-
-    // 2. Walk the AST for everything else
-    extract_toplevel(root, source, file_path, parsed)
+    extract_all_regex(source, file_path, parsed)
 }
 
-/// Extract top-level declarations from source_file.
-/// Top-level functions appear as sibling `function_signature` + `function_body` nodes.
-fn extract_toplevel(
-    root: &tree_sitter::Node,
+/// Extract only the AST-based symbols (legacy, kept for API compatibility).
+pub fn extract_ast(
+    _root: &tree_sitter::Node,
     source: &str,
     file_path: &str,
     parsed: &mut ParsedFile,
 ) -> Result<()> {
-    let child_count = root.child_count();
-    let mut i = 0;
+    extract_all_regex(source, file_path, parsed)
+}
 
-    while i < child_count {
-        let child = root.child(i).unwrap();
+/// Replace import/export lines with empty lines to preserve line numbers.
+/// Kept for API compatibility but no longer needed by the regex extractor.
+pub fn blank_import_lines(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("import ")
+                || trimmed.starts_with("export ")
+                || trimmed.starts_with("part ")
+                || trimmed.starts_with("library ")
+            {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-        match child.kind() {
-            "class_declaration" => {
-                if let Some(class) = extract_class(&child, source, file_path) {
-                    parsed.symbols.push(class.name.clone());
-                    parsed.structs.push(class);
-                }
-                if let Some(body) = child.child_by_field_name("body") {
-                    extract_class_body(&body, source, file_path, parsed)?;
-                }
-            }
-            "mixin_declaration" => {
-                if let Some(mixin) = extract_mixin(&child, source, file_path) {
-                    parsed.symbols.push(mixin.name.clone());
-                    parsed.traits.push(mixin);
-                }
-                if let Some(body) = child.child_by_field_name("body") {
-                    extract_class_body(&body, source, file_path, parsed)?;
-                }
-            }
-            "enum_declaration" => {
-                if let Some(e) = extract_enum(&child, source, file_path) {
-                    parsed.symbols.push(e.name.clone());
-                    parsed.enums.push(e);
-                }
-            }
-            "extension_declaration" => {
-                extract_extension(&child, source, file_path, parsed)?;
-            }
-            "extension_type_declaration" => {
-                // extension type Foo(...) implements Bar { ... }
-                if let Some(name) = get_field_text(&child, "name", source) {
-                    parsed.symbols.push(name.clone());
-                    parsed.structs.push(StructNode {
-                        name,
-                        visibility: Visibility::Public,
-                        generics: vec![],
-                        file_path: file_path.to_string(),
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        docstring: None,
-                        parent_class: None,
-                        interfaces: vec![],
-                    });
-                }
-            }
-            // Top-level function: function_signature followed by function_body sibling
-            "function_signature" => {
-                // Look ahead for function_body
-                let body_node = if i + 1 < child_count {
-                    root.child(i + 1).filter(|n| n.kind() == "function_body")
-                } else {
-                    None
-                };
+// ─── Core extraction ──────────────────────────────────────────────────────────
 
-                if let Some(func) =
-                    extract_function_from_signature(&child, body_node.as_ref(), source, file_path)
-                {
-                    let func_id = format!("{}:{}:{}", file_path, func.name, func.line_start);
-                    if let Some(ref body) = body_node {
-                        let calls = extract_calls_from_node(body, source, &func_id);
-                        parsed.function_calls.extend(calls);
-                    }
-                    parsed.symbols.push(func.name.clone());
-                    parsed.functions.push(func);
-                }
+/// Full regex-based extraction for Dart files.
+fn extract_all_regex(source: &str, file_path: &str, parsed: &mut ParsedFile) -> Result<()> {
+    // 1. Imports
+    extract_imports_regex(source, file_path, parsed);
 
-                // Skip the function_body we consumed
-                if body_node.is_some() {
+    // 2. Build line → byte offset mapping
+    let line_offsets = build_line_offsets(source);
+
+    // 3. Find all class/mixin/enum/extension declarations with their brace ranges
+    let class_ranges = extract_classes_regex(source, file_path, parsed, &line_offsets);
+    extract_mixins_regex(source, file_path, parsed, &line_offsets);
+    extract_enums_regex(source, file_path, parsed, &line_offsets);
+    extract_extensions_regex(source, file_path, parsed, &line_offsets);
+    extract_extension_types_regex(source, file_path, parsed, &line_offsets);
+
+    // 4. Extract functions — both top-level and inside class bodies
+    extract_functions_regex(source, file_path, parsed, &line_offsets, &class_ranges);
+
+    Ok(())
+}
+
+/// Build a map from line number (0-based) to byte offset in source.
+fn build_line_offsets(source: &str) -> Vec<usize> {
+    let mut offsets = vec![0];
+    for (i, ch) in source.char_indices() {
+        if ch == '\n' {
+            offsets.push(i + 1);
+        }
+    }
+    offsets
+}
+
+/// Convert byte offset to 1-based line number.
+fn offset_to_line(offset: usize, line_offsets: &[usize]) -> u32 {
+    match line_offsets.binary_search(&offset) {
+        Ok(i) => i as u32 + 1,
+        Err(i) => i as u32, // offset is in the middle of a line
+    }
+}
+
+/// Find the matching closing brace for an opening brace at `open_pos`.
+/// Handles nested braces, strings (single/double/triple quotes), and comments.
+fn find_matching_brace(source: &str, open_pos: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut depth = 0i32;
+    let mut i = open_pos;
+
+    while i < len {
+        match bytes[i] {
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            // Skip single-line comments
+            b'/' if i + 1 < len && bytes[i + 1] == b'/' => {
+                while i < len && bytes[i] != b'\n' {
                     i += 1;
                 }
             }
-            "library_import" => {
-                if let Some(import) = extract_import(&child, source, file_path) {
-                    parsed.imports.push(import);
+            // Skip block comments
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                i += 2;
+                let mut comment_depth = 1;
+                while i + 1 < len && comment_depth > 0 {
+                    if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                        comment_depth += 1;
+                        i += 2;
+                    } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        comment_depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            // Skip triple-quoted strings
+            b'\'' if i + 2 < len && bytes[i + 1] == b'\'' && bytes[i + 2] == b'\'' => {
+                i += 3;
+                while i + 2 < len {
+                    if bytes[i] == b'\'' && bytes[i + 1] == b'\'' && bytes[i + 2] == b'\'' {
+                        i += 3;
+                        break;
+                    }
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'"' if i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' => {
+                i += 3;
+                while i + 2 < len {
+                    if bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+                        i += 3;
+                        break;
+                    }
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            // Skip single-quoted strings
+            b'\'' => {
+                i += 1;
+                while i < len && bytes[i] != b'\'' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+            }
+            // Skip double-quoted strings
+            b'"' => {
+                i += 1;
+                while i < len && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
                 }
             }
             _ => {
-                // Recurse into unknown containers (e.g., conditional compilation)
-                if child.named_child_count() > 0 && child.kind() != "ERROR" {
-                    extract_toplevel(&child, source, file_path, parsed)?;
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+// ─── Class extraction ─────────────────────────────────────────────────────────
+
+/// Returns (start_offset, end_offset) pairs for each class body.
+fn extract_classes_regex(
+    source: &str,
+    file_path: &str,
+    parsed: &mut ParsedFile,
+    line_offsets: &[usize],
+) -> Vec<(usize, usize)> {
+    let mut class_ranges = Vec::new();
+
+    for cap in RE_CLASS.captures_iter(source) {
+        let full_match = cap.get(0).unwrap();
+        let name = cap[1].to_string();
+        let line_start = offset_to_line(full_match.start(), line_offsets);
+
+        // Find the opening brace
+        let brace_pos = full_match.end() - 1; // regex ends with {
+        let line_end = if let Some(close) = find_matching_brace(source, brace_pos) {
+            class_ranges.push((brace_pos, close));
+            offset_to_line(close, line_offsets)
+        } else {
+            line_start
+        };
+
+        let visibility = if name.starts_with('_') {
+            Visibility::Private
+        } else {
+            Visibility::Public
+        };
+
+        let parent_class = cap.get(2).map(|m| {
+            m.as_str()
+                .split('<')
+                .next()
+                .unwrap_or(m.as_str())
+                .trim()
+                .to_string()
+        });
+
+        let mut interfaces: Vec<String> = Vec::new();
+
+        // with clause → mixins
+        if let Some(m) = cap.get(3) {
+            for mixin_name in m.as_str().split(',') {
+                let clean = mixin_name
+                    .split('<')
+                    .next()
+                    .unwrap_or(mixin_name)
+                    .trim()
+                    .to_string();
+                if !clean.is_empty() {
+                    interfaces.push(clean);
                 }
             }
         }
 
-        i += 1;
-    }
-
-    Ok(())
-}
-
-/// Extract a function from a `function_signature` node (top-level or inside declaration)
-fn extract_function_from_signature(
-    sig: &tree_sitter::Node,
-    body: Option<&tree_sitter::Node>,
-    source: &str,
-    file_path: &str,
-) -> Option<FunctionNode> {
-    let name = get_field_text(sig, "name", source)?;
-    if name == "new" {
-        return None;
-    }
-
-    let visibility = if name.starts_with('_') {
-        Visibility::Private
-    } else {
-        Visibility::Public
-    };
-
-    let docstring = get_dart_doc(sig, source);
-
-    let params = sig
-        .child_by_field_name("parameters")
-        .filter(|p| p.kind() == "formal_parameter_list")
-        .map(|p| extract_dart_params(&p, source))
-        .unwrap_or_default();
-
-    let return_type = sig
-        .child_by_field_name("return_type")
-        .and_then(|r| get_text(&r, source))
-        .map(|s| s.to_string());
-
-    let line_end = body
-        .map(|b| b.end_position().row as u32 + 1)
-        .unwrap_or(sig.end_position().row as u32 + 1);
-
-    let is_async =
-        body.is_some_and(|b| get_text(b, source).is_some_and(|t| t.starts_with("async")));
-
-    let complexity = body.map(|b| calculate_complexity(b)).unwrap_or(1);
-
-    Some(FunctionNode {
-        name,
-        visibility,
-        params,
-        return_type,
-        generics: vec![],
-        is_async,
-        is_unsafe: false,
-        complexity,
-        file_path: file_path.to_string(),
-        line_start: sig.start_position().row as u32 + 1,
-        line_end,
-        docstring,
-    })
-}
-
-/// Extract a function from a class_member node.
-/// Structure: class_member → (method_signature | declaration) → function_signature + function_body
-fn extract_function_from_member(
-    node: &tree_sitter::Node,
-    source: &str,
-    file_path: &str,
-) -> Option<FunctionNode> {
-    // Find the signature (may be nested in method_signature or declaration)
-    let func_sig = find_function_signature(node)?;
-
-    let name = get_field_text(&func_sig, "name", source)?;
-    if name == "new" {
-        return None;
-    }
-
-    let visibility = if name.starts_with('_') {
-        Visibility::Private
-    } else {
-        Visibility::Public
-    };
-
-    let docstring = get_dart_doc(node, source);
-
-    let params = func_sig
-        .child_by_field_name("parameters")
-        .filter(|p| p.kind() == "formal_parameter_list")
-        .map(|p| extract_dart_params(&p, source))
-        .unwrap_or_default();
-
-    let return_type = func_sig
-        .child_by_field_name("return_type")
-        .and_then(|r| get_text(&r, source))
-        .map(|s| s.to_string());
-
-    // Check for async in function_body sibling
-    let is_async = find_child_by_kind(node, "function_body")
-        .and_then(|b| get_text(&b, source))
-        .is_some_and(|t| t.starts_with("async"));
-
-    let complexity = find_child_by_kind(node, "function_body")
-        .map(|b| calculate_complexity(&b))
-        .unwrap_or(1);
-
-    Some(FunctionNode {
-        name,
-        visibility,
-        params,
-        return_type,
-        generics: vec![],
-        is_async,
-        is_unsafe: false,
-        complexity,
-        file_path: file_path.to_string(),
-        line_start: node.start_position().row as u32 + 1,
-        line_end: node.end_position().row as u32 + 1,
-        docstring,
-    })
-}
-
-/// Find the function_signature node, which may be nested inside method_signature or declaration
-fn find_function_signature<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
-    // Direct function_signature child
-    if let Some(fs) = find_child_by_kind(node, "function_signature") {
-        return Some(fs);
-    }
-
-    // Inside a method_signature
-    if let Some(ms) = find_child_by_kind(node, "method_signature") {
-        if let Some(fs) = find_child_by_kind(&ms, "function_signature") {
-            return Some(fs);
+        // implements clause
+        if let Some(m) = cap.get(4) {
+            for iface_name in m.as_str().split(',') {
+                let clean = iface_name
+                    .split('<')
+                    .next()
+                    .unwrap_or(iface_name)
+                    .trim()
+                    .to_string();
+                if !clean.is_empty() {
+                    interfaces.push(clean);
+                }
+            }
         }
-        if let Some(gs) = find_child_by_kind(&ms, "getter_signature") {
-            return Some(gs);
-        }
-        if let Some(ss) = find_child_by_kind(&ms, "setter_signature") {
-            return Some(ss);
-        }
-    }
 
-    // Inside a declaration wrapper
-    if let Some(decl) = find_child_by_kind(node, "declaration") {
-        if let Some(fs) = find_child_by_kind(&decl, "function_signature") {
-            return Some(fs);
-        }
-    }
+        // Extract generics from the class name line
+        let generics = extract_generics_from_match(full_match.as_str());
 
-    None
-}
+        let docstring = extract_doc_comment(source, full_match.start(), line_offsets);
 
-fn extract_class(node: &tree_sitter::Node, source: &str, file_path: &str) -> Option<StructNode> {
-    let name = get_field_text(node, "name", source)?;
-    let visibility = if name.starts_with('_') {
-        Visibility::Private
-    } else {
-        Visibility::Public
-    };
-    let docstring = get_dart_doc(node, source);
-    let generics = node
-        .child_by_field_name("type_parameters")
-        .map(|tp| extract_dart_type_params(&tp, source))
-        .unwrap_or_default();
-
-    let parent_class = node
-        .child_by_field_name("superclass")
-        .and_then(|sc| sc.child_by_field_name("type"))
-        .and_then(|t| get_text(&t, source))
-        .map(|s| s.split('<').next().unwrap_or(s).trim().to_string());
-
-    let mut ifaces: Vec<String> = node
-        .child_by_field_name("interfaces")
-        .map(|i| extract_type_list(&i, source))
-        .unwrap_or_default();
-
-    let mixins_from_superclass: Vec<String> = node
-        .child_by_field_name("superclass")
-        .and_then(|sc| find_child_by_kind(&sc, "mixins"))
-        .map(|m| extract_type_list(&m, source))
-        .unwrap_or_default();
-
-    ifaces.extend(mixins_from_superclass);
-
-    Some(StructNode {
-        name,
-        visibility,
-        generics,
-        file_path: file_path.to_string(),
-        line_start: node.start_position().row as u32 + 1,
-        line_end: node.end_position().row as u32 + 1,
-        docstring,
-        parent_class,
-        interfaces: ifaces,
-    })
-}
-
-fn extract_mixin(node: &tree_sitter::Node, source: &str, file_path: &str) -> Option<TraitNode> {
-    let name = get_field_text(node, "name", source)?;
-    let visibility = if name.starts_with('_') {
-        Visibility::Private
-    } else {
-        Visibility::Public
-    };
-    let docstring = get_dart_doc(node, source);
-    let generics = node
-        .child_by_field_name("type_parameters")
-        .map(|tp| extract_dart_type_params(&tp, source))
-        .unwrap_or_default();
-
-    Some(TraitNode {
-        name,
-        visibility,
-        generics,
-        file_path: file_path.to_string(),
-        line_start: node.start_position().row as u32 + 1,
-        line_end: node.end_position().row as u32 + 1,
-        docstring,
-        is_external: false,
-        source: None,
-    })
-}
-
-fn extract_enum(node: &tree_sitter::Node, source: &str, file_path: &str) -> Option<EnumNode> {
-    let name = get_field_text(node, "name", source)?;
-    let visibility = if name.starts_with('_') {
-        Visibility::Private
-    } else {
-        Visibility::Public
-    };
-    let docstring = get_dart_doc(node, source);
-
-    let variants: Vec<String> = node
-        .child_by_field_name("body")
-        .map(|body| {
-            body.children(&mut body.walk())
-                .filter(|c| c.kind() == "enum_constant")
-                .filter_map(|v| {
-                    get_field_text(&v, "name", source).or_else(|| {
-                        find_child_by_kind(&v, "identifier")
-                            .and_then(|id| get_text(&id, source).map(|s| s.to_string()))
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Some(EnumNode {
-        name,
-        visibility,
-        variants,
-        file_path: file_path.to_string(),
-        line_start: node.start_position().row as u32 + 1,
-        line_end: node.end_position().row as u32 + 1,
-        docstring,
-    })
-}
-
-fn extract_extension(
-    node: &tree_sitter::Node,
-    source: &str,
-    file_path: &str,
-    parsed: &mut ParsedFile,
-) -> Result<()> {
-    let for_type = node
-        .child_by_field_name("class")
-        .and_then(|c| get_text(&c, source))
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-
-    if !for_type.is_empty() {
-        parsed.impl_blocks.push(ImplNode {
-            for_type,
-            trait_name: None,
-            generics: vec![],
-            where_clause: None,
+        parsed.symbols.push(name.clone());
+        parsed.structs.push(StructNode {
+            name,
+            visibility,
+            generics,
             file_path: file_path.to_string(),
-            line_start: node.start_position().row as u32 + 1,
-            line_end: node.end_position().row as u32 + 1,
+            line_start,
+            line_end,
+            docstring,
+            parent_class,
+            interfaces,
         });
     }
 
-    if let Some(body) = node.child_by_field_name("body") {
-        extract_class_body(&body, source, file_path, parsed)?;
-    }
-
-    Ok(())
+    class_ranges
 }
 
-/// Extract imports via regex since tree-sitter-dart parses them as ERROR nodes
-fn extract_imports_regex(source: &str, file_path: &str, parsed: &mut ParsedFile) {
+// ─── Mixin extraction ─────────────────────────────────────────────────────────
+
+fn extract_mixins_regex(
+    source: &str,
+    file_path: &str,
+    parsed: &mut ParsedFile,
+    line_offsets: &[usize],
+) {
+    for cap in RE_MIXIN.captures_iter(source) {
+        let full_match = cap.get(0).unwrap();
+        let name = cap[1].to_string();
+
+        // Skip if this was already captured as "mixin class" by RE_CLASS
+        if parsed.structs.iter().any(|s| s.name == name) {
+            continue;
+        }
+
+        let line_start = offset_to_line(full_match.start(), line_offsets);
+        let brace_pos = full_match.end() - 1;
+        let line_end = find_matching_brace(source, brace_pos)
+            .map(|close| offset_to_line(close, line_offsets))
+            .unwrap_or(line_start);
+
+        let visibility = if name.starts_with('_') {
+            Visibility::Private
+        } else {
+            Visibility::Public
+        };
+
+        let generics = extract_generics_from_match(full_match.as_str());
+        let docstring = extract_doc_comment(source, full_match.start(), line_offsets);
+
+        parsed.symbols.push(name.clone());
+        parsed.traits.push(TraitNode {
+            name,
+            visibility,
+            generics,
+            file_path: file_path.to_string(),
+            line_start,
+            line_end,
+            docstring,
+            is_external: false,
+            source: None,
+        });
+    }
+}
+
+// ─── Enum extraction ──────────────────────────────────────────────────────────
+
+fn extract_enums_regex(
+    source: &str,
+    file_path: &str,
+    parsed: &mut ParsedFile,
+    line_offsets: &[usize],
+) {
+    for cap in RE_ENUM.captures_iter(source) {
+        let full_match = cap.get(0).unwrap();
+        let name = cap[1].to_string();
+        let line_start = offset_to_line(full_match.start(), line_offsets);
+
+        let brace_pos = full_match.end() - 1;
+        let (line_end, variants) = if let Some(close) = find_matching_brace(source, brace_pos) {
+            let body = &source[brace_pos + 1..close];
+            let variants = extract_enum_variants(body);
+            (offset_to_line(close, line_offsets), variants)
+        } else {
+            (line_start, vec![])
+        };
+
+        let visibility = if name.starts_with('_') {
+            Visibility::Private
+        } else {
+            Visibility::Public
+        };
+
+        let docstring = extract_doc_comment(source, full_match.start(), line_offsets);
+
+        parsed.symbols.push(name.clone());
+        parsed.enums.push(EnumNode {
+            name,
+            visibility,
+            variants,
+            file_path: file_path.to_string(),
+            line_start,
+            line_end,
+            docstring,
+        });
+    }
+}
+
+/// Extract enum variant names from the body between braces.
+/// Handles both single-line `{ a, b, c }` and multi-line enums with methods.
+fn extract_enum_variants(body: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+
+    // Split by commas and semicolons to handle both simple and enhanced enums
+    for token in body.split([',', ';']) {
+        let trimmed = token.trim();
+        // Take first word (the variant name), ignoring arguments like `value(1)`
+        let name = trimmed
+            .split([' ', '(', '{', '\n'])
+            .next()
+            .unwrap_or("")
+            .trim();
+
+        if name.is_empty() || DART_KEYWORDS.contains(&name) {
+            continue;
+        }
+
+        // Variant names start with lowercase in Dart convention
+        // Skip method declarations (have return types before name)
+        if name.chars().next().is_some_and(|c| c.is_lowercase() || c == '_')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            variants.push(name.to_string());
+        }
+    }
+    variants
+}
+
+// ─── Extension extraction ─────────────────────────────────────────────────────
+
+fn extract_extensions_regex(
+    source: &str,
+    file_path: &str,
+    parsed: &mut ParsedFile,
+    line_offsets: &[usize],
+) {
+    for cap in RE_EXTENSION.captures_iter(source) {
+        let full_match = cap.get(0).unwrap();
+        let line_start = offset_to_line(full_match.start(), line_offsets);
+
+        let brace_pos = full_match.end() - 1;
+        let line_end = find_matching_brace(source, brace_pos)
+            .map(|close| offset_to_line(close, line_offsets))
+            .unwrap_or(line_start);
+
+        let for_type = cap
+            .get(2)
+            .map(|m| {
+                m.as_str()
+                    .split('<')
+                    .next()
+                    .unwrap_or(m.as_str())
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default();
+
+        if !for_type.is_empty() {
+            parsed.impl_blocks.push(ImplNode {
+                for_type,
+                trait_name: None,
+                generics: vec![],
+                where_clause: None,
+                file_path: file_path.to_string(),
+                line_start,
+                line_end,
+            });
+        }
+    }
+}
+
+// ─── Extension type extraction ────────────────────────────────────────────────
+
+fn extract_extension_types_regex(
+    source: &str,
+    file_path: &str,
+    parsed: &mut ParsedFile,
+    line_offsets: &[usize],
+) {
+    for cap in RE_EXTENSION_TYPE.captures_iter(source) {
+        let full_match = cap.get(0).unwrap();
+        let name = cap[1].to_string();
+        let line_start = offset_to_line(full_match.start(), line_offsets);
+
+        let brace_pos = full_match.end() - 1;
+        let line_end = find_matching_brace(source, brace_pos)
+            .map(|close| offset_to_line(close, line_offsets))
+            .unwrap_or(line_start);
+
+        let visibility = if name.starts_with('_') {
+            Visibility::Private
+        } else {
+            Visibility::Public
+        };
+
+        let interfaces: Vec<String> = cap
+            .get(2)
+            .map(|m| {
+                m.as_str()
+                    .split(',')
+                    .filter_map(|s| {
+                        let clean = s.split('<').next().unwrap_or(s).trim().to_string();
+                        if clean.is_empty() {
+                            None
+                        } else {
+                            Some(clean)
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        parsed.symbols.push(name.clone());
+        parsed.structs.push(StructNode {
+            name,
+            visibility,
+            generics: vec![],
+            file_path: file_path.to_string(),
+            line_start,
+            line_end,
+            docstring: None,
+            parent_class: None,
+            interfaces,
+        });
+    }
+}
+
+// ─── Function extraction ──────────────────────────────────────────────────────
+
+fn extract_functions_regex(
+    source: &str,
+    file_path: &str,
+    parsed: &mut ParsedFile,
+    line_offsets: &[usize],
+    class_ranges: &[(usize, usize)],
+) {
+    // Extract regular functions/methods
+    for cap in RE_FUNCTION.captures_iter(source) {
+        let full_match = cap.get(0).unwrap();
+        let name_match = cap.get(2).unwrap();
+        let name = name_match.as_str().to_string();
+
+        // Skip keywords, constructors (capitalized name matching class name), etc.
+        if DART_KEYWORDS.contains(&name.as_str()) {
+            continue;
+        }
+
+        // Skip constructors (ClassName(...) or ClassName.named(...))
+        if parsed.structs.iter().any(|s| s.name == name) {
+            continue;
+        }
+
+        let offset = full_match.start();
+        let line_start = offset_to_line(offset, line_offsets);
+
+        // Determine if inside a class body
+        let _in_class = class_ranges
+            .iter()
+            .any(|(start, end)| offset > *start && offset < *end);
+
+        // Find the function body end
+        let line_end = if full_match.as_str().ends_with('{') {
+            let brace_pos = full_match.end() - 1;
+            find_matching_brace(source, brace_pos)
+                .map(|close| offset_to_line(close, line_offsets))
+                .unwrap_or(line_start)
+        } else if full_match.as_str().ends_with("=>") {
+            // Arrow function — find the ; ending
+            let rest = &source[full_match.end()..];
+            rest.find(';')
+                .map(|pos| offset_to_line(full_match.end() + pos, line_offsets))
+                .unwrap_or(line_start)
+        } else {
+            // Abstract method ending with ;
+            line_start
+        };
+
+        let visibility = if name.starts_with('_') {
+            Visibility::Private
+        } else {
+            Visibility::Public
+        };
+
+        let return_type = cap
+            .get(1)
+            .map(|m| m.as_str().trim().to_string())
+            .filter(|s| !s.is_empty() && s != "@override");
+
+        let params_str = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+        let params = parse_param_string(params_str);
+
+        let is_async = full_match.as_str().contains("async");
+        let docstring = extract_doc_comment(source, offset, line_offsets);
+
+        // Estimate complexity from body
+        let complexity = if full_match.as_str().ends_with('{') {
+            let brace_pos = full_match.end() - 1;
+            find_matching_brace(source, brace_pos)
+                .map(|close| estimate_complexity(&source[brace_pos..=close]))
+                .unwrap_or(1)
+        } else {
+            1
+        };
+
+        parsed.symbols.push(name.clone());
+        parsed.functions.push(FunctionNode {
+            name,
+            visibility,
+            params,
+            return_type,
+            generics: vec![],
+            is_async,
+            is_unsafe: false,
+            complexity,
+            file_path: file_path.to_string(),
+            line_start,
+            line_end,
+            docstring,
+        });
+    }
+
+    // Extract getters
+    for cap in RE_GETTER.captures_iter(source) {
+        let full_match = cap.get(0).unwrap();
+        let name = cap[2].to_string();
+
+        // Skip if already found
+        if parsed.functions.iter().any(|f| f.name == name) {
+            continue;
+        }
+
+        let offset = full_match.start();
+        let line_start = offset_to_line(offset, line_offsets);
+        let line_end = if full_match.as_str().ends_with('{') {
+            let brace_pos = full_match.end() - 1;
+            find_matching_brace(source, brace_pos)
+                .map(|close| offset_to_line(close, line_offsets))
+                .unwrap_or(line_start)
+        } else {
+            line_start
+        };
+
+        let visibility = if name.starts_with('_') {
+            Visibility::Private
+        } else {
+            Visibility::Public
+        };
+
+        let return_type = cap.get(1).map(|m| m.as_str().trim().to_string());
+
+        parsed.symbols.push(name.clone());
+        parsed.functions.push(FunctionNode {
+            name,
+            visibility,
+            params: vec![],
+            return_type,
+            generics: vec![],
+            is_async: false,
+            is_unsafe: false,
+            complexity: 1,
+            file_path: file_path.to_string(),
+            line_start,
+            line_end,
+            docstring: None,
+        });
+    }
+
+    // Extract setters
+    for cap in RE_SETTER.captures_iter(source) {
+        let full_match = cap.get(0).unwrap();
+        let name = cap[1].to_string();
+
+        if parsed.functions.iter().any(|f| f.name == name) {
+            continue;
+        }
+
+        let offset = full_match.start();
+        let line_start = offset_to_line(offset, line_offsets);
+
+        let visibility = if name.starts_with('_') {
+            Visibility::Private
+        } else {
+            Visibility::Public
+        };
+
+        parsed.symbols.push(name.clone());
+        parsed.functions.push(FunctionNode {
+            name,
+            visibility,
+            params: vec![Parameter {
+                name: "value".to_string(),
+                type_name: None,
+            }],
+            return_type: Some("void".to_string()),
+            generics: vec![],
+            is_async: false,
+            is_unsafe: false,
+            complexity: 1,
+            file_path: file_path.to_string(),
+            line_start,
+            line_end: line_start,
+            docstring: None,
+        });
+    }
+}
+
+// ─── Import extraction ────────────────────────────────────────────────────────
+
+/// Extract imports via regex since tree-sitter-dart parses them as ERROR nodes.
+pub fn extract_imports_regex(source: &str, file_path: &str, parsed: &mut ParsedFile) {
     for (line_num, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if !trimmed.starts_with("import ") && !trimmed.starts_with("export ") {
@@ -457,164 +800,112 @@ fn extract_imports_regex(source: &str, file_path: &str, parsed: &mut ParsedFile)
     }
 }
 
-fn extract_import(node: &tree_sitter::Node, source: &str, file_path: &str) -> Option<ImportNode> {
-    let spec = find_child_by_kind(node, "import_specification")?;
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-    let uri = spec
-        .child_by_field_name("uri")
-        .and_then(|u| get_text(&u, source))
-        .map(|s| s.trim_matches('\'').trim_matches('"').to_string())?;
-
-    let alias = spec
-        .child_by_field_name("alias")
-        .and_then(|a| get_text(&a, source))
-        .map(|s| s.to_string());
-
-    let mut items = Vec::new();
-    for c in spec.children(&mut spec.walk()) {
-        if c.kind() == "combinator" {
-            for id in c.children(&mut c.walk()) {
-                if id.kind() == "identifier" {
-                    if let Some(s) = get_text(&id, source) {
-                        items.push(s.to_string());
-                    }
-                }
-            }
-        }
+/// Parse parameter string like "int a, String b, {required int c}" into Parameter list.
+fn parse_param_string(params_str: &str) -> Vec<Parameter> {
+    if params_str.trim().is_empty() {
+        return vec![];
     }
 
-    Some(ImportNode {
-        path: uri,
-        alias,
-        items,
-        file_path: file_path.to_string(),
-        line: node.start_position().row as u32 + 1,
-    })
-}
-
-fn extract_class_body(
-    body: &tree_sitter::Node,
-    source: &str,
-    file_path: &str,
-    parsed: &mut ParsedFile,
-) -> Result<()> {
-    for child in body.children(&mut body.walk()) {
-        if child.kind() == "class_member" {
-            if let Some(func) = extract_function_from_member(&child, source, file_path) {
-                let func_id = format!("{}:{}:{}", file_path, func.name, func.line_start);
-                let calls = extract_calls_from_node(&child, source, &func_id);
-                parsed.function_calls.extend(calls);
-                parsed.symbols.push(func.name.clone());
-                parsed.functions.push(func);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn extract_dart_params(node: &tree_sitter::Node, source: &str) -> Vec<Parameter> {
     let mut params = Vec::new();
+    // Simple split by comma — doesn't handle nested generics perfectly but good enough
+    for part in params_str.split(',') {
+        let part = part
+            .trim()
+            .trim_start_matches('{')
+            .trim_start_matches('[')
+            .trim_end_matches('}')
+            .trim_end_matches(']')
+            .trim_start_matches("required ")
+            .trim_start_matches("covariant ")
+            .trim();
 
-    fn collect_params(node: &tree_sitter::Node, source: &str, params: &mut Vec<Parameter>) {
-        for child in node.children(&mut node.walk()) {
-            match child.kind() {
-                "formal_parameter" => {
-                    let name = child
-                        .child_by_field_name("name")
-                        .and_then(|n| get_text(&n, source))
-                        .unwrap_or("_")
-                        .to_string();
+        if part.is_empty() {
+            continue;
+        }
 
-                    let type_name = child
-                        .children(&mut child.walk())
-                        .find(|c| {
-                            matches!(
-                                c.kind(),
-                                "type_identifier"
-                                    | "function_type"
-                                    | "void_type"
-                                    | "type_arguments"
-                            )
-                        })
-                        .and_then(|t| get_text(&t, source))
-                        .map(|s| s.to_string());
-
-                    params.push(Parameter { name, type_name });
-                }
-                "optional_formal_parameters" => {
-                    collect_params(&child, source, params);
-                }
-                _ => {}
+        // Split "Type name" or just "name"
+        let tokens: Vec<&str> = part.split_whitespace().collect();
+        match tokens.len() {
+            0 => {}
+            1 => {
+                params.push(Parameter {
+                    name: tokens[0].to_string(),
+                    type_name: None,
+                });
+            }
+            _ => {
+                // Last token is name, everything before is type
+                let name = tokens.last().unwrap().to_string();
+                let type_name = tokens[..tokens.len() - 1].join(" ");
+                params.push(Parameter {
+                    name,
+                    type_name: Some(type_name),
+                });
             }
         }
     }
-
-    collect_params(node, source, &mut params);
     params
 }
 
-fn extract_dart_type_params(node: &tree_sitter::Node, source: &str) -> Vec<String> {
-    let mut generics = Vec::new();
-    for child in node.children(&mut node.walk()) {
-        if child.kind() == "type_parameter" {
-            if let Some(text) = get_text(&child, source) {
-                generics.push(text.to_string());
-            }
+/// Extract generic type parameters from a match string like "class Foo<T, U> extends..."
+fn extract_generics_from_match(text: &str) -> Vec<String> {
+    if let Some(start) = text.find('<') {
+        if let Some(end) = text.find('>') {
+            return text[start + 1..end]
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
     }
-    generics
+    vec![]
 }
 
-fn extract_type_list(node: &tree_sitter::Node, source: &str) -> Vec<String> {
-    node.children(&mut node.walk())
-        .filter(|c| c.kind() == "type_identifier" || c.kind() == "type_arguments")
-        .filter_map(|c| {
-            get_text(&c, source).map(|s| s.split('<').next().unwrap_or(s).trim().to_string())
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
-}
+/// Extract doc comment (/// or /** */) immediately before a given offset.
+fn extract_doc_comment(source: &str, decl_offset: usize, line_offsets: &[usize]) -> Option<String> {
+    let decl_line = offset_to_line(decl_offset, line_offsets) as usize;
+    if decl_line <= 1 {
+        return None;
+    }
 
-/// Extract Dart doc comments (/// style)
-fn get_dart_doc(node: &tree_sitter::Node, source: &str) -> Option<String> {
-    let mut prev = node.prev_sibling();
+    let lines: Vec<&str> = source.lines().collect();
     let mut doc_lines = Vec::new();
+    let mut line_idx = decl_line - 2; // 0-based, line before declaration
 
-    while let Some(sibling) = prev {
-        match sibling.kind() {
-            "comment" => {
-                let text = get_text(&sibling, source)?;
-                if text.starts_with("///") {
-                    doc_lines.push(text.trim_start_matches('/').trim().to_string());
-                } else {
-                    break;
+    loop {
+        if line_idx >= lines.len() {
+            break;
+        }
+        let trimmed = lines[line_idx].trim();
+        if trimmed.starts_with("///") {
+            doc_lines.push(trimmed.trim_start_matches('/').trim().to_string());
+        } else if trimmed.starts_with("/**") || trimmed.starts_with("* ") || trimmed == "*/" {
+            // Part of block doc comment — simplified handling
+            if trimmed.starts_with("/**") {
+                let content = trimmed
+                    .trim_start_matches("/**")
+                    .trim_end_matches("*/")
+                    .trim();
+                if !content.is_empty() {
+                    doc_lines.push(content.to_string());
                 }
-            }
-            "documentation_comment" => {
-                let text = get_text(&sibling, source)?;
-                if text.starts_with("/**") {
-                    return Some(
-                        text.trim_start_matches("/**")
-                            .trim_end_matches("*/")
-                            .lines()
-                            .map(|l| l.trim().trim_start_matches('*').trim())
-                            .filter(|l| !l.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
-                }
-                doc_lines.push(
-                    text.lines()
-                        .map(|l| l.trim_start_matches('/').trim())
-                        .filter(|l| !l.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
                 break;
             }
-            _ => break,
+            if trimmed.starts_with("* ") {
+                doc_lines.push(trimmed.trim_start_matches("* ").to_string());
+            }
+        } else if trimmed.starts_with('@') {
+            // Skip annotations like @override, @deprecated — continue looking above
+        } else {
+            break;
         }
-        prev = sibling.prev_sibling();
+
+        if line_idx == 0 {
+            break;
+        }
+        line_idx -= 1;
     }
 
     if doc_lines.is_empty() {
@@ -623,4 +914,14 @@ fn get_dart_doc(node: &tree_sitter::Node, source: &str) -> Option<String> {
         doc_lines.reverse();
         Some(doc_lines.join("\n"))
     }
+}
+
+/// Estimate cyclomatic complexity from a function body string.
+fn estimate_complexity(body: &str) -> u32 {
+    let mut complexity = 1u32;
+    // Count branching keywords
+    for keyword in &["if ", "else ", "for ", "while ", "case ", "catch ", "?", "&&", "||"] {
+        complexity += body.matches(keyword).count() as u32;
+    }
+    complexity
 }

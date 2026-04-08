@@ -525,6 +525,8 @@ pub fn test_chat_session(project_slug: Option<&str>) -> ChatSessionNode {
         fork_depth: 0,
         fork_type: None,
         fork_status: None,
+        fork_intent: None,
+        archived: false,
         fork_context_snapshot: None,
     }
 }

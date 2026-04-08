@@ -32,6 +32,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         reasoning_tool(),
         episode_tool(),
         analysis_profile_tool(),
+        blueprint_tool(),
         admin_tool(),
         skill_tool(),
         protocol_tool(),
@@ -281,6 +282,19 @@ pub fn resolve_legacy_alias(name: &str) -> Option<(&'static str, &'static str)> 
         "create_topology_rule" => Some(("code", "create_topology_rule")),
         "delete_topology_rule" => Some(("code", "delete_topology_rule")),
         "check_file_topology" => Some(("code", "check_file_topology")),
+
+        // Blueprint
+        "list_blueprints" => Some(("blueprint", "list")),
+        "create_blueprint" => Some(("blueprint", "create")),
+        "get_blueprint" => Some(("blueprint", "get")),
+        "update_blueprint" => Some(("blueprint", "update")),
+        "delete_blueprint" => Some(("blueprint", "delete")),
+        "add_blueprint_relation" => Some(("blueprint", "add_relation")),
+        "remove_blueprint_relation" => Some(("blueprint", "remove_relation")),
+        "get_blueprint_relations" => Some(("blueprint", "get_relations")),
+        "link_blueprint_to_project" => Some(("blueprint", "link_to_project")),
+        "unlink_blueprint_from_project" => Some(("blueprint", "unlink_from_project")),
+        "get_project_blueprints" => Some(("blueprint", "get_project_blueprints")),
 
         // Analysis Profile
         "list_analysis_profiles" => Some(("analysis_profile", "list")),
@@ -957,6 +971,49 @@ fn reasoning_tool() -> ToolDefinition {
     }
 }
 
+fn blueprint_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "blueprint".to_string(),
+        description: "Manage reusable pattern blueprints. Actions: list, create, get, update, delete, add_relation, remove_relation, get_relations, link_to_project, unlink_from_project, get_project_blueprints".to_string(),
+        input_schema: InputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "create", "get", "update", "delete", "add_relation", "remove_relation", "get_relations", "link_to_project", "unlink_from_project", "get_project_blueprints"],
+                    "description": "Operation to perform"
+                },
+                "id": {"type": "string", "description": "Blueprint UUID (update/delete)"},
+                "slug": {"type": "string", "description": "Blueprint slug (get/get_relations/link_to_project/unlink_from_project/add_relation/remove_relation)"},
+                "name": {"type": "string", "description": "Blueprint name (create/update)"},
+                "description": {"type": "string", "description": "One-line description / TL;DR (create/update)"},
+                "scope": {"type": "string", "enum": ["scaffolding", "feature", "pattern", "process"], "description": "Blueprint scope (create/update/list filter)"},
+                "category": {"type": "string", "enum": ["project_setup", "ci_cd", "architecture", "workflow", "patterns", "testing"], "description": "Blueprint category (create/update/list filter)"},
+                "difficulty": {"type": "string", "enum": ["beginner", "intermediate", "advanced"], "description": "Difficulty level (create/update)"},
+                "estimated_time": {"type": "string", "description": "Estimated time e.g. '45 min' (create/update)"},
+                "stack": {"type": "array", "items": {"type": "string"}, "description": "Technology stack tags e.g. ['flutter', 'dart'] (create/update/list filter)"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Freeform tags (create/update)"},
+                "status": {"type": "string", "enum": ["draft", "active", "archived"], "description": "Blueprint status (update/list filter)"},
+                "tier": {"type": "integer", "enum": [1, 2, 3], "description": "Content tier to return: 1=catalog (~30 tok), 2=summary (~200 tok), 3=full (~800 tok). Default 3 (get)"},
+                "tier1_content": {"type": "string", "description": "Tier 1 content — one-line catalog entry (create/update)"},
+                "tier2_content": {"type": "string", "description": "Tier 2 content — TL;DR + gotchas + checklist (create/update)"},
+                "tier3_content": {"type": "string", "description": "Tier 3 content — full markdown with code examples (create/update)"},
+                "source_file": {"type": "string", "description": "Source markdown file path (create/update)"},
+                "content_hash": {"type": "string", "description": "SHA-256 hash of source content for change detection (create/update)"},
+                "from_slug": {"type": "string", "description": "Source blueprint slug (add_relation/remove_relation)"},
+                "to_slug": {"type": "string", "description": "Target blueprint slug (add_relation/remove_relation)"},
+                "relation_type": {"type": "string", "enum": ["depends_on", "pairs_with"], "description": "Relation type (add_relation/remove_relation)"},
+                "project_id": {"type": "string", "description": "Project UUID (link_to_project/unlink_from_project/get_project_blueprints)"},
+                "relevance": {"type": "number", "description": "Relevance score 0.0-1.0 for project link (link_to_project, default 1.0)"},
+                "search": {"type": "string", "description": "Full-text search query (list)"},
+                "limit": {"type": "integer", "description": "Max results (list, default 50)"},
+                "offset": {"type": "integer", "description": "Pagination offset (list, default 0)"}
+            })),
+            required: Some(vec!["action".to_string()]),
+        },
+    }
+}
+
 fn analysis_profile_tool() -> ToolDefinition {
     ToolDefinition {
         name: "analysis_profile".to_string(),
@@ -1449,8 +1506,8 @@ mod tests {
         let tools = all_tools();
         assert_eq!(
             tools.len(),
-            30,
-            "Expected 30 mega-tools, got {}",
+            31,
+            "Expected 31 mega-tools, got {}",
             tools.len()
         );
     }

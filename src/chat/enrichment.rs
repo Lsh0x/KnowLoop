@@ -155,6 +155,30 @@ pub struct EnrichmentInput {
     /// When Some, StatusInjectionStage records traversed reasoning tree paths
     /// so they can be reinforced on session close.
     pub reasoning_path_tracker: Option<crate::chat::feedback::ReasoningPathTracker>,
+    /// Cached persona from the session — sticky across messages.
+    /// Contains (persona_id, persona_name, description, subgraph, best_weight).
+    /// When present, PersonaStage reuses this instead of re-detecting from scratch.
+    /// Updated when a higher-weight match is found in the current message.
+    pub cached_persona: Option<CachedPersona>,
+}
+
+/// Cached persona state for session-level stickiness.
+///
+/// Stored in `ActiveSession` and propagated to `EnrichmentInput` on each message.
+/// The persona persists across messages; only replaced when a strictly better
+/// match (higher weight) is found.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedPersona {
+    /// Persona UUID.
+    pub persona_id: Uuid,
+    /// Persona display name.
+    pub persona_name: String,
+    /// Persona description.
+    pub description: String,
+    /// Full knowledge subgraph (files, functions, notes, decisions, skills).
+    pub subgraph: crate::neo4j::models::PersonaSubgraph,
+    /// Best weight seen at activation time — used to decide whether to replace.
+    pub weight: f64,
 }
 
 /// Mutable context that accumulates enrichment data across stages.
@@ -210,6 +234,8 @@ pub enum EnrichmentSource {
     UserProfile,
     /// MCP Federation stage (external tool availability).
     McpFederation,
+    /// Fork context stage (sibling summaries, active forks, parent scope).
+    ForkContext,
     /// Fallback for stages without a specific source type.
     #[default]
     Other,
@@ -304,6 +330,7 @@ impl EnrichmentContext {
                 | EnrichmentSource::Biomimicry
                 | EnrichmentSource::UserProfile
                 | EnrichmentSource::McpFederation
+                | EnrichmentSource::ForkContext
                 | EnrichmentSource::Other => PromptSection::Enrichment(section.content.clone()),
             })
             .collect()
@@ -651,6 +678,7 @@ mod tests {
             protocol_state: None,
             excluded_note_ids: Default::default(),
             reasoning_path_tracker: None,
+            cached_persona: None,
         }
     }
 
