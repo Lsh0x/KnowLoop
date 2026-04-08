@@ -1752,6 +1752,24 @@ fn protected_routes() -> Router<OrchestratorState> {
         // ================================================================
         .route("/api/stt/status", get(stt_handlers::stt_status))
         .route("/api/stt/transcribe", post(stt_handlers::stt_transcribe))
+        .route(
+            "/api/stt/dictionaries",
+            get(stt_handlers::stt_list_dictionaries),
+        )
+        .route(
+            "/api/stt/dictionary/:slug",
+            get(stt_handlers::stt_get_dictionary)
+                .put(stt_handlers::stt_save_dictionary)
+                .delete(stt_handlers::stt_delete_dictionary),
+        )
+        .route(
+            "/api/stt/dictionary/:slug/rules",
+            post(stt_handlers::stt_upsert_rule).delete(stt_handlers::stt_remove_rule),
+        )
+        .route(
+            "/api/stt/dictionary/:slug/auto-generate",
+            post(stt_handlers::stt_auto_generate_dictionary),
+        )
         // ================================================================
         // MCP Federation (external MCP server connections)
         // ================================================================

@@ -13,6 +13,8 @@
 
 pub mod client;
 pub mod config;
+pub mod dictionary;
 
 pub use client::MurmureClient;
 pub use config::SttConfig;
+pub use dictionary::DictionaryManager;

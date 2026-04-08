@@ -23,3 +23,6 @@ Thumbs.db
 tarpaulin-report.json
 
 .fastembed_cache/
+
+# Murmure model (large, downloaded via setup-murmure.sh)
+/resources/parakeet-tdt-0.6b-v3-int8/

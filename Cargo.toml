@@ -159,6 +159,9 @@ async-nats = "0.39"
 tonic = "0.12"
 prost = "0.13"
 
+# TOML parsing (STT dictionary cc-rules)
+toml = "0.8"
+
 # Base64 encoding (audio data in STT handlers)
 base64 = "0.22"
 
