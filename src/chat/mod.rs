@@ -20,6 +20,7 @@ pub mod path_detect;
 pub(crate) mod post_stream;
 pub(crate) mod post_tool_hook;
 pub mod prompt;
+pub mod prompt_compiler;
 pub mod prompt_sections;
 pub mod routing;
 pub(crate) mod skill_hook;

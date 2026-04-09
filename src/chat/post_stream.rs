@@ -96,6 +96,7 @@ pub(crate) struct PostStreamHandler {
     pub search: Arc<dyn SearchStore>,
     pub auto_continue: Arc<AtomicBool>,
     pub work_log: Arc<Mutex<super::types::SessionWorkLog>>,
+    pub prompt_compiler: Option<Arc<super::prompt_compiler::PromptCompiler>>,
 }
 
 impl PostStreamHandler {
@@ -609,6 +610,34 @@ impl PostStreamHandler {
                 }
             }
         }
+    }
+
+    // ── Prompt Compiler feedback ───────────────────────────────────────────
+
+    /// Detect feedback signals and send to the prompt compiler daemon.
+    ///
+    /// Analyzes the assistant response for clarification patterns and
+    /// compares with previous user input for reformulation detection.
+    pub async fn handle_compiler_feedback(
+        &self,
+        user_prompt: &str,
+        assistant_text_parts: &[String],
+    ) {
+        let Some(ref compiler) = self.prompt_compiler else {
+            return;
+        };
+        let Some(ref project_slug) = self.ctx.project_slug else {
+            return;
+        };
+
+        let assistant_text = assistant_text_parts.join("");
+        if assistant_text.is_empty() {
+            return;
+        }
+
+        compiler
+            .detect_and_send_feedback(user_prompt, &assistant_text, project_slug, &self.session_id)
+            .await;
     }
 
     // ── Auto-close for Job forks (RFC: Subchat Lifecycle Intelligence) ───
@@ -1263,6 +1292,7 @@ mod integration_tests {
             search: Arc::new(MockSearchStore::new()),
             auto_continue: Arc::new(AtomicBool::new(false)),
             work_log: Arc::new(Mutex::new(crate::chat::types::SessionWorkLog::default())),
+            prompt_compiler: None,
         }
     }
 
