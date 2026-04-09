@@ -70,6 +70,7 @@ mod tests {
             default_note_energy: None,
             scaffolding_override: None,
             sharing_policy: None,
+            last_sync_sha: None,
         };
         graph.projects.write().await.insert(project_id, project);
         (project_id, slug)

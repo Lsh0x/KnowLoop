@@ -153,6 +153,7 @@ pub async fn create_project(
         default_note_energy: None,
         scaffolding_override: None,
         sharing_policy: None,
+        last_sync_sha: None,
     };
 
     state.orchestrator.create_project(&project).await?;

@@ -37,6 +37,10 @@ pub struct ProjectNode {
     /// Serialized as JSON string in Neo4j. None = sharing disabled (opt-in default).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sharing_policy: Option<crate::episodes::distill_models::SharingPolicy>,
+    /// Git HEAD SHA at last successful sync. Used for incremental sync via
+    /// `git diff --name-only <last_sync_sha>..HEAD` to avoid re-scanning all files.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_sync_sha: Option<String>,
 }
 
 // ============================================================================

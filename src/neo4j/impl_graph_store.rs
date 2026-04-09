@@ -54,6 +54,10 @@ impl GraphStore for Neo4jClient {
         self.update_project_analytics_timestamp(id).await
     }
 
+    async fn update_project_sync_sha(&self, id: Uuid, sha: &str) -> anyhow::Result<()> {
+        self.update_project_sync_sha(id, sha).await
+    }
+
     async fn delete_project(&self, id: Uuid, project_name: &str) -> anyhow::Result<()> {
         self.delete_project(id, project_name).await
     }

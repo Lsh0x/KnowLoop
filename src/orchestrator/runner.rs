@@ -1522,6 +1522,100 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
     }
 
     // ========================================================================
+    // Git-based incremental sync helpers
+    // ========================================================================
+
+    /// Get the current HEAD SHA for a git repository.
+    pub fn git_head_sha(root_path: &Path) -> Result<String> {
+        use std::process::Command;
+
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "git rev-parse HEAD failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Get the list of changed files between two git SHAs.
+    ///
+    /// Returns `(changed_files, deleted_files)` as sets of absolute paths.
+    /// Uses `git diff --name-status` to distinguish modifications from deletions.
+    /// If `last_sha` is not a valid ancestor (e.g. after rebase/force-push),
+    /// falls back to a full scan by returning `Err`.
+    pub fn git_diff_files(
+        root_path: &Path,
+        last_sha: &str,
+    ) -> Result<GitDiffResult> {
+        use std::process::Command;
+
+        // First verify last_sha is a valid commit (protects against dangling refs)
+        let verify = Command::new("git")
+            .args(["cat-file", "-t", last_sha])
+            .current_dir(root_path)
+            .output()?;
+
+        if !verify.status.success()
+            || String::from_utf8_lossy(&verify.stdout).trim() != "commit"
+        {
+            return Err(anyhow::anyhow!(
+                "last_sync_sha {} is not a valid commit — falling back to full scan",
+                last_sha
+            ));
+        }
+
+        let output = Command::new("git")
+            .args(["diff", "--name-status", &format!("{}..HEAD", last_sha)])
+            .current_dir(root_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "git diff failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let root_str = root_path.to_string_lossy();
+        let mut changed = HashSet::new();
+        let mut deleted = HashSet::new();
+
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Format: "M\tpath" or "D\tpath" or "A\tpath" or "R100\told\tnew"
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+
+            let status = parts[0];
+            let rel_path = parts.last().unwrap(); // For renames, use the new path
+            let abs_path = format!("{}/{}", root_str, rel_path);
+
+            if status.starts_with('D') {
+                deleted.insert(abs_path);
+            } else {
+                // A (added), M (modified), R (renamed), C (copied), T (type change)
+                changed.insert(abs_path);
+            }
+        }
+
+        Ok(GitDiffResult { changed, deleted })
+    }
+
+    // ========================================================================
     // Sync operations
     // ========================================================================
 
@@ -1552,16 +1646,71 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
         let project_slug = project_slug.map(|s| s.to_string());
         let mut result = SyncResult::default();
 
+        // ── Git-based incremental: determine which files changed ───
+        // If the project has a last_sync_sha, use `git diff` to get only
+        // changed files instead of reading + hashing every file on disk.
+        let git_diff = if !force {
+            if let Some(pid) = project_id {
+                match self.state.neo4j.get_project(pid).await {
+                    Ok(Some(project)) => {
+                        if let Some(ref last_sha) = project.last_sync_sha {
+                            match Self::git_diff_files(dir_path, last_sha) {
+                                Ok(diff) => {
+                                    tracing::info!(
+                                        "git incremental: {} changed, {} deleted (since {})",
+                                        diff.changed.len(),
+                                        diff.deleted.len(),
+                                        &last_sha[..8],
+                                    );
+                                    Some(diff)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "git diff failed, falling back to full scan: {}",
+                                        e
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None // First sync — no last_sync_sha yet
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None // force mode — always full scan
+        };
+
         // ── Phase 1: Scan ──────────────────────────────────────────
-        let entries = scan_files(dir_path);
+        let all_entries = scan_files(dir_path);
 
         // Track all scanned paths for stale-file cleanup
-        let synced_paths: HashSet<String> = entries.iter().map(|e| e.path.clone()).collect();
+        let synced_paths: HashSet<String> = all_entries.iter().map(|e| e.path.clone()).collect();
+
+        // Filter entries to only changed files when git diff is available
+        let entries = if let Some(ref diff) = git_diff {
+            let changed_set = &diff.changed;
+            all_entries
+                .into_iter()
+                .filter(|e| changed_set.contains(&e.path))
+                .collect::<Vec<_>>()
+        } else {
+            all_entries
+        };
+
+        let scan_total = synced_paths.len();
+        let entries_to_read = entries.len();
 
         // ── Phase 2: Read ───────────────────────────────────────────
         let file_contents = read_files(entries).await;
 
         // ── Hash check: skip unchanged files ───────────────────────
+        // When using git diff, this is a double-check (should match almost all).
+        // When doing full scan, this is the primary dedup mechanism.
         let mut to_parse = Vec::with_capacity(file_contents.len());
         for fc in file_contents {
             if !force {
@@ -1594,6 +1743,7 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
         import_ctx.load_go_module_path(dir_path.to_str().unwrap_or(""));
         import_ctx.load_composer_psr4(dir_path.to_str().unwrap_or(""));
         import_ctx.load_cmake_include_paths(dir_path.to_str().unwrap_or(""));
+        import_ctx.load_pubspec_yaml(dir_path.to_str().unwrap_or(""));
 
         import_ctx.log_stats();
 
@@ -1634,11 +1784,12 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
         }
 
         tracing::info!(
-            "sync pipeline: scanned {} → read {} → parsed {} → stored {}",
-            synced_paths.len(),
-            synced_paths.len(),
+            "sync pipeline: scanned {} → read {} → parsed {} → stored {} (git incremental: {})",
+            scan_total,
+            entries_to_read,
             parse_count,
             result.files_synced,
+            git_diff.is_some(),
         );
 
         // ── Cleanup: remove stale files ────────────────────────────
@@ -1669,6 +1820,24 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
                 }
                 Err(e) => {
                     tracing::warn!("Failed to clean up stale files: {}", e);
+                }
+            }
+        }
+
+        // ── Store git HEAD SHA for next incremental sync ───────────
+        if let Some(pid) = project_id {
+            match Self::git_head_sha(dir_path) {
+                Ok(head_sha) => {
+                    if let Err(e) = self.state.neo4j.update_project_sync_sha(pid, &head_sha).await
+                    {
+                        tracing::warn!("Failed to store last_sync_sha: {}", e);
+                    } else {
+                        tracing::debug!("Stored last_sync_sha: {}", &head_sha[..8.min(head_sha.len())]);
+                    }
+                }
+                Err(e) => {
+                    // Not a git repo or git not available — skip silently
+                    tracing::debug!("Could not get git HEAD SHA (not a git repo?): {}", e);
                 }
             }
         }
@@ -3054,6 +3223,12 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
                         parsed_path,
                         &ctx.suffix_index,
                     ),
+                    "dart" => Self::resolve_dart_import_indexed(
+                        &import.path,
+                        parsed_path,
+                        ctx.dart_package_name.as_deref(),
+                        &ctx.suffix_index,
+                    ),
                     _ => Vec::new(),
                 };
 
@@ -4048,6 +4223,99 @@ Respond with ONLY a JSON array, no markdown fences, no explanation:
         }
 
         None
+    }
+
+    // ========================================================================
+    // Dart import resolution
+    // ========================================================================
+
+    /// Resolve Dart imports using SuffixIndex + pubspec.yaml package name.
+    ///
+    /// Handles 4 import flavors:
+    /// - `package:<name>/path.dart` → `{root}/lib/path.dart` (own package)
+    /// - `../relative/path.dart`    → resolved relative to source file
+    /// - `dart:core`, `dart:async`  → skip (stdlib)
+    /// - `package:<other>/...`      → skip (external dependency)
+    fn resolve_dart_import_indexed(
+        import_path: &str,
+        source_file: &str,
+        dart_package_name: Option<&str>,
+        index: &crate::resolver::SuffixIndex,
+    ) -> Vec<String> {
+        // 1. Skip dart: stdlib imports
+        if import_path.starts_with("dart:") {
+            return Vec::new();
+        }
+
+        // 2. Handle package: imports
+        if let Some(after_package) = import_path.strip_prefix("package:") {
+            // Split into package name and path: "budget/core/foo.dart" → ("budget", "core/foo.dart")
+            let (pkg_name, pkg_path) = match after_package.split_once('/') {
+                Some((name, path)) => (name, path),
+                None => return Vec::new(), // malformed
+            };
+
+            // Only resolve own-package imports
+            match dart_package_name {
+                Some(own_name) if pkg_name == own_name => {
+                    // package:budget/core/foo.dart → lib/core/foo.dart
+                    let suffix = format!("lib/{}", pkg_path);
+                    if let Some(resolved) = index.get(&suffix) {
+                        return vec![resolved.to_string()];
+                    }
+                    // Fallback: try without lib/ prefix (some projects have non-standard layouts)
+                    if let Some(resolved) = index.get(pkg_path) {
+                        return vec![resolved.to_string()];
+                    }
+                }
+                _ => {
+                    // External package — skip (not in our project)
+                    return Vec::new();
+                }
+            }
+
+            return Vec::new();
+        }
+
+        // 3. Handle relative imports (../foo.dart, ./foo.dart, foo.dart)
+        let source_dir = source_file
+            .rsplit_once('/')
+            .map(|(dir, _)| dir)
+            .unwrap_or("");
+
+        // Resolve relative path
+        let resolved = if import_path.starts_with("../") || import_path.starts_with("./") {
+            // Use path normalization
+            let mut segments: Vec<&str> = source_dir.split('/').collect();
+            for part in import_path.split('/') {
+                match part {
+                    ".." => {
+                        segments.pop();
+                    }
+                    "." => {} // current dir, skip
+                    _ => segments.push(part),
+                }
+            }
+            segments.join("/")
+        } else {
+            // Plain filename like 'foo.dart' → same directory
+            format!("{}/{}", source_dir, import_path)
+        };
+
+        // Try exact path via suffix index
+        // Extract the suffix part (the relative portion that SuffixIndex would match)
+        if let Some(resolved) = index.get(&resolved) {
+            return vec![resolved.to_string()];
+        }
+
+        // Try just the filename portion as a suffix lookup
+        if let Some(filename) = import_path.rsplit('/').next() {
+            if let Some(resolved) = index.get(filename) {
+                return vec![resolved.to_string()];
+            }
+        }
+
+        Vec::new()
     }
 
     // ========================================================================
@@ -5143,6 +5411,15 @@ pub struct BackfillResult {
     pub commits_backfilled: u64,
     pub touches_created: u64,
     pub elapsed_ms: u64,
+}
+
+/// Result of `git diff --name-status` between two SHAs.
+#[derive(Debug, Default)]
+pub struct GitDiffResult {
+    /// Files that were added, modified, renamed, or copied (need re-sync).
+    pub changed: HashSet<String>,
+    /// Files that were deleted (need cleanup in Neo4j).
+    pub deleted: HashSet<String>,
 }
 
 /// A commit with its touched files (parsed from git log)
@@ -8318,6 +8595,178 @@ mod tests {
             ctx.suffix_index.get("handlers.rs"),
             Some("src/api/handlers.rs")
         );
+    }
+
+    // =========================================================================
+    // Dart import resolution tests
+    // =========================================================================
+
+    #[test]
+    fn test_dart_resolve_package_own() {
+        // package:budget/core/database.dart → lib/core/database.dart
+        let paths = vec![
+            "/project/lib/core/database.dart".to_string(),
+            "/project/lib/main.dart".to_string(),
+            "/project/lib/models/user.dart".to_string(),
+        ];
+        let index = crate::resolver::SuffixIndex::build(&paths);
+
+        let result = Orchestrator::resolve_dart_import_indexed(
+            "package:budget/core/database.dart",
+            "/project/lib/main.dart",
+            Some("budget"),
+            &index,
+        );
+        assert_eq!(result, vec!["/project/lib/core/database.dart"]);
+    }
+
+    #[test]
+    fn test_dart_resolve_package_external_skipped() {
+        // package:flutter/material.dart → skip (external)
+        let paths = vec!["/project/lib/main.dart".to_string()];
+        let index = crate::resolver::SuffixIndex::build(&paths);
+
+        let result = Orchestrator::resolve_dart_import_indexed(
+            "package:flutter/material.dart",
+            "/project/lib/main.dart",
+            Some("budget"),
+            &index,
+        );
+        assert!(result.is_empty(), "External packages should resolve to nothing");
+    }
+
+    #[test]
+    fn test_dart_resolve_dart_stdlib_skipped() {
+        // dart:async → skip
+        let paths = vec!["/project/lib/main.dart".to_string()];
+        let index = crate::resolver::SuffixIndex::build(&paths);
+
+        let result = Orchestrator::resolve_dart_import_indexed(
+            "dart:async",
+            "/project/lib/main.dart",
+            Some("budget"),
+            &index,
+        );
+        assert!(result.is_empty(), "dart: stdlib imports should be skipped");
+    }
+
+    #[test]
+    fn test_dart_resolve_relative_import() {
+        // ../models/user.dart from lib/features/home.dart → lib/models/user.dart
+        let paths = vec![
+            "/project/lib/features/home.dart".to_string(),
+            "/project/lib/models/user.dart".to_string(),
+        ];
+        let index = crate::resolver::SuffixIndex::build(&paths);
+
+        let result = Orchestrator::resolve_dart_import_indexed(
+            "../models/user.dart",
+            "/project/lib/features/home.dart",
+            Some("budget"),
+            &index,
+        );
+        assert_eq!(result, vec!["/project/lib/models/user.dart"]);
+    }
+
+    #[test]
+    fn test_dart_resolve_same_dir_relative() {
+        // ./utils.dart from lib/core/database.dart → lib/core/utils.dart
+        let paths = vec![
+            "/project/lib/core/database.dart".to_string(),
+            "/project/lib/core/utils.dart".to_string(),
+        ];
+        let index = crate::resolver::SuffixIndex::build(&paths);
+
+        let result = Orchestrator::resolve_dart_import_indexed(
+            "./utils.dart",
+            "/project/lib/core/database.dart",
+            Some("budget"),
+            &index,
+        );
+        assert_eq!(result, vec!["/project/lib/core/utils.dart"]);
+    }
+
+    #[test]
+    fn test_dart_resolve_no_package_name() {
+        // When dart_package_name is None, package: imports can't be resolved
+        let paths = vec!["/project/lib/core/database.dart".to_string()];
+        let index = crate::resolver::SuffixIndex::build(&paths);
+
+        let result = Orchestrator::resolve_dart_import_indexed(
+            "package:budget/core/database.dart",
+            "/project/lib/main.dart",
+            None,
+            &index,
+        );
+        assert!(result.is_empty(), "Without package name, package: imports can't resolve");
+    }
+
+    #[test]
+    fn test_dart_resolve_part_file() {
+        // 'user.g.dart' (plain import, same dir) from lib/models/user.dart
+        let paths = vec![
+            "/project/lib/models/user.dart".to_string(),
+            "/project/lib/models/user.g.dart".to_string(),
+        ];
+        let index = crate::resolver::SuffixIndex::build(&paths);
+
+        let result = Orchestrator::resolve_dart_import_indexed(
+            "user.g.dart",
+            "/project/lib/models/user.dart",
+            Some("budget"),
+            &index,
+        );
+        assert_eq!(result, vec!["/project/lib/models/user.g.dart"]);
+    }
+
+    // =========================================================================
+    // Git-based incremental sync tests
+    // =========================================================================
+
+    #[test]
+    fn test_git_head_sha_returns_40_char_hex() {
+        // This test runs in the KnowLoop repo itself
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sha = Orchestrator::git_head_sha(root).unwrap();
+        assert_eq!(sha.len(), 40, "SHA should be 40 hex chars, got: {}", sha);
+        assert!(
+            sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "SHA should be hex only, got: {}",
+            sha
+        );
+    }
+
+    #[test]
+    fn test_git_head_sha_fails_on_non_git_dir() {
+        let result = Orchestrator::git_head_sha(std::path::Path::new("/tmp"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_git_diff_files_invalid_sha() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let result = Orchestrator::git_diff_files(root, "0000000000000000000000000000000000000000");
+        assert!(result.is_err(), "Should fail for non-existent sha");
+    }
+
+    #[test]
+    fn test_git_diff_files_same_sha_returns_empty() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let head = Orchestrator::git_head_sha(root).unwrap();
+        let diff = Orchestrator::git_diff_files(root, &head).unwrap();
+        assert!(
+            diff.changed.is_empty(),
+            "HEAD..HEAD should have no changes, got: {:?}",
+            diff.changed
+        );
+        assert!(diff.deleted.is_empty());
+    }
+
+    #[test]
+    fn test_git_diff_result_default() {
+        let diff = GitDiffResult::default();
+        assert!(diff.changed.is_empty());
+        assert!(diff.deleted.is_empty());
     }
 
     // =========================================================================
