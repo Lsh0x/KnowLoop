@@ -51,6 +51,7 @@ pub(crate) async fn drain_pending_messages(
     retry_config: super::config::RetryConfig,
     enrichment_pipeline: Arc<super::enrichment::EnrichmentPipeline>,
     search: Arc<dyn SearchStore>,
+    prompt_compiler: Option<Arc<super::prompt_compiler::PromptCompiler>>,
 ) {
     // Pop the next message from the queue
     let next_message = {
@@ -157,6 +158,7 @@ pub(crate) async fn drain_pending_messages(
             retry_config,
             enrichment_pipeline,
             search,
+            prompt_compiler,
         ))
         .await;
     } else if has_pending {

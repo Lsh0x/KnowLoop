@@ -208,6 +208,9 @@ pub struct ChatManager {
     /// MCP Federation registry for external server connections.
     /// The McpFederationStage injects tool availability into prompts when servers are connected.
     pub(crate) mcp_registry: crate::mcp_federation::registry::SharedRegistry,
+    /// Prompt Compiler daemon — refines user prompts before sending to the agent.
+    /// None when the compiler failed to start (graceful degradation — prompts pass through).
+    pub(crate) prompt_compiler: Option<Arc<super::prompt_compiler::PromptCompiler>>,
 }
 
 // ============================================================================
@@ -570,6 +573,7 @@ impl ChatManager {
             dual_track_router: Arc::new(std::sync::RwLock::new(None)),
             nn_router: None,
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            prompt_compiler: None,
         }
     }
 
@@ -625,6 +629,7 @@ impl ChatManager {
             dual_track_router: Arc::new(std::sync::RwLock::new(None)),
             nn_router: None,
             mcp_registry: crate::mcp_federation::registry::new_shared_registry(),
+            prompt_compiler: None,
         }
     }
 
@@ -722,6 +727,18 @@ impl ChatManager {
         self.nn_router = Some(router);
         self.neural_routing_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// Attach the Prompt Compiler daemon.
+    ///
+    /// When set, user prompts are refined by a Haiku subprocess before being sent
+    /// to the main Claude agent. When None, prompts pass through unchanged.
+    pub fn with_prompt_compiler(
+        mut self,
+        compiler: Arc<super::prompt_compiler::PromptCompiler>,
+    ) -> Self {
+        self.prompt_compiler = Some(compiler);
         self
     }
 
@@ -1235,6 +1252,7 @@ impl ChatManager {
         let retry_config = self.config.retry.clone();
         let enrichment_pipeline = self.enrichment_pipeline.clone();
         let search = self.search.clone();
+        let prompt_compiler = self.prompt_compiler.clone();
 
         tokio::spawn(async move {
             let mut subscriber = match nats.subscribe_rpc_send(&session_id).await {
@@ -1501,6 +1519,7 @@ impl ChatManager {
                             let retry_config_clone = retry_config.clone();
                             let enrichment_pipeline_clone = enrichment_pipeline.clone();
                             let search_clone = search.clone();
+                            let prompt_compiler_clone = prompt_compiler.clone();
 
                             tokio::spawn(async move {
                                 Self::stream_response(
@@ -1525,6 +1544,7 @@ impl ChatManager {
                                     retry_config_clone,
                                     enrichment_pipeline_clone,
                                     search_clone,
+                                    prompt_compiler_clone,
                                 )
                                 .await;
                             });
@@ -2750,6 +2770,7 @@ impl ChatManager {
         let retry_config = self.config.retry.clone();
         let enrichment_pipeline = self.enrichment_pipeline.clone();
         let search = self.search.clone();
+        let prompt_compiler = self.prompt_compiler.clone();
 
         tokio::spawn(async move {
             Self::stream_response(
@@ -2774,6 +2795,7 @@ impl ChatManager {
                 retry_config,
                 enrichment_pipeline,
                 search,
+                prompt_compiler,
             )
             .await;
         });
@@ -2810,6 +2832,7 @@ impl ChatManager {
         retry_config: super::config::RetryConfig,
         enrichment_pipeline: Arc<super::enrichment::EnrichmentPipeline>,
         search: Arc<dyn crate::meilisearch::SearchStore>,
+        prompt_compiler: Option<Arc<super::prompt_compiler::PromptCompiler>>,
     ) {
         // Helper closure: emit a ChatEvent to local broadcast + NATS (if configured)
         let emit_chat = |event: ChatEvent,
@@ -2969,6 +2992,65 @@ impl ChatManager {
             } else {
                 prompt
             }
+        };
+
+        // ===== PROMPT COMPILER =====
+        // Refine the enriched prompt via the Haiku daemon before sending to the agent.
+        // The compiler improves intent clarity without changing the user's meaning.
+        // On timeout, contention, or error → the original prompt passes through unchanged.
+        let original_user_prompt = prompt.clone(); // Save for post-stream feedback
+        let prompt = if let Some(ref compiler) = prompt_compiler {
+            // Load session metadata for RefineContext
+            let session_uuid_for_compiler = Uuid::parse_str(&session_id).ok();
+            let refine_ctx = if let Some(uuid) = session_uuid_for_compiler {
+                match graph.get_chat_session(uuid).await {
+                    Ok(Some(node)) => {
+                        // Read persona from active session cache
+                        let persona_name = {
+                            let sessions = active_sessions.read().await;
+                            if let Some(s) = sessions.get(&uuid.to_string()) {
+                                s.persona_cache
+                                    .lock()
+                                    .await
+                                    .as_ref()
+                                    .map(|p| p.persona_name.clone())
+                            } else {
+                                None
+                            }
+                        };
+
+                        Some(super::prompt_compiler::RefineContext {
+                            project_slug: node.project_slug.clone().unwrap_or_default(),
+                            session_id: session_id.clone(),
+                            primary_language: "unknown".to_string(), // TODO: resolve from project sync metadata
+                            conversation_type: node
+                                .fork_intent
+                                .clone()
+                                .unwrap_or_else(|| "general".to_string()),
+                            persona: persona_name,
+                            parent_session: None, // TODO: resolve from SPAWNED_BY edge if needed
+                            is_tool_continuation: false, // stream_response is only called for user messages
+                            fork_type: node.fork_type.clone(),
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            if let Some(ctx) = refine_ctx {
+                if super::prompt_compiler::PromptCompiler::should_compile(&prompt, &ctx) {
+                    compiler.refine(&prompt, &ctx).await
+                } else {
+                    debug!("[prompt_compiler] Bypassed (should_compile=false)");
+                    prompt
+                }
+            } else {
+                prompt
+            }
+        } else {
+            prompt
         };
 
         // Events are persisted in Neo4j — the WebSocket replay handles late-joining clients.
@@ -3749,6 +3831,7 @@ impl ChatManager {
             search: search.clone(),
             auto_continue: auto_continue.clone(),
             work_log: work_log.clone(),
+            prompt_compiler: prompt_compiler.clone(),
         };
 
         // 1. Post-compaction context re-injection
@@ -3788,7 +3871,12 @@ impl ChatManager {
             .handle_feedback(&assistant_text_parts, &memory_manager, &context_injector)
             .await;
 
-        // 7b. Auto-close Job forks if agent signaled completion
+        // 7b. Prompt Compiler feedback (reformulation / clarification / success detection)
+        post_handler
+            .handle_compiler_feedback(&original_user_prompt, &assistant_text_parts)
+            .await;
+
+        // 7c. Auto-close Job forks if agent signaled completion
         post_handler
             .handle_job_auto_close(&assistant_text_parts)
             .await;
@@ -3817,6 +3905,7 @@ impl ChatManager {
             retry_config,
             enrichment_pipeline,
             search,
+            prompt_compiler,
         )
         .await;
     }
@@ -4018,6 +4107,7 @@ impl ChatManager {
         let retry_config = self.config.retry.clone();
         let enrichment_pipeline = self.enrichment_pipeline.clone();
         let search = self.search.clone();
+        let prompt_compiler = self.prompt_compiler.clone();
 
         tokio::spawn(async move {
             Self::stream_response(
@@ -4042,6 +4132,7 @@ impl ChatManager {
                 retry_config,
                 enrichment_pipeline,
                 search,
+                prompt_compiler,
             )
             .await;
         });
@@ -4788,6 +4879,7 @@ impl ChatManager {
         let retry_config = self.config.retry.clone();
         let enrichment_pipeline = self.enrichment_pipeline.clone();
         let search = self.search.clone();
+        let prompt_compiler = self.prompt_compiler.clone();
 
         tokio::spawn(async move {
             Self::stream_response(
@@ -4812,6 +4904,7 @@ impl ChatManager {
                 retry_config,
                 enrichment_pipeline,
                 search,
+                prompt_compiler,
             )
             .await;
         });
