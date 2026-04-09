@@ -527,6 +527,13 @@ impl GraphStore for MockGraphStore {
         Ok(())
     }
 
+    async fn update_project_sync_sha(&self, id: Uuid, sha: &str) -> Result<()> {
+        if let Some(p) = self.projects.write().await.get_mut(&id) {
+            p.last_sync_sha = Some(sha.to_string());
+        }
+        Ok(())
+    }
+
     async fn update_project_analytics_timestamp(&self, id: Uuid) -> Result<()> {
         if let Some(p) = self.projects.write().await.get_mut(&id) {
             p.analytics_computed_at = Some(Utc::now());

@@ -345,6 +345,7 @@ pub fn test_project() -> ProjectNode {
         default_note_energy: None,
         scaffolding_override: None,
         sharing_policy: None,
+        last_sync_sha: None,
     }
 }
 
@@ -363,6 +364,7 @@ pub fn test_project_named(name: &str) -> ProjectNode {
         default_note_energy: None,
         scaffolding_override: None,
         sharing_policy: None,
+        last_sync_sha: None,
     }
 }
 

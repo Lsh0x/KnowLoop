@@ -173,6 +173,21 @@ impl Neo4jClient {
         Ok(())
     }
 
+    /// Update project last_sync_sha (git HEAD at time of sync)
+    pub async fn update_project_sync_sha(&self, id: Uuid, sha: &str) -> Result<()> {
+        let q = query(
+            r#"
+            MATCH (p:Project {id: $id})
+            SET p.last_sync_sha = $sha
+            "#,
+        )
+        .param("id", id.to_string())
+        .param("sha", sha);
+
+        self.graph.run(q).await?;
+        Ok(())
+    }
+
     /// Update project last_co_change_computed_at timestamp
     pub async fn update_project_co_change_timestamp(&self, id: Uuid) -> Result<()> {
         let q = query(
@@ -402,6 +417,7 @@ impl Neo4jClient {
                 .get::<String>("sharing_policy")
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok()),
+            last_sync_sha: node.get::<String>("last_sync_sha").ok(),
         })
     }
 

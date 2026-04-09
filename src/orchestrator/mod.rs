@@ -43,6 +43,10 @@ pub const IGNORED_PATH_SEGMENTS: &[&str] = &[
     "/.gradle/",
     "/.swiftpm/",
     "/xcuserdata/",
+    // Dart / Flutter
+    "/.dart_tool/",
+    "/.pub-cache/",
+    ".pub-cache/hosted/",
     // IDE settings
     "/.idea/",
     "/.vscode/",

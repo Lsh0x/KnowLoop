@@ -1258,6 +1258,7 @@ mod tests {
             default_note_energy: None,
             scaffolding_override: None,
             sharing_policy: None,
+            last_sync_sha: None,
         };
         store.create_project(&project).await.unwrap();
 

@@ -36,6 +36,10 @@ pub struct ImportResolutionContext {
     pub c_include_paths: Vec<String>,
     /// Whether CMake include paths have been loaded (distinguishes empty result from not-yet-loaded)
     pub cmake_loaded: bool,
+    /// Dart package name from pubspec.yaml (e.g. "budget"), lazy-loaded
+    pub dart_package_name: Option<String>,
+    /// Whether pubspec.yaml has been loaded (distinguishes empty result from not-yet-loaded)
+    pub dart_loaded: bool,
 }
 
 impl ImportResolutionContext {
@@ -53,6 +57,8 @@ impl ImportResolutionContext {
             psr4_loaded: false,
             c_include_paths: Vec::new(),
             cmake_loaded: false,
+            dart_package_name: None,
+            dart_loaded: false,
         }
     }
 
@@ -77,6 +83,18 @@ impl ImportResolutionContext {
         }
         self.psr4_loaded = true;
         self.psr4_mappings = parse_composer_psr4(project_root);
+    }
+
+    /// Load Dart package name from pubspec.yaml.
+    ///
+    /// Parses `pubspec.yaml` in the project root and extracts
+    /// the `name:` field used for `package:` import resolution.
+    pub fn load_pubspec_yaml(&mut self, project_root: &str) {
+        if self.dart_loaded {
+            return; // Already loaded
+        }
+        self.dart_loaded = true;
+        self.dart_package_name = parse_pubspec_yaml_name(project_root);
     }
 
     /// Load C/C++ include paths from CMakeLists.txt (best-effort).
@@ -181,6 +199,37 @@ pub fn parse_composer_psr4(project_root: &str) -> std::collections::HashMap<Stri
     }
 
     mappings
+}
+
+/// Parse `pubspec.yaml` to extract the Dart package name.
+///
+/// Looks for a top-level `name:` field and returns it.
+/// Returns `None` if pubspec.yaml doesn't exist or the name line is missing.
+///
+/// Uses simple line parsing (no YAML crate dependency) — the `name:` field
+/// is always a simple scalar at the top level of pubspec.yaml.
+pub fn parse_pubspec_yaml_name(project_root: &str) -> Option<String> {
+    let pubspec_path = std::path::Path::new(project_root).join("pubspec.yaml");
+    let content = std::fs::read_to_string(&pubspec_path).ok()?;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Must be a top-level key (no leading whitespace in the original line)
+        if line.starts_with("name:") || line.starts_with("name :") {
+            let value = trimmed
+                .strip_prefix("name")?
+                .trim_start()
+                .strip_prefix(':')?
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+
+    None
 }
 
 /// Parse `CMakeLists.txt` to extract include directories (best-effort).
@@ -387,5 +436,65 @@ mod tests {
         let result = parse_cmake_include_paths(dir.path().to_str().unwrap());
         assert!(result.contains(&"include/".to_string()));
         assert!(result.contains(&"src/internal/".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pubspec_yaml_name_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pubspec.yaml"),
+            "name: budget\ndescription: A budget app\nversion: 1.0.0\n",
+        )
+        .unwrap();
+
+        let result = parse_pubspec_yaml_name(dir.path().to_str().unwrap());
+        assert_eq!(result, Some("budget".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pubspec_yaml_name_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = parse_pubspec_yaml_name(dir.path().to_str().unwrap());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_pubspec_yaml_name_quoted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pubspec.yaml"),
+            "name: 'my_app'\nversion: 2.0.0\n",
+        )
+        .unwrap();
+
+        let result = parse_pubspec_yaml_name(dir.path().to_str().unwrap());
+        assert_eq!(result, Some("my_app".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pubspec_yaml_name_not_top_level() {
+        let dir = tempfile::tempdir().unwrap();
+        // Indented "name:" should NOT be matched (it's a nested key)
+        std::fs::write(
+            dir.path().join("pubspec.yaml"),
+            "dependencies:\n  name: flutter\nname: tipitaka\n",
+        )
+        .unwrap();
+
+        let result = parse_pubspec_yaml_name(dir.path().to_str().unwrap());
+        assert_eq!(result, Some("tipitaka".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pubspec_yaml_name_with_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pubspec.yaml"),
+            "# This is a Flutter project\nname: dart_stats\n\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\n",
+        )
+        .unwrap();
+
+        let result = parse_pubspec_yaml_name(dir.path().to_str().unwrap());
+        assert_eq!(result, Some("dart_stats".to_string()));
     }
 }
