@@ -24,6 +24,7 @@ pub mod rfc_handlers;
 pub mod routes;
 pub mod sharing_handlers;
 pub mod skill_handlers;
+pub mod stt_handlers;
 pub mod trajectory_handlers;
 pub mod trigger_handlers;
 pub mod workspace_handlers;

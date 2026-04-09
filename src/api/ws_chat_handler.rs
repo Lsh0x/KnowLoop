@@ -25,6 +25,10 @@ use std::collections::HashSet;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 
+fn default_audio_format() -> String {
+    "webm".to_string()
+}
+
 /// Query parameters for the chat WebSocket
 #[derive(Debug, Deserialize, Default)]
 pub struct WsChatQuery {
@@ -62,6 +66,20 @@ pub enum WsChatClientMessage {
     SetModel { model: String },
     /// Toggle auto-continue for the active session
     SetAutoContinue { enabled: bool },
+    // ── STT (Speech-to-Text) via Murmure sidecar ──
+    /// Start audio streaming for transcription
+    AudioStart {
+        #[serde(default = "default_audio_format")]
+        format: String,
+        #[serde(default)]
+        sample_rate: Option<u32>,
+    },
+    /// Send an audio chunk (base64-encoded)
+    AudioChunk { data: String },
+    /// Stop recording and request final transcription
+    AudioStop,
+    /// Cancel recording without transcription
+    AudioCancel,
 }
 
 /// WebSocket upgrade handler for `/ws/chat/{session_id}`
@@ -533,6 +551,15 @@ async fn handle_ws_chat_loop(
     // If a user clicks Allow/Deny twice, the second response is silently ignored.
     let mut responded_permission_ids: HashSet<String> = HashSet::new();
 
+    // ── STT state ──
+    // gRPC sender for active audio stream (None when not recording)
+    let mut stt_grpc_tx: Option<
+        tokio::sync::mpsc::Sender<crate::stt::client::proto::TranscribeStreamRequest>,
+    > = None;
+    // stt_audio_format and stt_sample_rate stored for future use (e.g. format negotiation)
+    // Channel to forward Murmure gRPC responses back to the WS sender
+    let (stt_ws_tx, mut stt_ws_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(32);
+
     // ========================================================================
     // Phase 3: Event loop — forward broadcast events + handle client messages
     // ========================================================================
@@ -691,6 +718,16 @@ async fn handle_ws_chat_loop(
                         // NATS subscriber closed
                         debug!(session_id = %session_id, "NATS chat subscriber closed");
                         nats_chat_sub = None;
+                    }
+                }
+            }
+
+            // Forward STT (Murmure) responses to the WebSocket client
+            stt_event = stt_ws_rx.recv() => {
+                if let Some(event) = stt_event {
+                    if ws_sender.send(Message::Text(event.to_string().into())).await.is_err() {
+                        debug!("WebSocket send failed (STT event), client disconnected");
+                        break;
                     }
                 }
             }
@@ -998,6 +1035,135 @@ async fn handle_ws_chat_loop(
                                                 let _ = ws_sender.send(Message::Text(err.to_string().into())).await;
                                             }
                                         }
+                                    }
+
+                                    // ── STT Audio Messages ──
+                                    WsChatClientMessage::AudioStart { format, sample_rate } => {
+                                        debug!(session_id = %session_id, format = %format, "WS: Audio start");
+
+                                        // Check Murmure availability
+                                        let client = match &state.murmure_client {
+                                            Some(c) if c.is_available().await => c.clone(),
+                                            _ => {
+                                                let err = serde_json::json!({
+                                                    "type": "stt_error",
+                                                    "message": "STT service unavailable (Murmure sidecar not connected)",
+                                                });
+                                                let _ = ws_sender.send(Message::Text(err.to_string().into())).await;
+                                                continue;
+                                            }
+                                        };
+
+                                        // Open a gRPC streaming session
+                                        match client.transcribe_stream().await {
+                                            Ok((grpc_tx, mut grpc_rx)) => {
+                                                // Store the sender for subsequent audio_chunk messages
+                                                stt_grpc_tx = Some(grpc_tx);
+                                                let _ = (format, sample_rate); // stored for future format negotiation
+
+                                                // Spawn a task to forward Murmure responses → WebSocket
+                                                let ws_stt_tx = stt_ws_tx.clone();
+                                                let sid = session_id.clone();
+                                                tokio::spawn(async move {
+                                                    use crate::stt::client::proto::transcribe_stream_response::ResponseType;
+                                                    while let Some(resp) = tokio_stream::StreamExt::next(&mut grpc_rx).await {
+                                                        match resp {
+                                                            Ok(r) => {
+                                                                let event = match r.response_type {
+                                                                    Some(ResponseType::PartialText(text)) => {
+                                                                        serde_json::json!({
+                                                                            "type": "stt_partial",
+                                                                            "text": text,
+                                                                        })
+                                                                    }
+                                                                    Some(ResponseType::FinalText(text)) => {
+                                                                        serde_json::json!({
+                                                                            "type": "stt_final",
+                                                                            "text": text,
+                                                                        })
+                                                                    }
+                                                                    Some(ResponseType::Error(msg)) => {
+                                                                        serde_json::json!({
+                                                                            "type": "stt_error",
+                                                                            "message": msg,
+                                                                        })
+                                                                    }
+                                                                    None => continue,
+                                                                };
+                                                                if ws_stt_tx.send(event).await.is_err() {
+                                                                    debug!(session_id = %sid, "STT response channel closed");
+                                                                    break;
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(session_id = %sid, error = %e, "gRPC stream error");
+                                                                let _ = ws_stt_tx.send(serde_json::json!({
+                                                                    "type": "stt_error",
+                                                                    "message": format!("Transcription stream error: {}", e),
+                                                                })).await;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                });
+
+                                                // Confirm to client
+                                                let status = serde_json::json!({
+                                                    "type": "stt_status",
+                                                    "available": true,
+                                                    "streaming": true,
+                                                });
+                                                let _ = ws_sender.send(Message::Text(status.to_string().into())).await;
+                                            }
+                                            Err(e) => {
+                                                warn!(session_id = %session_id, error = %e, "Failed to open Murmure stream");
+                                                let err = serde_json::json!({
+                                                    "type": "stt_error",
+                                                    "message": format!("Failed to start transcription: {}", e),
+                                                });
+                                                let _ = ws_sender.send(Message::Text(err.to_string().into())).await;
+                                            }
+                                        }
+                                    }
+
+                                    WsChatClientMessage::AudioChunk { data } => {
+                                        if let Some(ref grpc_tx) = stt_grpc_tx {
+                                            // Decode base64 audio chunk
+                                            use base64::Engine;
+                                            match base64::engine::general_purpose::STANDARD.decode(&data) {
+                                                Ok(audio_bytes) => {
+                                                    let req = crate::stt::MurmureClient::make_audio_chunk(audio_bytes);
+                                                    if grpc_tx.send(req).await.is_err() {
+                                                        warn!(session_id = %session_id, "gRPC stream sender closed");
+                                                        stt_grpc_tx = None;
+                                                        let err = serde_json::json!({
+                                                            "type": "stt_error",
+                                                            "message": "Transcription stream closed unexpectedly",
+                                                        });
+                                                        let _ = ws_sender.send(Message::Text(err.to_string().into())).await;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!(session_id = %session_id, error = %e, "Invalid base64 audio chunk");
+                                                }
+                                            }
+                                        }
+                                        // Silently ignore if no active stream (no audio_start was sent)
+                                    }
+
+                                    WsChatClientMessage::AudioStop => {
+                                        debug!(session_id = %session_id, "WS: Audio stop");
+                                        if let Some(grpc_tx) = stt_grpc_tx.take() {
+                                            // Send end-of-stream to Murmure
+                                            let _ = grpc_tx.send(crate::stt::MurmureClient::make_end_of_stream()).await;
+                                            // Channel will be dropped, the spawn task handles final_text
+                                        }
+                                    }
+
+                                    WsChatClientMessage::AudioCancel => {
+                                        debug!(session_id = %session_id, "WS: Audio cancel");
+                                        // Drop the gRPC sender — this closes the stream without requesting final text
+                                        stt_grpc_tx = None;
                                     }
                                 }
                             }

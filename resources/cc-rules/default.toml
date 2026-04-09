@@ -1,0 +1,17 @@
+# Murmure cc-rules — Default dictionary
+# These corrections apply to all projects unless overridden.
+#
+# Format: "misheard phrase" = "correct text"
+# Murmure applies these post-transcription as text replacements.
+
+[corrections]
+"no loop" = "KnowLoop"
+"know loop" = "KnowLoop"
+"mur mure" = "Murmure"
+"murmur" = "Murmure"
+"neo for j" = "Neo4j"
+"neo for jay" = "Neo4j"
+"G R P C" = "gRPC"
+"web socket" = "WebSocket"
+"type script" = "TypeScript"
+"java script" = "JavaScript"
